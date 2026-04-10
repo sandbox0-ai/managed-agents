@@ -2,7 +2,7 @@ package managedagents
 
 import "testing"
 
-func TestMatchesPathUsesClaudePrefix(t *testing.T) {
+func TestMatchesPathUsesManagedAgentRootPaths(t *testing.T) {
 	paths := []string{
 		"/v1/sessions",
 		"/v1/agents",
@@ -18,7 +18,7 @@ func TestMatchesPathUsesClaudePrefix(t *testing.T) {
 	}
 }
 
-func TestInternalSandboxWebhookURLIncludesClaudePrefix(t *testing.T) {
+func TestInternalSandboxWebhookURLUsesManagedAgentWebhookPath(t *testing.T) {
 	got := InternalSandboxWebhookURL("https://gw.example.com/")
 	want := "https://gw.example.com/internal/managed-agents/runtime/webhooks"
 	if got != want {
