@@ -11,6 +11,24 @@ export function runtimeEnvForEngine(engine) {
   };
 }
 
+export function runtimeModelForSession(session) {
+  const engineModel = session?.engine?.model;
+  if (typeof engineModel === 'string' && engineModel.trim() !== '') {
+    return engineModel;
+  }
+  if (engineModel && typeof engineModel === 'object' && typeof engineModel.id === 'string' && engineModel.id.trim() !== '') {
+    return engineModel.id;
+  }
+  const agentModel = session?.agent?.model;
+  if (typeof agentModel === 'string' && agentModel.trim() !== '') {
+    return agentModel;
+  }
+  if (agentModel && typeof agentModel === 'object' && typeof agentModel.id === 'string' && agentModel.id.trim() !== '') {
+    return agentModel.id;
+  }
+  return undefined;
+}
+
 export function querySkillNames(session) {
   if (!Array.isArray(session?.skill_names)) {
     return undefined;
@@ -182,7 +200,7 @@ export class ClaudeRuntime {
     );
     return {
       cwd: session.working_directory,
-      model: engine.model,
+      model: runtimeModelForSession(session),
       permissionMode: engine.permission_mode ?? 'default',
       allowDangerouslySkipPermissions: false,
       systemPrompt: typeof session.agent?.system === 'string' ? session.agent.system : undefined,

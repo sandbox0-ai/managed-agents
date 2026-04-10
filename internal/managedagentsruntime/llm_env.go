@@ -14,26 +14,47 @@ type managedLLMCredential struct {
 	BaseURL      string
 }
 
-func applyManagedLLMEnv(vendor string, engine map[string]any, credentials []gatewaymanagedagents.StoredCredential) (map[string]any, error) {
+const (
+	managedAnthropicDefaultBaseURL = "https://api.anthropic.com"
+	managedAnthropicFakeAPIKey     = "managed-agent-sandbox0-fake-key"
+	managedAnthropicFakeAuthToken  = "managed-agent-sandbox0-fake-token"
+)
+
+func applyManagedLLMEnv(vendor string, engine map[string]any, credentials []gatewaymanagedagents.StoredCredential) (map[string]any, *managedLLMCredential, error) {
 	out := cloneMap(engine)
 	if normalizeManagedRuntimeMetadataValue(vendor) != gatewaymanagedagents.ManagedAgentCredentialVendorClaude {
-		return out, nil
-	}
-	env := cloneMap(mapValue(out["env"]))
-	if strings.TrimSpace(stringValue(env["ANTHROPIC_API_KEY"])) != "" {
-		out["env"] = env
-		return out, nil
+		return out, nil, nil
 	}
 	credential, err := selectManagedLLMCredential(vendor, credentials)
 	if err != nil || credential == nil {
-		return out, err
+		return out, credential, err
 	}
-	env["ANTHROPIC_API_KEY"] = credential.Token
-	if strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"])) == "" && strings.TrimSpace(credential.BaseURL) != "" {
-		env["ANTHROPIC_BASE_URL"] = credential.BaseURL
+	env := cloneMap(mapValue(out["env"]))
+	resolvedBaseURL := resolvedManagedLLMBaseURL(vendor, credential)
+	if existingBaseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"])); existingBaseURL != "" {
+		canonicalExisting, err := canonicalManagedRuntimeURL(existingBaseURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("engine ANTHROPIC_BASE_URL is invalid: %w", err)
+		}
+		canonicalResolved, err := canonicalManagedRuntimeURL(resolvedBaseURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		if canonicalExisting != canonicalResolved {
+			return nil, nil, fmt.Errorf("managed-agent llm credential %s base URL %q conflicts with engine ANTHROPIC_BASE_URL %q", credential.CredentialID, resolvedBaseURL, existingBaseURL)
+		}
 	}
+	env["ANTHROPIC_API_KEY"] = managedAnthropicFakeAPIKey
+	env["ANTHROPIC_AUTH_TOKEN"] = managedAnthropicFakeAuthToken
+	env["ANTHROPIC_BASE_URL"] = resolvedBaseURL
 	out["env"] = env
-	return out, nil
+	extraArgs := cloneMap(mapValue(out["extra_args"]))
+	// Claude Code only honors env-based Anthropic auth reliably in bare mode.
+	extraArgs["bare"] = nil
+	out["extra_args"] = extraArgs
+	credentialCopy := *credential
+	credentialCopy.BaseURL = resolvedBaseURL
+	return out, &credentialCopy, nil
 }
 
 func selectManagedLLMCredential(vendor string, credentials []gatewaymanagedagents.StoredCredential) (*managedLLMCredential, error) {
@@ -84,10 +105,11 @@ func managedLLMCredentialFromVault(vendor string, credential gatewaymanagedagent
 		baseURL = strings.TrimSpace(stringValue(credential.Secret["mcp_server_url"]))
 	}
 	if baseURL != "" {
-		parsedURL, err := url.Parse(baseURL)
-		if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
+		canonicalBaseURL, err := canonicalManagedRuntimeURL(baseURL)
+		if err != nil {
 			return nil, fmt.Errorf("vault credential %s has invalid managed-agent llm base URL", credential.Snapshot.ID)
 		}
+		baseURL = canonicalBaseURL
 	}
 	return &managedLLMCredential{
 		CredentialID: credential.Snapshot.ID,
@@ -117,4 +139,27 @@ func managedLLMTokenFromCredential(credential gatewaymanagedagents.StoredCredent
 	default:
 		return "", fmt.Errorf("vault credential %s has unsupported auth type %q for managed-agent llm projection", credential.Snapshot.ID, credential.Snapshot.Auth.Type)
 	}
+}
+
+func resolvedManagedLLMBaseURL(vendor string, credential *managedLLMCredential) string {
+	if credential != nil && strings.TrimSpace(credential.BaseURL) != "" {
+		return strings.TrimSpace(credential.BaseURL)
+	}
+	if normalizeManagedRuntimeMetadataValue(vendor) == gatewaymanagedagents.ManagedAgentCredentialVendorClaude {
+		return managedAnthropicDefaultBaseURL
+	}
+	return ""
+}
+
+func canonicalManagedRuntimeURL(raw string) (string, error) {
+	parsedURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
+		return "", fmt.Errorf("invalid URL %q", raw)
+	}
+	parsedURL.Scheme = strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
+	parsedURL.Host = strings.ToLower(strings.TrimSpace(parsedURL.Host))
+	if parsedURL.Path == "/" {
+		parsedURL.Path = ""
+	}
+	return strings.TrimRight(parsedURL.String(), "/"), nil
 }

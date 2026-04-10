@@ -59,6 +59,9 @@ export function createServer({
         const session = {
           ...(current ?? {}),
           session_id: body.session_id,
+          sandbox_id: body.sandbox_id ?? current?.sandbox_id ?? null,
+          callback_url: body.callback_url ?? current?.callback_url ?? null,
+          control_token: body.control_token ?? current?.control_token ?? null,
           working_directory: body.working_directory ?? current?.working_directory ?? process.cwd(),
           agent: body.agent ?? current?.agent ?? null,
           environment_id: body.environment_id ?? current?.environment_id ?? null,
@@ -126,6 +129,9 @@ export function createServer({
           msg: 'wrapper accepted run',
           session_id: body.session_id,
           run_id: body.run_id,
+          sandbox_id: session.sandbox_id ?? null,
+          callback_url: session.callback_url ?? null,
+          has_control_token: Boolean(session.control_token),
           vendor_session_id: session.vendor_session_id ?? null,
           pending_actions: session.pending_actions ?? null,
           input_event_types: (body.input_events ?? []).map((event) => event?.type ?? null),
@@ -143,6 +149,16 @@ export function createServer({
           try {
             await runtime.startRun(store.getSession(session.session_id), body, callbackClient, sessionStore);
           } catch (error) {
+            console.log(JSON.stringify({
+              level: 'error',
+              msg: 'wrapper run failed',
+              session_id: body.session_id,
+              run_id: body.run_id,
+              sandbox_id: session.sandbox_id ?? null,
+              callback_url: session.callback_url ?? null,
+              has_control_token: Boolean(session.control_token),
+              error: error instanceof Error ? error.message : String(error),
+            }));
             const latest = store.getSession(session.session_id);
             await callbackClient.send(latest ?? session, {
               session_id: latest?.session_id ?? session.session_id,

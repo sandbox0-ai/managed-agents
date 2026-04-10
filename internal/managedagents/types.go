@@ -237,6 +237,9 @@ type WrapperSessionBootstrapRequest struct {
 	SessionID        string           `json:"session_id"`
 	Vendor           string           `json:"vendor"`
 	VendorSessionID  string           `json:"vendor_session_id,omitempty"`
+	SandboxID        string           `json:"sandbox_id,omitempty"`
+	CallbackURL      string           `json:"callback_url,omitempty"`
+	ControlToken     string           `json:"control_token,omitempty"`
 	WorkingDirectory string           `json:"working_directory,omitempty"`
 	EnvironmentID    string           `json:"environment_id"`
 	Agent            map[string]any   `json:"agent"`
@@ -344,30 +347,30 @@ type SessionErrorDetail struct {
 }
 
 type SpanModelUsage struct {
-	InputTokens             int64   `json:"input_tokens"`
-	OutputTokens            int64   `json:"output_tokens"`
-	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens    int64   `json:"cache_read_input_tokens"`
-	Speed                   *string `json:"speed,omitempty"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	Speed                    *string `json:"speed,omitempty"`
 }
 
 type SessionEvent struct {
-	Type               string              `json:"type"`
-	ID                 string              `json:"id,omitempty"`
-	ProcessedAt        *string             `json:"processed_at,omitempty"`
-	Content            []UserContentBlock  `json:"content,omitempty"`
-	Name               string              `json:"name,omitempty"`
-	Input              map[string]any      `json:"input,omitempty"`
-	MCPServerName      string              `json:"mcp_server_name,omitempty"`
-	EvaluatedPermission string             `json:"evaluated_permission,omitempty"`
-	ToolUseID          string              `json:"tool_use_id,omitempty"`
-	MCPToolUseID       string              `json:"mcp_tool_use_id,omitempty"`
-	CustomToolUseID    string              `json:"custom_tool_use_id,omitempty"`
-	IsError            *bool               `json:"is_error,omitempty"`
-	StopReason         *SessionStopReason  `json:"stop_reason,omitempty"`
-	Error              *SessionErrorDetail `json:"error,omitempty"`
-	ModelUsage         *SpanModelUsage     `json:"model_usage,omitempty"`
-	ModelRequestStartID string             `json:"model_request_start_id,omitempty"`
+	Type                string              `json:"type"`
+	ID                  string              `json:"id,omitempty"`
+	ProcessedAt         *string             `json:"processed_at,omitempty"`
+	Content             []UserContentBlock  `json:"content,omitempty"`
+	Name                string              `json:"name,omitempty"`
+	Input               map[string]any      `json:"input,omitempty"`
+	MCPServerName       string              `json:"mcp_server_name,omitempty"`
+	EvaluatedPermission string              `json:"evaluated_permission,omitempty"`
+	ToolUseID           string              `json:"tool_use_id,omitempty"`
+	MCPToolUseID        string              `json:"mcp_tool_use_id,omitempty"`
+	CustomToolUseID     string              `json:"custom_tool_use_id,omitempty"`
+	IsError             *bool               `json:"is_error,omitempty"`
+	StopReason          *SessionStopReason  `json:"stop_reason,omitempty"`
+	Error               *SessionErrorDetail `json:"error,omitempty"`
+	ModelUsage          *SpanModelUsage     `json:"model_usage,omitempty"`
+	ModelRequestStartID string              `json:"model_request_start_id,omitempty"`
 }
 
 func inputEventsToMaps(events []InputEvent) []map[string]any {

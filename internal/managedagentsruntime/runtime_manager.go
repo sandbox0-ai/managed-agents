@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,16 +21,17 @@ import (
 
 // Config configures sandbox-backed Claude managed-agent runtimes.
 type Config struct {
-	Enabled               bool
-	ClaudeTemplate        string
-	WrapperPort           int
-	WorkspaceMountPath    string
-	EngineStateMountPath  string
-	SandboxTTLSeconds     int
-	SandboxHardTTLSeconds int
-	SandboxRequestTimeout time.Duration
-	SandboxBaseURL        string
-	RegionID              string
+	Enabled                bool
+	ClaudeTemplate         string
+	WrapperPort            int
+	WorkspaceMountPath     string
+	EngineStateMountPath   string
+	SandboxTTLSeconds      int
+	SandboxHardTTLSeconds  int
+	SandboxRequestTimeout  time.Duration
+	SandboxBaseURL         string
+	RuntimeCallbackBaseURL string
+	RegionID               string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -117,7 +119,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
 		sandbox0sdk.WithSandboxTTL(int32(m.cfg.SandboxTTLSeconds)),
 		sandbox0sdk.WithSandboxHardTTL(int32(m.cfg.SandboxHardTTLSeconds)),
-		sandbox0sdk.WithSandboxWebhook(gatewaymanagedagents.InternalSandboxWebhookURL(gatewayBaseURL), controlToken),
+		sandbox0sdk.WithSandboxWebhook(m.runtimeWebhookURL(gatewayBaseURL), controlToken),
 		sandbox0sdk.WithSandboxEnvVars(map[string]string{
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
 		}),
@@ -154,10 +156,30 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 }
 
 func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
-	if err := m.syncBootstrapState(ctx, credential, runtime, req); err != nil {
+	bootstrapReq := *req
+	if err := m.syncBootstrapState(ctx, credential, runtime, &bootstrapReq); err != nil {
 		return err
 	}
-	return m.wrapperJSON(ctx, credential, runtime, http.MethodPut, "/v1/runtime/session", req)
+	bootstrapReq.SandboxID = runtime.SandboxID
+	bootstrapReq.CallbackURL = m.runtimeWebhookURL("")
+	bootstrapReq.ControlToken = runtime.ControlToken
+	m.logger.Debug("bootstrapping managed-agent wrapper session",
+		zap.String("session_id", bootstrapReq.SessionID),
+		zap.Any("engine_extra_args", mapValue(bootstrapReq.Engine["extra_args"])),
+		zap.Strings("engine_env_keys", sortedMapKeys(mapValue(bootstrapReq.Engine["env"]))),
+	)
+	return m.wrapperJSON(ctx, credential, runtime, http.MethodPut, "/v1/runtime/session", &bootstrapReq)
+}
+
+func (m *SDKRuntimeManager) runtimeWebhookURL(requestBaseURL string) string {
+	baseURL := strings.TrimSpace(m.cfg.RuntimeCallbackBaseURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(requestBaseURL)
+	}
+	if baseURL == "" {
+		return ""
+	}
+	return gatewaymanagedagents.InternalSandboxWebhookURL(baseURL)
 }
 
 func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperRunRequest) error {
@@ -214,6 +236,18 @@ func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
 	return m.cfg.ClaudeTemplate
 }
 
+func sortedMapKeys(in map[string]any) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for key := range in {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (m *SDKRuntimeManager) ensureWrapperEndpoint(ctx context.Context, token string, runtime *gatewaymanagedagents.RuntimeRecord) (*gatewaymanagedagents.RuntimeRecord, error) {
 	if strings.TrimSpace(runtime.WrapperURL) != "" {
 		return runtime, nil
@@ -241,10 +275,57 @@ func (m *SDKRuntimeManager) exposeWrapperPort(ctx context.Context, sandbox *sand
 	}
 	for _, port := range exposed.Ports {
 		if int(port.Port) == m.cfg.WrapperPort && strings.TrimSpace(port.PublicURL) != "" {
-			return strings.TrimSpace(port.PublicURL), nil
+			return canonicalWrapperURL(port.PublicURL)
 		}
 	}
 	return "", errors.New("wrapper public url is required")
+}
+
+func canonicalWrapperURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("wrapper public url is required")
+	}
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+	return canonicalManagedRuntimeURL(trimmed)
+}
+
+func (m *SDKRuntimeManager) wrapperRequestTarget(rawWrapperURL, path string) (string, string, error) {
+	wrapperURL, err := canonicalWrapperURL(rawWrapperURL)
+	if err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(m.cfg.SandboxBaseURL) == "" {
+		return strings.TrimRight(wrapperURL, "/") + path, "", nil
+	}
+	baseURL, err := canonicalManagedRuntimeURL(m.cfg.SandboxBaseURL)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid sandbox base url %q", m.cfg.SandboxBaseURL)
+	}
+	baseParsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", "", fmt.Errorf("parse sandbox base url: %w", err)
+	}
+	wrapperParsed, err := url.Parse(wrapperURL)
+	if err != nil {
+		return "", "", fmt.Errorf("parse wrapper url: %w", err)
+	}
+	baseParsed.Path = joinURLPath(baseParsed.Path, path)
+	baseParsed.RawPath = ""
+	baseParsed.RawQuery = ""
+	baseParsed.Fragment = ""
+	return baseParsed.String(), wrapperParsed.Host, nil
+}
+
+func joinURLPath(basePath, suffix string) string {
+	trimmedBase := strings.TrimRight(strings.TrimSpace(basePath), "/")
+	trimmedSuffix := "/" + strings.TrimLeft(strings.TrimSpace(suffix), "/")
+	if trimmedBase == "" {
+		return trimmedSuffix
+	}
+	return trimmedBase + trimmedSuffix
 }
 
 func (m *SDKRuntimeManager) wrapperJSON(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, method, path string, payload any) error {
@@ -264,10 +345,16 @@ func (m *SDKRuntimeManager) wrapperJSONDecode(ctx context.Context, credential ga
 		}
 		body = bytes.NewReader(encoded)
 	}
-	requestURL := strings.TrimRight(runtime.WrapperURL, "/") + path
+	requestURL, hostHeader, err := m.wrapperRequestTarget(runtime.WrapperURL, path)
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return fmt.Errorf("build wrapper request: %w", err)
+	}
+	if hostHeader != "" {
+		req.Host = hostHeader
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")

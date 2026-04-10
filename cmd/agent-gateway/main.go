@@ -31,6 +31,7 @@ type config struct {
 	DatabaseMaxConns       int32
 	DatabaseMinConns       int32
 	Sandbox0BaseURL        string
+	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
 	AnthropicSkillsBaseURL string
 	AnthropicSkillsAPIKey  string
@@ -102,16 +103,17 @@ func main() {
 		serviceOpts = append(serviceOpts, managedagents.WithAnthropicSkillCatalog(catalog))
 	}
 	runtimeCfg := managedagentsruntime.Config{
-		Enabled:               cfg.RuntimeEnabled,
-		ClaudeTemplate:        cfg.ClaudeTemplate,
-		WrapperPort:           cfg.WrapperPort,
-		WorkspaceMountPath:    cfg.WorkspaceMountPath,
-		EngineStateMountPath:  cfg.EngineStateMountPath,
-		SandboxTTLSeconds:     cfg.SandboxTTLSeconds,
-		SandboxHardTTLSeconds: cfg.SandboxHardTTLSeconds,
-		SandboxRequestTimeout: cfg.Sandbox0Timeout,
-		SandboxBaseURL:        cfg.Sandbox0BaseURL,
-		RegionID:              cfg.RuntimeRegionID,
+		Enabled:                cfg.RuntimeEnabled,
+		ClaudeTemplate:         cfg.ClaudeTemplate,
+		WrapperPort:            cfg.WrapperPort,
+		WorkspaceMountPath:     cfg.WorkspaceMountPath,
+		EngineStateMountPath:   cfg.EngineStateMountPath,
+		SandboxTTLSeconds:      cfg.SandboxTTLSeconds,
+		SandboxHardTTLSeconds:  cfg.SandboxHardTTLSeconds,
+		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
+		SandboxBaseURL:         cfg.Sandbox0BaseURL,
+		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
+		RegionID:               cfg.RuntimeRegionID,
 	}.WithDefaults(0)
 	runtimeManager := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
@@ -170,6 +172,7 @@ func loadConfig() (config, error) {
 		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
 		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
 		Sandbox0BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
+		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
 		AnthropicSkillsBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL")), "/"),
 		AnthropicSkillsAPIKey:  strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY")),

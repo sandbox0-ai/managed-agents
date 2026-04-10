@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine } from '../src/adapters/claude.js';
+import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine, runtimeModelForSession } from '../src/adapters/claude.js';
 
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
@@ -112,6 +112,20 @@ test('runtimeEnvForEngine preserves base process environment', () => {
   assert.equal(merged.PATH, '/custom/bin');
   assert.equal(merged.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
   assert.equal(merged.HOME, process.env.HOME);
+});
+
+test('runtimeModelForSession falls back to agent model when engine model is unset', () => {
+  assert.equal(runtimeModelForSession({
+    engine: {},
+    agent: { model: { id: 'GLM-5.1' } },
+  }), 'GLM-5.1');
+});
+
+test('runtimeModelForSession prefers explicit engine model', () => {
+  assert.equal(runtimeModelForSession({
+    engine: { model: 'claude-sonnet-4-6' },
+    agent: { model: { id: 'GLM-5.1' } },
+  }), 'claude-sonnet-4-6');
 });
 
 test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {

@@ -18,12 +18,18 @@ import (
 )
 
 type managedCredentialBinding struct {
-	key        string
-	sourceName string
-	domains    []string
-	protocol   apispec.EgressAuthProtocol
-	header     string
-	secret     string
+	key               string
+	sourceName        string
+	domains           []string
+	protocol          apispec.EgressAuthProtocol
+	tlsMode           apispec.EgressTLSMode
+	projectionHeaders []managedProjectedHeader
+	secretValues      map[string]string
+}
+
+type managedProjectedHeader struct {
+	name          string
+	valueTemplate string
 }
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
@@ -51,7 +57,12 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	req.Engine, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
+	var llmCredential *managedLLMCredential
+	req.Engine, llmCredential, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
+	if err != nil {
+		return err
+	}
+	llmBindings, err := m.syncManagedLLMCredentialSource(ctx, client, req.SessionID, req.Vendor, llmCredential)
 	if err != nil {
 		return err
 	}
@@ -59,7 +70,8 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	bindings := append(githubBindings, vaultBindings...)
+	bindings := append(githubBindings, llmBindings...)
+	bindings = append(bindings, vaultBindings...)
 	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, req.Engine, bindings)
 }
 
@@ -182,8 +194,14 @@ func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, cli
 			sourceName: managedCredentialSourceName(sessionID, resourceID),
 			domains:    githubDomains(resource),
 			protocol:   apispec.EgressAuthProtocolHTTPS,
-			header:     "{{ .authorization }}",
-			secret:     githubAuthorizationHeader(token),
+			tlsMode:    tlsModeForProtocol(apispec.EgressAuthProtocolHTTPS),
+			projectionHeaders: []managedProjectedHeader{{
+				name:          "Authorization",
+				valueTemplate: "{{ .authorization }}",
+			}},
+			secretValues: map[string]string{
+				"authorization": githubAuthorizationHeader(token),
+			},
 		}
 		if err := m.upsertCredentialSource(ctx, client, binding); err != nil {
 			return nil, err
@@ -191,6 +209,20 @@ func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, cli
 		bindings = append(bindings, binding)
 	}
 	return bindings, nil
+}
+
+func (m *SDKRuntimeManager) syncManagedLLMCredentialSource(ctx context.Context, client *sandbox0sdk.Client, sessionID, vendor string, credential *managedLLMCredential) ([]managedCredentialBinding, error) {
+	binding, err := managedLLMCredentialBinding(sessionID, vendor, credential)
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil {
+		return nil, nil
+	}
+	if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
+		return nil, err
+	}
+	return []managedCredentialBinding{*binding}, nil
 }
 
 func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, agent map[string]any, credentials []gatewaymanagedagents.StoredCredential) ([]managedCredentialBinding, error) {
@@ -230,9 +262,7 @@ func (m *SDKRuntimeManager) upsertCredentialSource(ctx context.Context, client *
 		ResolverKind: apispec.CredentialSourceResolverKindStaticHeaders,
 		Spec: apispec.CredentialSourceWriteSpec{
 			StaticHeaders: apispec.NewOptStaticHeadersSourceSpec(apispec.StaticHeadersSourceSpec{
-				Values: apispec.NewOptStaticHeadersSourceSpecValues(apispec.StaticHeadersSourceSpecValues{
-					"authorization": binding.secret,
-				}),
+				Values: apispec.NewOptStaticHeadersSourceSpecValues(apispec.StaticHeadersSourceSpecValues(binding.secretValues)),
 			}),
 		},
 	}
@@ -278,7 +308,12 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 		sourceName: managedCredentialSourceName(sessionID, credentialID),
 		domains:    []string{strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))},
 		protocol:   protocolForURL(parsedURL),
-		header:     "{{ .authorization }}",
+		tlsMode:    tlsModeForProtocol(protocolForURL(parsedURL)),
+		projectionHeaders: []managedProjectedHeader{{
+			name:          "Authorization",
+			valueTemplate: "{{ .authorization }}",
+		}},
+		secretValues: map[string]string{},
 	}
 	switch strings.TrimSpace(stringValue(auth["type"])) {
 	case "static_bearer":
@@ -286,13 +321,13 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 		if token == "" {
 			return nil, fmt.Errorf("vault credential %s is missing token", credentialID)
 		}
-		binding.secret = "Bearer " + token
+		binding.secretValues["authorization"] = "Bearer " + token
 	case "mcp_oauth":
 		accessToken := strings.TrimSpace(stringValue(secret["access_token"]))
 		if accessToken == "" {
 			return nil, fmt.Errorf("vault credential %s is missing access_token", credentialID)
 		}
-		binding.secret = "Bearer " + accessToken
+		binding.secretValues["authorization"] = "Bearer " + accessToken
 	default:
 		return nil, fmt.Errorf("vault credential %s has unsupported auth type %q", credentialID, stringValue(auth["type"]))
 	}
@@ -353,25 +388,37 @@ func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID s
 			Projection: apispec.ProjectionSpec{
 				Type: apispec.CredentialProjectionTypeHTTPHeaders,
 				HttpHeaders: apispec.NewOptHTTPHeadersProjection(apispec.HTTPHeadersProjection{
-					Headers: []apispec.ProjectedHeader{{
-						Name:          "Authorization",
-						ValueTemplate: binding.header,
-					}},
+					Headers: projectedHeadersForBinding(binding),
 				}),
 			},
 		})
-		filteredRules = append(filteredRules, apispec.EgressCredentialRule{
+		rule := apispec.EgressCredentialRule{
 			Name:          apispec.NewOptString(managedCredentialRuleName(sessionID, binding.key)),
 			CredentialRef: ref,
 			Protocol:      apispec.NewOptEgressAuthProtocol(binding.protocol),
 			Domains:       append([]string(nil), binding.domains...),
 			Rollout:       apispec.NewOptEgressAuthRolloutMode(apispec.EgressAuthRolloutModeEnabled),
-		})
+		}
+		if binding.tlsMode != "" {
+			rule.TlsMode = apispec.NewOptEgressTLSMode(binding.tlsMode)
+		}
+		filteredRules = append(filteredRules, rule)
 	}
 	egress.CredentialRules = filteredRules
 	base.CredentialBindings = filteredBindings
 	base.Egress = apispec.NewOptNetworkEgressPolicy(egress)
 	return base
+}
+
+func projectedHeadersForBinding(binding managedCredentialBinding) []apispec.ProjectedHeader {
+	out := make([]apispec.ProjectedHeader, 0, len(binding.projectionHeaders))
+	for _, header := range binding.projectionHeaders {
+		out = append(out, apispec.ProjectedHeader{
+			Name:          header.name,
+			ValueTemplate: header.valueTemplate,
+		})
+	}
+	return out
 }
 
 func managedCredentialSourcePrefix(sessionID string) string {
@@ -455,6 +502,44 @@ func protocolForURL(parsedURL *url.URL) apispec.EgressAuthProtocol {
 		return apispec.EgressAuthProtocolHTTP
 	}
 	return apispec.EgressAuthProtocolHTTPS
+}
+
+func tlsModeForProtocol(protocol apispec.EgressAuthProtocol) apispec.EgressTLSMode {
+	if protocol == apispec.EgressAuthProtocolHTTPS {
+		return apispec.EgressTLSModeTerminateReoriginate
+	}
+	return ""
+}
+
+func managedLLMCredentialBinding(sessionID, vendor string, credential *managedLLMCredential) (*managedCredentialBinding, error) {
+	if credential == nil {
+		return nil, nil
+	}
+	baseURL, err := canonicalManagedRuntimeURL(resolvedManagedLLMBaseURL(vendor, credential))
+	if err != nil {
+		return nil, fmt.Errorf("vault credential %s has invalid managed-agent llm base URL", credential.CredentialID)
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
+		return nil, fmt.Errorf("vault credential %s has invalid managed-agent llm base URL", credential.CredentialID)
+	}
+	protocol := protocolForURL(parsedURL)
+	key := "llm-" + credential.CredentialID
+	return &managedCredentialBinding{
+		key:        key,
+		sourceName: managedCredentialSourceName(sessionID, key),
+		domains:    []string{strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))},
+		protocol:   protocol,
+		tlsMode:    tlsModeForProtocol(protocol),
+		projectionHeaders: []managedProjectedHeader{
+			{name: "X-Api-Key", valueTemplate: "{{ .x_api_key }}"},
+			{name: "Authorization", valueTemplate: "{{ .authorization }}"},
+		},
+		secretValues: map[string]string{
+			"x_api_key":     credential.Token,
+			"authorization": "Bearer " + credential.Token,
+		},
+	}, nil
 }
 
 func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, workingDirectory, directory string, files []gatewaymanagedagents.StoredSkillFile) error {
