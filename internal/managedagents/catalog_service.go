@@ -389,6 +389,9 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedCredentialMetadata(metadata); err != nil {
+		return nil, err
+	}
 	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
 	if err != nil {
 		return nil, err
@@ -431,6 +434,9 @@ func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vau
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(credential.Metadata, req.Metadata, 16, 64, 512)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedCredentialMetadata(metadata); err != nil {
 			return nil, err
 		}
 		credential.Metadata = metadata

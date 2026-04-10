@@ -253,6 +253,66 @@ func TestNormalizeUpdateEnvironmentConfigMergesExistingState(t *testing.T) {
 	}
 }
 
+func TestServiceCreateCredentialRejectsInvalidManagedLLMMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	_, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "secret-token",
+			"mcp_server_url": "https://api.anthropic.com",
+		},
+		Metadata: map[string]string{
+			ManagedAgentCredentialKindKey:     ManagedAgentCredentialKindLLM,
+			ManagedAgentCredentialProviderKey: "openai",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentCredentialProviderKey) {
+		t.Fatalf("CreateCredential error = %v, want provider validation", err)
+	}
+}
+
+func TestServiceUpdateCredentialRejectsManagedMetadataWithoutKind(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	created, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "secret-token",
+			"mcp_server_url": "https://api.anthropic.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	baseURL := "https://api.anthropic.com"
+	_, err = service.UpdateCredential(ctx, principal, vault.ID, created.ID, UpdateCredentialRequest{
+		Metadata: MetadataPatchField{
+			Set: true,
+			Values: map[string]*string{
+				ManagedAgentCredentialBaseURLKey: &baseURL,
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentCredentialKindKey) {
+		t.Fatalf("UpdateCredential error = %v, want managed kind validation", err)
+	}
+}
+
 func TestServiceUpdateAgentRejectsVersionMismatch(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)

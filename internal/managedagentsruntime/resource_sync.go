@@ -47,12 +47,41 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	vaultBindings, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, record.TeamID, req.Agent, req.VaultIDs)
+	vaultCredentials, err := m.loadActiveVaultCredentials(ctx, record.TeamID, req.VaultIDs)
+	if err != nil {
+		return err
+	}
+	req.Engine, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
+	if err != nil {
+		return err
+	}
+	vaultBindings, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, req.Agent, vaultCredentials)
 	if err != nil {
 		return err
 	}
 	bindings := append(githubBindings, vaultBindings...)
 	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, req.Engine, bindings)
+}
+
+func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string) ([]gatewaymanagedagents.StoredCredential, error) {
+	if len(vaultIDs) == 0 {
+		return nil, nil
+	}
+	credentials := make([]gatewaymanagedagents.StoredCredential, 0)
+	for _, vaultID := range vaultIDs {
+		items, err := m.repo.ListActiveCredentialsForVault(ctx, teamID, vaultID)
+		if err != nil {
+			return nil, err
+		}
+		for _, credential := range items {
+			credential, err = m.maybeRefreshVaultCredential(ctx, teamID, vaultID, credential, time.Now().UTC())
+			if err != nil {
+				return nil, err
+			}
+			credentials = append(credentials, credential)
+		}
+	}
+	return credentials, nil
 }
 
 func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID string, resources []map[string]any) error {
@@ -164,8 +193,8 @@ func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, cli
 	return bindings, nil
 }
 
-func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID, teamID string, agent map[string]any, vaultIDs []string) ([]managedCredentialBinding, error) {
-	if len(vaultIDs) == 0 {
+func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, agent map[string]any, credentials []gatewaymanagedagents.StoredCredential) ([]managedCredentialBinding, error) {
+	if len(credentials) == 0 {
 		return nil, nil
 	}
 	allowedURLs := sessionAgentMCPServerURLs(agent)
@@ -174,33 +203,23 @@ func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, clie
 	}
 	bindings := make([]managedCredentialBinding, 0)
 	seenTargets := make(map[string]string)
-	for _, vaultID := range vaultIDs {
-		credentials, err := m.repo.ListActiveCredentialsForVault(ctx, teamID, vaultID)
+	for _, credential := range credentials {
+		binding, err := managedBindingFromVaultCredential(sessionID, credential, allowedURLs)
 		if err != nil {
 			return nil, err
 		}
-		for _, credential := range credentials {
-			credential, err = m.maybeRefreshVaultCredential(ctx, teamID, vaultID, credential, time.Now().UTC())
-			if err != nil {
-				return nil, err
-			}
-			binding, err := managedBindingFromVaultCredential(sessionID, credential, allowedURLs)
-			if err != nil {
-				return nil, err
-			}
-			if binding == nil {
-				continue
-			}
-			targetKey := string(binding.protocol) + ":" + strings.Join(binding.domains, ",")
-			if existing, ok := seenTargets[targetKey]; ok && existing != binding.key {
-				return nil, fmt.Errorf("multiple vault credentials target the same MCP host %s", strings.Join(binding.domains, ","))
-			}
-			seenTargets[targetKey] = binding.key
-			if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
-				return nil, err
-			}
-			bindings = append(bindings, *binding)
+		if binding == nil {
+			continue
 		}
+		targetKey := string(binding.protocol) + ":" + strings.Join(binding.domains, ",")
+		if existing, ok := seenTargets[targetKey]; ok && existing != binding.key {
+			return nil, fmt.Errorf("multiple vault credentials target the same MCP host %s", strings.Join(binding.domains, ","))
+		}
+		seenTargets[targetKey] = binding.key
+		if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, *binding)
 	}
 	return bindings, nil
 }
@@ -235,6 +254,9 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 	credentialID := strings.TrimSpace(snapshot.ID)
 	if credentialID == "" {
 		return nil, errors.New("vault credential is missing id")
+	}
+	if normalizeManagedRuntimeMetadataValue(snapshot.Metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey]) == gatewaymanagedagents.ManagedAgentCredentialKindLLM {
+		return nil, nil
 	}
 	auth := gatewaymanagedagents.CredentialAuthToMapForRuntime(snapshot.Auth)
 	serverURL := strings.TrimSpace(stringValue(auth["mcp_server_url"]))
