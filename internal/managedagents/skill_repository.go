@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, skill map[string]any, version map[string]any, now time.Time) error {
+func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, skill Skill, version SkillVersion, files []storedSkillFile, now time.Time) error {
 	skillJSON, err := json.Marshal(skill)
 	if err != nil {
 		return fmt.Errorf("marshal skill snapshot: %w", err)
@@ -18,6 +18,10 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	versionJSON, err := json.Marshal(version)
 	if err != nil {
 		return fmt.Errorf("marshal skill version snapshot: %w", err)
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return fmt.Errorf("marshal skill version files: %w", err)
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -27,13 +31,13 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO managed_agent_skills (id, team_id, source, latest_version, snapshot, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
-	`, stringValue(skill["id"]), teamID, stringValue(skill["source"]), nullableString(stringValue(skill["latest_version"])), string(skillJSON), now, now); err != nil {
+	`, skill.ID, teamID, skill.Source, nullableStringPointer(skill.LatestVersion), string(skillJSON), now, now); err != nil {
 		return fmt.Errorf("insert managed-agent skill: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO managed_agent_skill_versions (id, skill_id, version, snapshot, created_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5)
-	`, stringValue(version["id"]), stringValue(version["skill_id"]), stringValue(version["version"]), string(versionJSON), now); err != nil {
+		INSERT INTO managed_agent_skill_versions (id, skill_id, version, snapshot, files, created_at)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+	`, version.ID, version.SkillID, version.Version, string(versionJSON), string(filesJSON), now); err != nil {
 		return fmt.Errorf("insert managed-agent skill version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -42,7 +46,7 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	return nil
 }
 
-func (r *Repository) ListSkills(ctx context.Context, teamID string, limit int, page, source string) ([]map[string]any, *string, bool, error) {
+func (r *Repository) ListSkills(ctx context.Context, teamID string, limit int, page, source string) ([]Skill, *string, bool, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -63,25 +67,70 @@ func (r *Repository) ListSkills(ctx context.Context, teamID string, limit int, p
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	items, nextPage, err := r.listSnapshotsWithCursor(ctx, query, limit, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, fmt.Errorf("list managed-agent skills: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Skill, 0, limit)
+	createdAt := make([]time.Time, 0, limit)
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			id          string
+			when        time.Time
+		)
+		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+			return nil, nil, false, fmt.Errorf("scan managed-agent skill: %w", err)
+		}
+		snapshot, err := decodeSkillSnapshot(payloadJSON)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		items = append(items, snapshot)
+		createdAt = append(createdAt, when)
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, false, fmt.Errorf("iterate managed-agent skills: %w", err)
+	}
+	var nextPage *string
+	if len(items) > limit {
+		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		items = items[:limit]
 	}
 	return items, nextPage, nextPage != nil, nil
 }
 
-func (r *Repository) GetSkill(ctx context.Context, teamID, skillID string) (map[string]any, error) {
-	return r.getSnapshotObject(ctx, "managed_agent_skills", teamID, skillID, ErrSkillNotFound)
+func (r *Repository) GetSkill(ctx context.Context, teamID, skillID string) (*Skill, error) {
+	var payloadJSON []byte
+	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_skills WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(skillID)).Scan(&payloadJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrSkillNotFound
+		}
+		return nil, fmt.Errorf("query managed-agent skill: %w", err)
+	}
+	snapshot, err := decodeSkillSnapshot(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
 func (r *Repository) DeleteSkill(ctx context.Context, teamID, skillID string) error {
 	return r.deleteSnapshotObject(ctx, "managed_agent_skills", teamID, skillID, ErrSkillNotFound)
 }
 
-func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID string, snapshot map[string]any, now time.Time) error {
+func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID string, snapshot SkillVersion, files []storedSkillFile, now time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal skill version snapshot: %w", err)
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return fmt.Errorf("marshal skill version files: %w", err)
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -96,25 +145,25 @@ func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID str
 		}
 		return fmt.Errorf("query managed-agent skill: %w", err)
 	}
-	skill, err := decodeSnapshot(skillJSON)
+	skill, err := decodeSkillSnapshot(skillJSON)
 	if err != nil {
 		return err
 	}
-	skill["latest_version"] = stringValue(snapshot["version"])
-	skill["updated_at"] = nowRFC3339(now)
+	skill.LatestVersion = normalizeNullableString(&snapshot.Version)
+	skill.UpdatedAt = nowRFC3339(now)
 	updatedSkillJSON, err := json.Marshal(skill)
 	if err != nil {
 		return fmt.Errorf("marshal updated skill snapshot: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO managed_agent_skill_versions (id, skill_id, version, snapshot, created_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5)
-	`, stringValue(snapshot["id"]), strings.TrimSpace(skillID), stringValue(snapshot["version"]), string(payloadJSON), now); err != nil {
+		INSERT INTO managed_agent_skill_versions (id, skill_id, version, snapshot, files, created_at)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
+	`, snapshot.ID, strings.TrimSpace(skillID), snapshot.Version, string(payloadJSON), string(filesJSON), now); err != nil {
 		return fmt.Errorf("insert managed-agent skill version: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE managed_agent_skills SET latest_version = $3, snapshot = $4::jsonb, updated_at = $5 WHERE team_id = $1 AND id = $2
-	`, teamID, strings.TrimSpace(skillID), nullableString(stringValue(snapshot["version"])), string(updatedSkillJSON), now); err != nil {
+	`, teamID, strings.TrimSpace(skillID), nullableStringPointer(skill.LatestVersion), string(updatedSkillJSON), now); err != nil {
 		return fmt.Errorf("update managed-agent skill latest version: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -123,7 +172,7 @@ func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID str
 	return nil
 }
 
-func (r *Repository) ListSkillVersions(ctx context.Context, teamID, skillID string, limit int, page string) ([]map[string]any, *string, bool, error) {
+func (r *Repository) ListSkillVersions(ctx context.Context, teamID, skillID string, limit int, page string) ([]SkillVersion, *string, bool, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 20
 	}
@@ -145,14 +194,43 @@ func (r *Repository) ListSkillVersions(ctx context.Context, teamID, skillID stri
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY v.created_at DESC, v.id DESC LIMIT $%d`, len(args))
-	items, nextPage, err := r.listSnapshotsWithCursor(ctx, query, limit, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, fmt.Errorf("list managed-agent skill versions: %w", err)
+	}
+	defer rows.Close()
+	items := make([]SkillVersion, 0, limit)
+	createdAt := make([]time.Time, 0, limit)
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			id          string
+			when        time.Time
+		)
+		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+			return nil, nil, false, fmt.Errorf("scan managed-agent skill version: %w", err)
+		}
+		snapshot, err := decodeSkillVersionSnapshot(payloadJSON)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		items = append(items, snapshot)
+		createdAt = append(createdAt, when)
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, false, fmt.Errorf("iterate managed-agent skill versions: %w", err)
+	}
+	var nextPage *string
+	if len(items) > limit {
+		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		items = items[:limit]
 	}
 	return items, nextPage, nextPage != nil, nil
 }
 
-func (r *Repository) GetSkillVersion(ctx context.Context, teamID, skillID, version string) (map[string]any, error) {
+func (r *Repository) GetSkillVersion(ctx context.Context, teamID, skillID, version string) (*SkillVersion, error) {
 	var payloadJSON []byte
 	err := r.pool.QueryRow(ctx, `
 		SELECT v.snapshot
@@ -166,7 +244,41 @@ func (r *Repository) GetSkillVersion(ctx context.Context, teamID, skillID, versi
 		}
 		return nil, fmt.Errorf("query managed-agent skill version: %w", err)
 	}
-	return decodeSnapshot(payloadJSON)
+	snapshot, err := decodeSkillVersionSnapshot(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID, version string) (*StoredSkillVersion, error) {
+	var (
+		payloadJSON []byte
+		filesJSON   []byte
+	)
+	err := r.pool.QueryRow(ctx, `
+		SELECT v.snapshot, v.files
+		FROM managed_agent_skill_versions v
+		JOIN managed_agent_skills s ON s.id = v.skill_id
+		WHERE s.team_id = $1 AND s.id = $2 AND v.version = $3
+	`, teamID, strings.TrimSpace(skillID), strings.TrimSpace(version)).Scan(&payloadJSON, &filesJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrSkillVersionNotFound
+		}
+		return nil, fmt.Errorf("query managed-agent stored skill version: %w", err)
+	}
+	snapshot, err := decodeSkillVersionSnapshot(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	files := []storedSkillFile{}
+	if len(filesJSON) != 0 {
+		if err := json.Unmarshal(filesJSON, &files); err != nil {
+			return nil, fmt.Errorf("decode managed-agent skill version files: %w", err)
+		}
+	}
+	return &StoredSkillVersion{Snapshot: snapshot, Files: files}, nil
 }
 
 func (r *Repository) DeleteSkillVersion(ctx context.Context, teamID, skillID, version string, now time.Time) error {
@@ -193,7 +305,7 @@ func (r *Repository) DeleteSkillVersion(ctx context.Context, teamID, skillID, ve
 	if result.RowsAffected() == 0 {
 		return ErrSkillVersionNotFound
 	}
-	skill, err := decodeSnapshot(skillJSON)
+	skill, err := decodeSkillSnapshot(skillJSON)
 	if err != nil {
 		return err
 	}
@@ -212,19 +324,35 @@ func (r *Repository) DeleteSkillVersion(ctx context.Context, teamID, skillID, ve
 	if err != pgx.ErrNoRows {
 		latestVersionPtr = &latestVersion
 	}
-	skill["latest_version"] = nullableStringPointer(latestVersionPtr)
-	skill["updated_at"] = nowRFC3339(now)
+	skill.LatestVersion = normalizeNullableString(latestVersionPtr)
+	skill.UpdatedAt = nowRFC3339(now)
 	updatedSkillJSON, err := json.Marshal(skill)
 	if err != nil {
 		return fmt.Errorf("marshal updated skill snapshot: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE managed_agent_skills SET latest_version = $3, snapshot = $4::jsonb, updated_at = $5 WHERE team_id = $1 AND id = $2
-	`, teamID, strings.TrimSpace(skillID), nullableStringPointer(latestVersionPtr), string(updatedSkillJSON), now); err != nil {
+	`, teamID, strings.TrimSpace(skillID), nullableStringPointer(skill.LatestVersion), string(updatedSkillJSON), now); err != nil {
 		return fmt.Errorf("update managed-agent skill after delete: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit delete skill version transaction: %w", err)
 	}
 	return nil
+}
+
+func decodeSkillSnapshot(payloadJSON []byte) (Skill, error) {
+	var snapshot Skill
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return Skill{}, fmt.Errorf("decode managed-agent skill snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func decodeSkillVersionSnapshot(payloadJSON []byte) (SkillVersion, error) {
+	var snapshot SkillVersion
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return SkillVersion{}, fmt.Errorf("decode managed-agent skill version snapshot: %w", err)
+	}
+	return snapshot, nil
 }

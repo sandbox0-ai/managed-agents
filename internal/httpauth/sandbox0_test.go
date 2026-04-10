@@ -78,18 +78,12 @@ func TestSandbox0AuthenticatorUserTokenRequiresTeamHeaderForMultipleTeams(t *tes
 	}
 }
 
-func TestSandbox0AuthenticatorAPIKeyUsesTeamHeaderAndProbe(t *testing.T) {
+func TestSandbox0AuthenticatorAPIKeyUsesSDKIntrospection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(teamIDHeader); got != "team_123" {
-			t.Fatalf("x-team-id = %q, want team_123", got)
-		}
 		switch r.URL.Path {
-		case "/api/v1/sandboxes":
+		case "/api-keys/current":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[],"count":0,"has_more":false}}`))
-		case "/api/v1/sandboxvolumes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"data":[]}`))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","type":"secret","roles":["sandbox:create"],"created_at":"2026-01-01T00:00:00Z"}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -101,7 +95,7 @@ func TestSandbox0AuthenticatorAPIKeyUsesTeamHeaderAndProbe(t *testing.T) {
 		t.Fatalf("new authenticator: %v", err)
 	}
 
-	authCtx, err := authenticator.AuthenticateRequest(t.Context(), "s0_region_token", "team_123")
+	authCtx, err := authenticator.AuthenticateRequest(t.Context(), "s0_region_token", "")
 	if err != nil {
 		t.Fatalf("authenticate request: %v", err)
 	}
@@ -158,5 +152,34 @@ func TestSandbox0AuthenticatorMiddlewareStoresContext(t *testing.T) {
 	}
 	if body := rec.Body.String(); body != "team_123:user_123" {
 		t.Fatalf("body = %q, want team_123:user_123", body)
+	}
+}
+
+func TestSandbox0AuthenticatorMiddlewareUsesManagedAgentErrorShape(t *testing.T) {
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: "http://example.invalid", Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(authenticator.Authenticate())
+	router.GET("/protected", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Request-Id", "req_auth_123")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if rec.Header().Get("Request-Id") != "req_auth_123" {
+		t.Fatalf("Request-Id = %q, want req_auth_123", rec.Header().Get("Request-Id"))
+	}
+	if body := rec.Body.String(); body != `{"error":{"message":"missing authorization header","type":"authentication_error"},"request_id":"req_auth_123","type":"error"}` {
+		t.Fatalf("body = %s", body)
 	}
 }

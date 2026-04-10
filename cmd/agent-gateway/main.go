@@ -24,22 +24,26 @@ import (
 )
 
 type config struct {
-	HTTPAddr              string
-	LogLevel              string
-	DatabaseURL           string
-	DatabaseSchema        string
-	DatabaseMaxConns      int32
-	DatabaseMinConns      int32
-	Sandbox0BaseURL       string
-	Sandbox0Timeout       time.Duration
-	RuntimeEnabled        bool
-	RuntimeRegionID       string
-	ClaudeTemplate        string
-	WrapperPort           int
-	WorkspaceMountPath    string
-	EngineStateMountPath  string
-	SandboxTTLSeconds     int
-	SandboxHardTTLSeconds int
+	HTTPAddr               string
+	LogLevel               string
+	DatabaseURL            string
+	DatabaseSchema         string
+	DatabaseMaxConns       int32
+	DatabaseMinConns       int32
+	Sandbox0BaseURL        string
+	Sandbox0Timeout        time.Duration
+	AnthropicSkillsBaseURL string
+	AnthropicSkillsAPIKey  string
+	AnthropicSkillsVersion string
+	AnthropicSkillsTimeout time.Duration
+	RuntimeEnabled         bool
+	RuntimeRegionID        string
+	ClaudeTemplate         string
+	WrapperPort            int
+	WorkspaceMountPath     string
+	EngineStateMountPath   string
+	SandboxTTLSeconds      int
+	SandboxHardTTLSeconds  int
 }
 
 func main() {
@@ -84,6 +88,19 @@ func main() {
 	}
 
 	repo := managedagents.NewRepository(pool)
+	serviceOpts := make([]managedagents.ServiceOption, 0, 1)
+	if strings.TrimSpace(cfg.AnthropicSkillsAPIKey) != "" {
+		catalog, err := managedagents.NewAnthropicRemoteSkillCatalog(managedagents.AnthropicRemoteSkillCatalogConfig{
+			BaseURL:    cfg.AnthropicSkillsBaseURL,
+			APIKey:     cfg.AnthropicSkillsAPIKey,
+			APIVersion: cfg.AnthropicSkillsVersion,
+			Timeout:    cfg.AnthropicSkillsTimeout,
+		})
+		if err != nil {
+			logger.Fatal("create anthropic skill catalog", zap.Error(err))
+		}
+		serviceOpts = append(serviceOpts, managedagents.WithAnthropicSkillCatalog(catalog))
+	}
 	runtimeCfg := managedagentsruntime.Config{
 		Enabled:               cfg.RuntimeEnabled,
 		ClaudeTemplate:        cfg.ClaudeTemplate,
@@ -97,7 +114,7 @@ func main() {
 		RegionID:              cfg.RuntimeRegionID,
 	}.WithDefaults(0)
 	runtimeManager := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
-	service := managedagents.NewService(repo, runtimeManager, logger)
+	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	handler := managedagents.NewHandler(service, logger)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -146,22 +163,26 @@ func main() {
 
 func loadConfig() (config, error) {
 	cfg := config{
-		HTTPAddr:              envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
-		LogLevel:              envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
-		DatabaseURL:           strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
-		DatabaseSchema:        envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
-		DatabaseMaxConns:      int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
-		DatabaseMinConns:      int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
-		Sandbox0BaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
-		Sandbox0Timeout:       envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
-		RuntimeEnabled:        !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
-		RuntimeRegionID:       strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_REGION_ID")),
-		ClaudeTemplate:        strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
-		WrapperPort:           envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
-		WorkspaceMountPath:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
-		EngineStateMountPath:  strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
-		SandboxTTLSeconds:     envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", 3600),
-		SandboxHardTTLSeconds: envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", 21600),
+		HTTPAddr:               envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
+		LogLevel:               envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
+		DatabaseURL:            strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
+		DatabaseSchema:         envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
+		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
+		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
+		Sandbox0BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
+		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
+		AnthropicSkillsBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL")), "/"),
+		AnthropicSkillsAPIKey:  strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY")),
+		AnthropicSkillsVersion: strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_API_VERSION")),
+		AnthropicSkillsTimeout: envDuration("MANAGED_AGENT_ANTHROPIC_SKILLS_TIMEOUT", 15*time.Second),
+		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
+		RuntimeRegionID:        strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_REGION_ID")),
+		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
+		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
+		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
+		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
+		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", 3600),
+		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", 21600),
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")

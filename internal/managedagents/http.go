@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	contract "github.com/sandbox0-ai/managed-agent/internal/apicontract/generated"
 	"github.com/sandbox0-ai/managed-agent/internal/httpauth"
 	"go.uber.org/zap"
 )
@@ -35,17 +35,28 @@ func (h *Handler) CreateSession(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req CreateSessionParams
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsCreateSessionParams
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsCreateSessionParams", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	session, err := h.service.CreateSession(c.Request.Context(), principal, req)
+	params, err := createSessionParamsFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	session, err := h.service.CreateSession(c.Request.Context(), principal, params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, session)
+	response, err := sessionToContract(session)
+	if err != nil {
+		h.logger.Error("failed to encode create-session response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListSessions(c *gin.Context) {
@@ -53,47 +64,36 @@ func (h *Handler) ListSessions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	createdAtGTE, err := parseTimestampQuery(c.Query("created_at[gte]"))
-	if err != nil {
+	var req contract.BetaListSessionsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	createdAtGT, err := parseTimestampQuery(c.Query("created_at[gt]"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	createdAtLTE, err := parseTimestampQuery(c.Query("created_at[lte]"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	createdAtLT, err := parseTimestampQuery(c.Query("created_at[lt]"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	agentVersion, _ := strconv.Atoi(strings.TrimSpace(c.Query("agent_version")))
 	sessions, nextPage, err := h.service.ListSessions(c.Request.Context(), principal, SessionListOptions{
-		Limit:           limit,
-		Page:            c.Query("page"),
-		Order:           c.Query("order"),
-		IncludeArchived: strings.EqualFold(strings.TrimSpace(c.Query("include_archived")), "true"),
-		AgentID:         c.Query("agent_id"),
-		AgentVersion:    agentVersion,
+		Limit:           int32QueryValue(req.Limit),
+		Page:            stringQueryValue(req.Page),
+		Order:           listOrderQueryValue(req.Order),
+		IncludeArchived: boolQueryValue(req.IncludeArchived),
+		AgentID:         stringQueryValue(req.AgentId),
+		AgentVersion:    int32QueryValue(req.AgentVersion),
 		CreatedAt: TimeFilter{
-			GTE: createdAtGTE,
-			GT:  createdAtGT,
-			LTE: createdAtLTE,
-			LT:  createdAtLT,
+			GTE: timestampQueryValue(req.CreatedAtGte),
+			GT:  timestampQueryValue(req.CreatedAtGt),
+			LTE: timestampQueryValue(req.CreatedAtLte),
+			LT:  timestampQueryValue(req.CreatedAtLt),
 		},
 	})
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": sessions, "next_page": nextPage})
+	response, err := listSessionsToContract(sessions, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-sessions response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetSession(c *gin.Context) {
@@ -106,7 +106,13 @@ func (h *Handler) GetSession(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, session)
+	response, err := sessionToContract(session)
+	if err != nil {
+		h.logger.Error("failed to encode get-session response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateSession(c *gin.Context) {
@@ -114,8 +120,13 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateSessionParams
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := readValidatedContractJSONBody(c, "BetaManagedAgentsUpdateSessionParams")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	req, err := updateSessionParamsFromJSON(body)
+	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
@@ -124,7 +135,13 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, session)
+	response, err := sessionToContract(session)
+	if err != nil {
+		h.logger.Error("failed to encode update-session response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteSession(c *gin.Context) {
@@ -137,7 +154,13 @@ func (h *Handler) DeleteSession(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedSessionToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-session response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) ListEvents(c *gin.Context) {
@@ -145,17 +168,27 @@ func (h *Handler) ListEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
+	var req contract.BetaListEventsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	events, nextPage, err := h.service.ListEvents(c.Request.Context(), principal, c.Param("session_id"), EventListOptions{
-		Limit: limit,
-		Page:  c.Query("page"),
-		Order: c.Query("order"),
+		Limit: int32QueryValue(req.Limit),
+		Page:  stringQueryValue(req.Page),
+		Order: listOrderQueryValue(req.Order),
 	})
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": events, "next_page": nextPage})
+	response, err := listSessionEventsToContract(events, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode event list response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) SendEvents(c *gin.Context) {
@@ -163,17 +196,28 @@ func (h *Handler) SendEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req SendEventsParams
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsSendSessionEventsParams
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsSendSessionEventsParams", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	events, err := h.service.SendEvents(c.Request.Context(), principal, credential, c.Param("session_id"), req, requestBaseURL(c))
+	params, err := sendEventsParamsFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	events, err := h.service.SendEvents(c.Request.Context(), principal, credential, c.Param("session_id"), params, requestBaseURL(c))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": events})
+	response, err := sendSessionEventsToContract(events)
+	if err != nil {
+		h.logger.Error("failed to encode send-events response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) StreamEvents(c *gin.Context) {
@@ -211,12 +255,20 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 	defer poll.Stop()
 
 	sendEvents := func(events []map[string]any) (bool, error) {
-		for _, event := range events {
+		contractEvents, err := sessionEventsToContract(events)
+		if err != nil {
+			return false, err
+		}
+		for _, event := range contractEvents {
 			payload, err := json.Marshal(event)
 			if err != nil {
 				return false, err
 			}
-			if eventID := stringValue(event["id"]); eventID != "" {
+			contractEventMap, err := jsonValueToMap(event)
+			if err != nil {
+				return false, err
+			}
+			if eventID := stringValue(contractEventMap["id"]); eventID != "" {
 				if _, err := fmt.Fprintf(writer, "id: %s\n", eventID); err != nil {
 					return false, err
 				}
@@ -228,7 +280,7 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 				return false, err
 			}
 			flusher.Flush()
-			if stringValue(event["type"]) == "session.deleted" {
+			if stringValue(contractEventMap["type"]) == "session.deleted" {
 				return true, nil
 			}
 		}

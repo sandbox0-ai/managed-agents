@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readJSON, writeJSON } from './lib/http.js';
 import { RuntimeStore } from './runtime/store.js';
 import { ProcdWebhookClient } from './runtime/callbacks.js';
+import { materializeSessionResources } from './runtime/resources.js';
 import { ClaudeRuntime } from './adapters/claude.js';
 
 function sessionPathname(pathname) {
@@ -54,7 +55,8 @@ export function createServer({
           writeJSON(res, 400, { error: 'session_id is required' });
           return;
         }
-        const session = store.upsertSession(body.session_id, (current) => ({
+        const current = store.getSession(body.session_id);
+        const session = {
           ...(current ?? {}),
           session_id: body.session_id,
           working_directory: body.working_directory ?? current?.working_directory ?? process.cwd(),
@@ -63,12 +65,15 @@ export function createServer({
           environment: body.environment ?? current?.environment ?? null,
           resources: body.resources ?? current?.resources ?? [],
           vault_ids: body.vault_ids ?? current?.vault_ids ?? [],
+          skill_names: body.skill_names ?? current?.skill_names ?? [],
           engine: body.engine ?? current?.engine ?? {},
           vendor_session_id: body.vendor_session_id ?? current?.vendor_session_id ?? null,
           pending_actions: current?.pending_actions ?? [],
           tool_confirmation_resolutions: current?.tool_confirmation_resolutions ?? {},
           updated_at: new Date().toISOString(),
-        }));
+        };
+        await materializeSessionResources(session);
+        store.upsertSession(body.session_id, () => session);
         writeJSON(res, 200, { session_id: session.session_id, vendor_session_id: session.vendor_session_id });
         return;
       }

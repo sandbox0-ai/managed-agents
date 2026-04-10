@@ -4,152 +4,271 @@ import (
 	"context"
 	"errors"
 	"mime"
+	"net/url"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
-func (s *Service) CreateAgent(ctx context.Context, principal Principal, req CreateAgentRequest) (map[string]any, error) {
+type validatedSessionResource struct {
+	Public map[string]any
+	Secret map[string]any
+}
+
+func (s *Service) CreateAgent(ctx context.Context, principal Principal, req CreateAgentRequest) (*Agent, error) {
 	if strings.TrimSpace(principal.TeamID) == "" {
 		return nil, errors.New("team id is required")
 	}
-	if strings.TrimSpace(req.Name) == "" {
-		return nil, errors.New("name is required")
+	if req.Model == nil {
+		return nil, errors.New("model is required")
 	}
-	vendor, _ := normalizeModelConfig(req.Model, "")
-	if err := ensureClaudeVendor(vendor); err != nil {
+	name, err := normalizeRequiredText(req.Name, "name", 256)
+	if err != nil {
 		return nil, err
 	}
+	vendor, model, err := normalizeAgentModel(req.Model, "")
+	if err != nil {
+		return nil, err
+	}
+	description, err := normalizeOptionalText(req.Description, "description", 2048)
+	if err != nil {
+		return nil, err
+	}
+	system, err := normalizeOptionalText(req.System, "system", 100000)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := normalizeAgentTools(req.Tools)
+	if err != nil {
+		return nil, err
+	}
+	mcpServers, mcpServerNames, err := normalizeMCPServers(req.MCPServers)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateToolReferences(tools, mcpServerNames); err != nil {
+		return nil, err
+	}
+	skills, err := s.normalizeAgentSkills(ctx, principal, req.Skills)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := normalizeAgentMetadata(req.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	req.Name = name
+	req.Model = model
+	req.Description = description
+	req.System = system
+	req.Tools = tools
+	req.MCPServers = mcpServers
+	req.Skills = skills
+	req.Metadata = metadata
 	now := time.Now().UTC()
 	agent := buildAgentObject(NewID("agent"), 1, vendor, req, now, nil)
 	if err := s.repo.CreateAgent(ctx, principal.TeamID, vendor, 1, agent, now); err != nil {
 		return nil, err
 	}
-	return agent, nil
+	return &agent, nil
 }
 
-func (s *Service) ListAgents(ctx context.Context, principal Principal, opts AgentListOptions) ([]map[string]any, *string, error) {
+func (s *Service) ListAgents(ctx context.Context, principal Principal, opts AgentListOptions) ([]Agent, *string, error) {
 	return s.repo.ListAgents(ctx, principal.TeamID, opts)
 }
 
-func (s *Service) GetAgent(ctx context.Context, principal Principal, agentID string, version int) (map[string]any, error) {
+func (s *Service) GetAgent(ctx context.Context, principal Principal, agentID string, version int) (*Agent, error) {
 	agent, _, err := s.repo.GetAgent(ctx, principal.TeamID, agentID, version)
 	return agent, err
 }
 
-func (s *Service) UpdateAgent(ctx context.Context, principal Principal, agentID string, req UpdateAgentRequest) (map[string]any, error) {
+func (s *Service) UpdateAgent(ctx context.Context, principal Principal, agentID string, req UpdateAgentRequest) (*Agent, error) {
 	agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, agentID, 0)
 	if err != nil {
 		return nil, err
 	}
-	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
-		if trimmed == "" {
-			return nil, errors.New("name is required")
+	if req.Version <= 0 {
+		return nil, errors.New("version is required")
+	}
+	if req.Version != agent.Version {
+		return nil, errors.New("invalid version")
+	}
+	if req.Name.Set {
+		trimmed, err := normalizeRequiredText(req.Name.Value, "name", 256)
+		if err != nil {
+			return nil, err
 		}
-		agent["name"] = trimmed
+		agent.Name = trimmed
 	}
-	if req.Description != nil {
-		agent["description"] = nullableText(req.Description)
+	if req.Description.Set {
+		description, err := normalizeOptionalText(req.Description.Value, "description", 2048)
+		if err != nil {
+			return nil, err
+		}
+		agent.Description = description
 	}
-	if req.System != nil {
-		agent["system"] = nullableText(req.System)
+	if req.System.Set {
+		system, err := normalizeOptionalText(req.System.Value, "system", 100000)
+		if err != nil {
+			return nil, err
+		}
+		agent.System = system
 	}
-	if req.Model != nil {
-		vendor, agent["model"] = normalizeModelConfig(req.Model, vendor)
+	if req.Model.Set {
+		var model map[string]any
+		vendor, model, err = normalizeAgentModel(req.Model.Value, vendor)
+		if err != nil {
+			return nil, err
+		}
+		agent.Model = modelConfigFromMap(model)
 	}
-	if req.Tools != nil {
-		agent["tools"] = cloneSlice(req.Tools)
+	tools := valueToJSONArray(agent.Tools)
+	if req.Tools.Set {
+		tools, err = normalizeAgentTools(req.Tools.Values)
+		if err != nil {
+			return nil, err
+		}
+		agent.Tools = agentToolsFromAny(tools)
 	}
-	if req.MCPServers != nil {
-		agent["mcp_servers"] = cloneSlice(req.MCPServers)
+	mcpServers := valueToJSONArray(agent.MCPServers)
+	if req.MCPServers.Set {
+		mcpServers, _, err = normalizeMCPServers(req.MCPServers.Values)
+		if err != nil {
+			return nil, err
+		}
+		agent.MCPServers = mcpServersFromAny(mcpServers)
 	}
-	if req.Skills != nil {
-		agent["skills"] = cloneSlice(req.Skills)
+	if err := validateToolReferences(tools, mcpServerNames(mcpServers)); err != nil {
+		return nil, err
 	}
-	if req.Metadata != nil {
-		agent["metadata"] = cloneStringMap(req.Metadata)
+	if req.Skills.Set {
+		skills, err := s.normalizeAgentSkills(ctx, principal, req.Skills.Values)
+		if err != nil {
+			return nil, err
+		}
+		agent.Skills = agentSkillsFromAny(skills)
 	}
-	version := intValue(agent["version"]) + 1
+	if req.Metadata.Set {
+		metadata, err := mergeAgentMetadata(agent.Metadata, req.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		agent.Metadata = metadata
+	}
+	version := agent.Version + 1
 	if version <= 1 {
 		version = 2
 	}
 	updatedAt := time.Now().UTC()
-	agent["version"] = version
-	agent["updated_at"] = nowRFC3339(updatedAt)
-	if err := s.repo.UpdateAgent(ctx, principal.TeamID, agentID, vendor, version, agent, timePointerFromValue(agent["archived_at"]), updatedAt); err != nil {
+	agent.Version = version
+	agent.UpdatedAt = nowRFC3339(updatedAt)
+	if err := s.repo.UpdateAgent(ctx, principal.TeamID, agentID, vendor, req.Version, version, agent, parseTimestampPointer(agent.ArchivedAt), updatedAt); err != nil {
 		return nil, err
 	}
 	return agent, nil
 }
 
-func (s *Service) ArchiveAgent(ctx context.Context, principal Principal, agentID string) (map[string]any, error) {
+func (s *Service) ArchiveAgent(ctx context.Context, principal Principal, agentID string) (*Agent, error) {
 	agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, agentID, 0)
 	if err != nil {
 		return nil, err
 	}
-	version := intValue(agent["version"])
+	version := agent.Version
 	if version <= 0 {
 		version = 1
 	}
 	now := time.Now().UTC()
-	agent["archived_at"] = nowRFC3339(now)
-	agent["updated_at"] = nowRFC3339(now)
-	if err := s.repo.UpdateAgent(ctx, principal.TeamID, agentID, vendor, version, agent, &now, now); err != nil {
+	agent.ArchivedAt = timestampPointerOrNil(&now)
+	agent.UpdatedAt = nowRFC3339(now)
+	if err := s.repo.UpdateAgent(ctx, principal.TeamID, agentID, vendor, version, version, agent, &now, now); err != nil {
 		return nil, err
 	}
 	return agent, nil
 }
 
-func (s *Service) ListAgentVersions(ctx context.Context, principal Principal, agentID string, limit int, page string) ([]map[string]any, *string, error) {
+func (s *Service) ListAgentVersions(ctx context.Context, principal Principal, agentID string, limit int, page string) ([]Agent, *string, error) {
 	return s.repo.ListAgentVersions(ctx, principal.TeamID, agentID, limit, page)
 }
 
-func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, req CreateEnvironmentRequest) (map[string]any, error) {
-	if strings.TrimSpace(req.Name) == "" {
-		return nil, errors.New("name is required")
+func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, req CreateEnvironmentRequest) (*Environment, error) {
+	name, err := normalizeRequiredText(req.Name, "name", 256)
+	if err != nil {
+		return nil, err
 	}
-	req.Config = ensureEnvironmentConfig(req.Config)
+	description, err := normalizeOptionalText(req.Description, "description", 1024)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := normalizeMetadataMap(req.Metadata, 0, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	config, err := normalizeCreateEnvironmentConfig(req.Config)
+	if err != nil {
+		return nil, err
+	}
+	req.Name = name
+	req.Description = description
+	req.Metadata = metadata
+	req.Config = config
 	now := time.Now().UTC()
 	environment := buildEnvironmentObject(NewID("env"), req, now, nil)
 	if err := s.repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
 		return nil, err
 	}
-	return environment, nil
+	return &environment, nil
 }
 
-func (s *Service) ListEnvironments(ctx context.Context, principal Principal, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (s *Service) ListEnvironments(ctx context.Context, principal Principal, limit int, page string, includeArchived bool) ([]Environment, *string, error) {
 	return s.repo.ListEnvironments(ctx, principal.TeamID, limit, page, includeArchived)
 }
 
-func (s *Service) GetEnvironment(ctx context.Context, principal Principal, environmentID string) (map[string]any, error) {
+func (s *Service) GetEnvironment(ctx context.Context, principal Principal, environmentID string) (*Environment, error) {
 	return s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 }
 
-func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, environmentID string, req UpdateEnvironmentRequest) (map[string]any, error) {
+func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, environmentID string, req UpdateEnvironmentRequest) (*Environment, error) {
 	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 	if err != nil {
 		return nil, err
 	}
 	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
-		if trimmed != "" {
-			environment["name"] = trimmed
+		trimmed, err := normalizeRequiredText(*req.Name, "name", 256)
+		if err != nil {
+			return nil, err
+		}
+		environment.Name = trimmed
+	}
+	if req.Description.Set {
+		description, err := normalizeOptionalText(req.Description.Value, "description", 1024)
+		if err != nil {
+			return nil, err
+		}
+		if description == nil {
+			environment.Description = ""
+		} else {
+			environment.Description = *description
 		}
 	}
-	if req.Description != nil {
-		environment["description"] = strings.TrimSpace(*req.Description)
-	}
 	if req.Config != nil {
-		environment["config"] = ensureEnvironmentConfig(req.Config)
+		config, err := normalizeUpdateEnvironmentConfig(environmentConfigToMap(environment.Config), req.Config)
+		if err != nil {
+			return nil, err
+		}
+		environment.Config = environmentConfigFromMap(config)
 	}
-	if req.Metadata != nil {
-		environment["metadata"] = mergeNullableMetadata(mapFromValue(environment["metadata"]), req.Metadata)
+	if req.Metadata.Set {
+		metadata, err := mergeMetadataPatch(environment.Metadata, req.Metadata, 0, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		environment.Metadata = metadata
 	}
 	now := time.Now().UTC()
-	environment["updated_at"] = nowRFC3339(now)
-	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, timePointerFromValue(environment["archived_at"]), now); err != nil {
+	environment.UpdatedAt = nowRFC3339(now)
+	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, parseTimestampPointer(environment.ArchivedAt), now); err != nil {
 		return nil, err
 	}
 	return environment, nil
@@ -162,57 +281,73 @@ func (s *Service) DeleteEnvironment(ctx context.Context, principal Principal, en
 	return deletedObject("environment_deleted", environmentID), nil
 }
 
-func (s *Service) ArchiveEnvironment(ctx context.Context, principal Principal, environmentID string) (map[string]any, error) {
+func (s *Service) ArchiveEnvironment(ctx context.Context, principal Principal, environmentID string) (*Environment, error) {
 	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	environment["archived_at"] = nowRFC3339(now)
-	environment["updated_at"] = nowRFC3339(now)
+	environment.ArchivedAt = timestampPointerOrNil(&now)
+	environment.UpdatedAt = nowRFC3339(now)
 	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, &now, now); err != nil {
 		return nil, err
 	}
 	return environment, nil
 }
 
-func (s *Service) CreateVault(ctx context.Context, principal Principal, req CreateVaultRequest) (map[string]any, error) {
-	if strings.TrimSpace(req.DisplayName) == "" {
-		return nil, errors.New("display_name is required")
+func (s *Service) CreateVault(ctx context.Context, principal Principal, req CreateVaultRequest) (*Vault, error) {
+	displayName, err := normalizeRequiredText(req.DisplayName, "display_name", 255)
+	if err != nil {
+		return nil, err
 	}
+	metadata, err := normalizeMetadataMap(req.Metadata, 16, 64, 512)
+	if err != nil {
+		return nil, err
+	}
+	req.DisplayName = displayName
+	req.Metadata = metadata
 	now := time.Now().UTC()
 	vault := buildVaultObject(NewID("vlt"), req, now, nil)
 	if err := s.repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
 		return nil, err
 	}
-	return vault, nil
+	return &vault, nil
 }
 
-func (s *Service) ListVaults(ctx context.Context, principal Principal, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (s *Service) ListVaults(ctx context.Context, principal Principal, limit int, page string, includeArchived bool) ([]Vault, *string, error) {
 	return s.repo.ListVaults(ctx, principal.TeamID, limit, page, includeArchived)
 }
 
-func (s *Service) GetVault(ctx context.Context, principal Principal, vaultID string) (map[string]any, error) {
+func (s *Service) GetVault(ctx context.Context, principal Principal, vaultID string) (*Vault, error) {
 	return s.repo.GetVault(ctx, principal.TeamID, vaultID)
 }
 
-func (s *Service) UpdateVault(ctx context.Context, principal Principal, vaultID string, req UpdateVaultRequest) (map[string]any, error) {
+func (s *Service) UpdateVault(ctx context.Context, principal Principal, vaultID string, req UpdateVaultRequest) (*Vault, error) {
 	vault, err := s.repo.GetVault(ctx, principal.TeamID, vaultID)
 	if err != nil {
 		return nil, err
 	}
-	if req.DisplayName != nil {
-		trimmed := strings.TrimSpace(*req.DisplayName)
-		if trimmed != "" {
-			vault["display_name"] = trimmed
+	if req.DisplayName.Set {
+		displayName, err := normalizeOptionalText(req.DisplayName.Value, "display_name", 255)
+		if err != nil {
+			return nil, err
+		}
+		if displayName == nil {
+			vault.DisplayName = ""
+		} else {
+			vault.DisplayName = *displayName
 		}
 	}
-	if req.Metadata != nil {
-		vault["metadata"] = mergeNullableMetadata(mapFromValue(vault["metadata"]), req.Metadata)
+	if req.Metadata.Set {
+		metadata, err := mergeMetadataPatch(vault.Metadata, req.Metadata, 16, 64, 512)
+		if err != nil {
+			return nil, err
+		}
+		vault.Metadata = metadata
 	}
 	now := time.Now().UTC()
-	vault["updated_at"] = nowRFC3339(now)
-	if err := s.repo.UpdateVault(ctx, principal.TeamID, vaultID, vault, timePointerFromValue(vault["archived_at"]), now); err != nil {
+	vault.UpdatedAt = nowRFC3339(now)
+	if err := s.repo.UpdateVault(ctx, principal.TeamID, vaultID, vault, parseTimestampPointer(vault.ArchivedAt), now); err != nil {
 		return nil, err
 	}
 	return vault, nil
@@ -225,65 +360,92 @@ func (s *Service) DeleteVault(ctx context.Context, principal Principal, vaultID 
 	return deletedObject("vault_deleted", vaultID), nil
 }
 
-func (s *Service) ArchiveVault(ctx context.Context, principal Principal, vaultID string) (map[string]any, error) {
+func (s *Service) ArchiveVault(ctx context.Context, principal Principal, vaultID string) (*Vault, error) {
 	vault, err := s.repo.GetVault(ctx, principal.TeamID, vaultID)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	vault["archived_at"] = nowRFC3339(now)
-	vault["updated_at"] = nowRFC3339(now)
+	vault.ArchivedAt = timestampPointerOrNil(&now)
+	vault.UpdatedAt = nowRFC3339(now)
 	if err := s.repo.UpdateVault(ctx, principal.TeamID, vaultID, vault, &now, now); err != nil {
 		return nil, err
 	}
 	return vault, nil
 }
 
-func (s *Service) CreateCredential(ctx context.Context, principal Principal, vaultID string, req CreateCredentialRequest) (map[string]any, error) {
+func (s *Service) CreateCredential(ctx context.Context, principal Principal, vaultID string, req CreateCredentialRequest) (*Credential, error) {
 	if len(req.Auth) == 0 {
 		return nil, errors.New("auth is required")
 	}
 	if _, err := s.repo.GetVault(ctx, principal.TeamID, vaultID); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
-	credential := buildCredentialObject(NewID("vcrd"), vaultID, req, now, nil)
-	if err := s.repo.CreateCredential(ctx, principal.TeamID, vaultID, credential, cloneMap(req.Auth), nil, now); err != nil {
+	displayName, err := normalizeOptionalText(req.DisplayName, "display_name", 255)
+	if err != nil {
 		return nil, err
 	}
-	return credential, nil
+	metadata, err := normalizeMetadataMap(req.Metadata, 16, 64, 512)
+	if err != nil {
+		return nil, err
+	}
+	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
+	if err != nil {
+		return nil, err
+	}
+	req.DisplayName = displayName
+	req.Metadata = metadata
+	now := time.Now().UTC()
+	credential := buildCredentialObject(NewID("vcrd"), vaultID, req, now, nil)
+	credential.Auth = credentialAuthFromMap(normalizedAuth.Public)
+	if err := s.repo.CreateCredential(ctx, principal.TeamID, vaultID, credential, normalizedAuth.Secret, nil, now); err != nil {
+		return nil, err
+	}
+	return &credential, nil
 }
 
-func (s *Service) ListCredentials(ctx context.Context, principal Principal, vaultID string, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (s *Service) ListCredentials(ctx context.Context, principal Principal, vaultID string, limit int, page string, includeArchived bool) ([]Credential, *string, error) {
 	if _, err := s.repo.GetVault(ctx, principal.TeamID, vaultID); err != nil {
 		return nil, nil, err
 	}
 	return s.repo.ListCredentials(ctx, principal.TeamID, vaultID, limit, page, includeArchived)
 }
 
-func (s *Service) GetCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (map[string]any, error) {
+func (s *Service) GetCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (*Credential, error) {
 	credential, _, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID)
 	return credential, err
 }
 
-func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vaultID, credentialID string, req UpdateCredentialRequest) (map[string]any, error) {
+func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vaultID, credentialID string, req UpdateCredentialRequest) (*Credential, error) {
 	credential, secret, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID)
 	if err != nil {
 		return nil, err
 	}
-	if req.DisplayName != nil {
-		credential["display_name"] = nullableText(req.DisplayName)
+	if req.DisplayName.Set {
+		displayName, err := normalizeOptionalText(req.DisplayName.Value, "display_name", 255)
+		if err != nil {
+			return nil, err
+		}
+		credential.DisplayName = displayName
 	}
-	if req.Metadata != nil {
-		credential["metadata"] = mergeNullableMetadata(mapFromValue(credential["metadata"]), req.Metadata)
+	if req.Metadata.Set {
+		metadata, err := mergeMetadataPatch(credential.Metadata, req.Metadata, 16, 64, 512)
+		if err != nil {
+			return nil, err
+		}
+		credential.Metadata = metadata
 	}
 	if req.Auth != nil {
-		secret = cloneMap(req.Auth)
-		credential["auth"] = redactCredentialAuth(req.Auth)
+		normalizedAuth, err := normalizeUpdateCredentialAuth(credentialAuthToMap(credential.Auth), secret, req.Auth)
+		if err != nil {
+			return nil, err
+		}
+		secret = normalizedAuth.Secret
+		credential.Auth = credentialAuthFromMap(normalizedAuth.Public)
 	}
 	now := time.Now().UTC()
-	credential["updated_at"] = nowRFC3339(now)
-	if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credentialID, credential, secret, timePointerFromValue(credential["archived_at"]), now); err != nil {
+	credential.UpdatedAt = nowRFC3339(now)
+	if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credentialID, credential, secret, parseTimestampPointer(credential.ArchivedAt), now); err != nil {
 		return nil, err
 	}
 	return credential, nil
@@ -296,24 +458,24 @@ func (s *Service) DeleteCredential(ctx context.Context, principal Principal, vau
 	return deletedObject("vault_credential_deleted", credentialID), nil
 }
 
-func (s *Service) ArchiveCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (map[string]any, error) {
+func (s *Service) ArchiveCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (*Credential, error) {
 	credential, secret, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	credential["archived_at"] = nowRFC3339(now)
-	credential["updated_at"] = nowRFC3339(now)
+	credential.ArchivedAt = timestampPointerOrNil(&now)
+	credential.UpdatedAt = nowRFC3339(now)
 	if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credentialID, credential, secret, &now, now); err != nil {
 		return nil, err
 	}
 	return credential, nil
 }
 
-func (s *Service) UploadFile(ctx context.Context, principal Principal, filename, mimeType string, content []byte) (map[string]any, error) {
+func (s *Service) UploadFile(ctx context.Context, principal Principal, filename, mimeType string, content []byte) (FileMetadata, error) {
 	trimmedName := strings.TrimSpace(filename)
 	if trimmedName == "" {
-		return nil, errors.New("filename is required")
+		return FileMetadata{}, errors.New("filename is required")
 	}
 	resolvedMimeType := strings.TrimSpace(mimeType)
 	if resolvedMimeType == "" {
@@ -334,34 +496,29 @@ func (s *Service) UploadFile(ctx context.Context, principal Principal, filename,
 		UpdatedAt: now,
 	}
 	if err := s.repo.CreateFile(ctx, record); err != nil {
-		return nil, err
+		return FileMetadata{}, err
 	}
 	return buildFileObject(record), nil
 }
 
-func (s *Service) ListFiles(ctx context.Context, principal Principal, opts FileListOptions) (map[string]any, error) {
+func (s *Service) ListFiles(ctx context.Context, principal Principal, opts FileListOptions) (FileListResponse, error) {
 	files, hasMore, err := s.repo.ListFiles(ctx, principal.TeamID, opts)
 	if err != nil {
-		return nil, err
+		return FileListResponse{}, err
 	}
-	var firstID any
-	var lastID any
+	var firstID *string
+	var lastID *string
 	if len(files) > 0 {
-		firstID = files[0]["id"]
-		lastID = files[len(files)-1]["id"]
+		firstID = &files[0].ID
+		lastID = &files[len(files)-1].ID
 	}
-	return map[string]any{
-		"data":     files,
-		"first_id": firstID,
-		"last_id":  lastID,
-		"has_more": hasMore,
-	}, nil
+	return FileListResponse{Data: files, FirstID: firstID, LastID: lastID, HasMore: hasMore}, nil
 }
 
-func (s *Service) GetFileMetadata(ctx context.Context, principal Principal, fileID string) (map[string]any, error) {
+func (s *Service) GetFileMetadata(ctx context.Context, principal Principal, fileID string) (FileMetadata, error) {
 	record, err := s.repo.GetFile(ctx, principal.TeamID, fileID)
 	if err != nil {
-		return nil, err
+		return FileMetadata{}, err
 	}
 	return buildFileObject(record), nil
 }
@@ -451,16 +608,16 @@ func (s *Service) AddSessionResource(ctx context.Context, principal Principal, s
 		return nil, err
 	}
 	now := time.Now().UTC()
-	resource, err := s.validateAndNormalizeResource(ctx, principal, normalizeSessionResource(req, now))
+	validated, err := s.validateAndNormalizeResource(ctx, principal, normalizeSessionResource(req, now), false)
 	if err != nil {
 		return nil, err
 	}
-	record.Resources = append(cloneMapSlice(record.Resources), resource)
+	record.Resources = append(cloneMapSlice(record.Resources), validated.Public)
 	record.UpdatedAt = now
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 		return nil, err
 	}
-	return resource, nil
+	return validated.Public, nil
 }
 
 func (s *Service) GetSessionResource(ctx context.Context, principal Principal, sessionID, resourceID string) (map[string]any, error) {
@@ -490,13 +647,20 @@ func (s *Service) UpdateSessionResource(ctx context.Context, principal Principal
 	if !found {
 		return nil, ErrResourceNotFound
 	}
+	if stringValue(current["type"]) != "github_repository" {
+		return nil, errors.New("only github_repository resources support updates")
+	}
+	if err := validateAllowedFields(map[string]any(req), []string{"authorization_token"}); err != nil {
+		return nil, err
+	}
+	authorizationToken := strings.TrimSpace(stringValue(req["authorization_token"]))
+	if authorizationToken == "" {
+		return nil, errors.New("authorization_token is required")
+	}
 	now := time.Now().UTC()
-	updated := cloneMap(req)
-	updated["id"] = resourceID
-	updated["created_at"] = current["created_at"]
-	updated = normalizeSessionResource(updated, now)
-	updated, err = s.validateAndNormalizeResource(ctx, principal, updated)
-	if err != nil {
+	updated := cloneMap(current)
+	updated["updated_at"] = nowRFC3339(now)
+	if err := s.repo.UpsertSessionResourceSecret(ctx, sessionID, resourceID, map[string]any{"authorization_token": authorizationToken}); err != nil {
 		return nil, err
 	}
 	resources := cloneMapSlice(record.Resources)
@@ -527,58 +691,78 @@ func (s *Service) DeleteSessionResource(ctx context.Context, principal Principal
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 		return nil, err
 	}
+	if err := s.repo.DeleteSessionResourceSecret(ctx, sessionID, resourceID); err != nil {
+		return nil, err
+	}
 	return deletedObject("session_resource_deleted", resourceID), nil
 }
 
-func (s *Service) validateAndNormalizeResource(ctx context.Context, principal Principal, resource map[string]any) (map[string]any, error) {
+func (s *Service) validateAndNormalizeResource(ctx context.Context, principal Principal, resource map[string]any, allowGitHub bool) (*validatedSessionResource, error) {
 	resourceType := strings.TrimSpace(stringValue(resource["type"]))
 	switch resourceType {
 	case "file":
+		if err := validateAllowedFields(resource, []string{"type", "id", "file_id", "mount_path", "created_at", "updated_at"}); err != nil {
+			return nil, err
+		}
 		fileID := strings.TrimSpace(stringValue(resource["file_id"]))
 		if fileID == "" {
 			return nil, errors.New("file_id is required")
 		}
-		if strings.TrimSpace(stringValue(resource["mount_path"])) == "" {
-			return nil, errors.New("mount_path is required")
-		}
 		if _, err := s.repo.GetFile(ctx, principal.TeamID, fileID); err != nil {
 			return nil, err
 		}
+		resource["file_id"] = fileID
+		resource["mount_path"] = defaultFileMountPath(fileID, stringValue(resource["mount_path"]))
+		return &validatedSessionResource{Public: resource}, nil
 	case "github_repository":
-		if strings.TrimSpace(stringValue(resource["url"])) == "" {
+		if !allowGitHub {
+			return nil, errors.New("only file resources can be added after session creation")
+		}
+		if err := validateAllowedFields(resource, []string{"type", "id", "url", "authorization_token", "mount_path", "checkout", "created_at", "updated_at"}); err != nil {
+			return nil, err
+		}
+		repoURL := strings.TrimSpace(stringValue(resource["url"]))
+		if repoURL == "" {
 			return nil, errors.New("url is required")
 		}
-		if strings.TrimSpace(stringValue(resource["mount_path"])) == "" {
-			return nil, errors.New("mount_path is required")
+		authorizationToken := strings.TrimSpace(stringValue(resource["authorization_token"]))
+		if authorizationToken == "" {
+			return nil, errors.New("authorization_token is required")
 		}
+		parsedURL, err := url.Parse(repoURL)
+		if err != nil || !strings.EqualFold(parsedURL.Hostname(), "github.com") {
+			return nil, errors.New("url must be a valid github repository url")
+		}
+		repoName := repositoryNameFromURL(parsedURL)
+		if repoName == "" {
+			return nil, errors.New("url must point to a github repository")
+		}
+		checkout, err := normalizeRepositoryCheckout(resource["checkout"])
+		if err != nil {
+			return nil, err
+		}
+		resource["url"] = repoURL
+		resource["mount_path"] = defaultGitHubMountPath(repoName, stringValue(resource["mount_path"]))
+		if checkout == nil {
+			delete(resource, "checkout")
+		} else {
+			resource["checkout"] = checkout
+		}
+		delete(resource, "authorization_token")
+		return &validatedSessionResource{
+			Public: resource,
+			Secret: map[string]any{"authorization_token": authorizationToken},
+		}, nil
 	default:
 		return nil, errors.New("invalid resource type")
 	}
-	return resource, nil
 }
 
 func ensureEnvironmentConfig(config map[string]any) map[string]any {
 	if len(config) != 0 {
 		return cloneMap(config)
 	}
-	return map[string]any{
-		"type": "cloud",
-		"networking": map[string]any{
-			"type":                   "limited",
-			"allowed_hosts":          []any{},
-			"allow_package_managers": false,
-			"allow_mcp_servers":      false,
-		},
-		"packages": map[string]any{
-			"type":  "packages",
-			"pip":   []any{},
-			"npm":   []any{},
-			"apt":   []any{},
-			"cargo": []any{},
-			"gem":   []any{},
-			"go":    []any{},
-		},
-	}
+	return defaultEnvironmentConfig()
 }
 
 func mapFromValue(value any) map[string]string {
@@ -666,26 +850,48 @@ func timePointerFromValue(value any) *time.Time {
 func (s *Service) resolveSessionAgentReference(ctx context.Context, principal Principal, input any) (string, map[string]any, error) {
 	switch value := input.(type) {
 	case string:
-		agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, value, 0)
+		agentID, err := normalizeRequiredText(value, "agent", 128)
+		if err != nil {
+			return "", nil, err
+		}
+		agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, agentID, 0)
 		if err != nil {
 			return "", nil, err
 		}
 		if err := ensureClaudeVendor(vendor); err != nil {
 			return "", nil, err
 		}
-		return vendor, agent, err
+		return vendor, agentToSnapshot(*agent), nil
 	case map[string]any:
-		if strings.TrimSpace(stringValue(value["id"])) == "" {
-			return "", nil, errors.New("agent.id is required")
+		if err := validateAllowedFields(value, []string{"type", "id", "version"}); err != nil {
+			return "", nil, err
 		}
-		agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, stringValue(value["id"]), intValue(value["version"]))
+		if strings.TrimSpace(stringValue(value["type"])) != "agent" {
+			return "", nil, errors.New("agent.type must be agent")
+		}
+		agentID, err := normalizeRequiredText(stringValue(value["id"]), "agent.id", 128)
+		if err != nil {
+			return "", nil, err
+		}
+		version := intValue(value["version"])
+		if rawVersion, exists := value["version"]; exists {
+			switch rawVersion.(type) {
+			case int, int32, int64, float64:
+			default:
+				return "", nil, errors.New("agent.version must be an integer")
+			}
+			if version < 1 {
+				return "", nil, errors.New("agent.version must be at least 1")
+			}
+		}
+		agent, vendor, err := s.repo.GetAgent(ctx, principal.TeamID, agentID, version)
 		if err != nil {
 			return "", nil, err
 		}
 		if err := ensureClaudeVendor(vendor); err != nil {
 			return "", nil, err
 		}
-		return vendor, agent, err
+		return vendor, agentToSnapshot(*agent), nil
 	default:
 		return "", nil, errors.New("agent is required")
 	}
@@ -698,23 +904,100 @@ func ensureClaudeVendor(vendor string) error {
 	return errors.New("only claude managed agents are supported")
 }
 
-func (s *Service) validateSessionDependencies(ctx context.Context, principal Principal, environmentID string, vaultIDs []string, resources []map[string]any) ([]map[string]any, error) {
+func (s *Service) validateSessionDependencies(ctx context.Context, principal Principal, environmentID string, vaultIDs []string, resources []map[string]any) ([]map[string]any, map[string]map[string]any, error) {
 	if _, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, vaultID := range vaultIDs {
 		if _, err := s.repo.GetVault(ctx, principal.TeamID, vaultID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	now := time.Now().UTC()
 	normalized := make([]map[string]any, 0, len(resources))
+	secrets := make(map[string]map[string]any)
 	for _, resource := range resources {
-		validated, err := s.validateAndNormalizeResource(ctx, principal, normalizeSessionResource(resource, now))
+		validated, err := s.validateAndNormalizeResource(ctx, principal, normalizeSessionResource(resource, now), true)
 		if err != nil {
+			return nil, nil, err
+		}
+		normalized = append(normalized, validated.Public)
+		if len(validated.Secret) > 0 {
+			secrets[stringValue(validated.Public["id"])] = validated.Secret
+		}
+	}
+	return normalized, secrets, nil
+}
+
+func validateAllowedFields(input map[string]any, allowed []string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		allowedSet[field] = struct{}{}
+	}
+	for field := range input {
+		if _, ok := allowedSet[field]; !ok {
+			return errors.New("invalid resource field: " + field)
+		}
+	}
+	return nil
+}
+
+func defaultFileMountPath(fileID, mountPath string) string {
+	if trimmed := strings.TrimSpace(mountPath); trimmed != "" {
+		return trimmed
+	}
+	return "/mnt/session/uploads/" + fileID
+}
+
+func defaultGitHubMountPath(repoName, mountPath string) string {
+	if trimmed := strings.TrimSpace(mountPath); trimmed != "" {
+		return trimmed
+	}
+	return "/workspace/" + repoName
+}
+
+func repositoryNameFromURL(repoURL *url.URL) string {
+	if repoURL == nil {
+		return ""
+	}
+	name := strings.TrimSuffix(path.Base(strings.TrimSpace(repoURL.Path)), ".git")
+	if name == "." || name == "/" {
+		return ""
+	}
+	return strings.TrimSpace(name)
+}
+
+func normalizeRepositoryCheckout(input any) (map[string]any, error) {
+	if input == nil {
+		return nil, nil
+	}
+	checkout, ok := input.(map[string]any)
+	if !ok {
+		return nil, errors.New("checkout must be an object")
+	}
+	checkout = cloneMap(checkout)
+	switch strings.TrimSpace(stringValue(checkout["type"])) {
+	case "branch":
+		if err := validateAllowedFields(checkout, []string{"type", "name"}); err != nil {
 			return nil, err
 		}
-		normalized = append(normalized, validated)
+		name := strings.TrimSpace(stringValue(checkout["name"]))
+		if name == "" {
+			return nil, errors.New("checkout.name is required")
+		}
+		return map[string]any{"type": "branch", "name": name}, nil
+	case "commit":
+		if err := validateAllowedFields(checkout, []string{"type", "sha"}); err != nil {
+			return nil, err
+		}
+		sha := strings.TrimSpace(stringValue(checkout["sha"]))
+		if len(sha) < 7 {
+			return nil, errors.New("checkout.sha is required")
+		}
+		return map[string]any{"type": "commit", "sha": sha}, nil
+	case "":
+		return nil, errors.New("checkout.type is required")
+	default:
+		return nil, errors.New("invalid checkout type")
 	}
-	return normalized, nil
 }

@@ -24,22 +24,47 @@ type RuntimeManager interface {
 
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
-	repo    *Repository
-	runtime RuntimeManager
-	logger  *zap.Logger
+	repo            *Repository
+	runtime         RuntimeManager
+	logger          *zap.Logger
+	anthropicSkills AnthropicSkillCatalog
+}
+
+type ServiceOption func(*Service)
+
+func WithAnthropicSkillCatalog(catalog AnthropicSkillCatalog) ServiceOption {
+	return func(s *Service) {
+		if catalog != nil {
+			s.anthropicSkills = catalog
+		}
+	}
 }
 
 // NewService returns a managed-agent service.
-func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger) *Service {
+func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger, opts ...ServiceOption) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Service{repo: repo, runtime: runtime, logger: logger}
+	service := &Service{repo: repo, runtime: runtime, logger: logger, anthropicSkills: defaultAnthropicSkillRegistry()}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+	return service
 }
 
 func (s *Service) CreateSession(ctx context.Context, principal Principal, params CreateSessionParams) (*Session, error) {
 	if strings.TrimSpace(principal.TeamID) == "" {
 		return nil, errors.New("team id is required")
+	}
+	environmentID, err := normalizeRequiredText(params.EnvironmentID, "environment_id", 128)
+	if err != nil {
+		return nil, err
+	}
+	vaultIDs, err := normalizeStringSlice(params.VaultIDs, "vault_ids", 128)
+	if err != nil {
+		return nil, err
 	}
 	vendor, agentSnapshot, err := s.resolveSessionAgentReference(ctx, principal, params.Agent)
 	if err != nil {
@@ -49,11 +74,15 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, params
 		return nil, err
 	}
 	now := time.Now().UTC()
-	workingDirectory := strings.TrimSpace(params.WorkingDirectory)
-	if workingDirectory == "" {
-		workingDirectory = "/workspace"
+	resources, resourceSecrets, err := s.validateSessionDependencies(ctx, principal, environmentID, vaultIDs, cloneMapSlice(params.Resources))
+	if err != nil {
+		return nil, err
 	}
-	resources, err := s.validateSessionDependencies(ctx, principal, strings.TrimSpace(params.EnvironmentID), params.VaultIDs, cloneMapSlice(params.Resources))
+	title, err := normalizeOptionalText(params.Title, "title", 500)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := normalizeMetadataMap(params.Metadata, 16, 64, 512)
 	if err != nil {
 		return nil, err
 	}
@@ -62,22 +91,24 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, params
 		TeamID:           strings.TrimSpace(principal.TeamID),
 		CreatedByUserID:  strings.TrimSpace(principal.UserID),
 		Vendor:           vendor,
-		EnvironmentID:    strings.TrimSpace(params.EnvironmentID),
-		WorkingDirectory: workingDirectory,
-		Title:            params.Title,
-		Metadata:         cloneStringMap(params.Metadata),
+		EnvironmentID:    environmentID,
+		WorkingDirectory: "/workspace",
+		Title:            title,
+		Metadata:         metadata,
 		Agent:            agentSnapshot,
 		Resources:        resources,
-		VaultIDs:         append([]string(nil), params.VaultIDs...),
+		VaultIDs:         append([]string(nil), vaultIDs...),
 		Status:           "idle",
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
-	if record.EnvironmentID == "" {
-		return nil, errors.New("environment_id is required")
-	}
-	if err := s.repo.CreateSession(ctx, record, cloneMap(params.Engine)); err != nil {
+	if err := s.repo.CreateSession(ctx, record, nil); err != nil {
 		return nil, err
+	}
+	for resourceID, secret := range resourceSecrets {
+		if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
+			return nil, err
+		}
 	}
 	return record.toAPI(now), nil
 }
@@ -114,14 +145,26 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, sessio
 	if err := ensureSessionAccess(record, principal); err != nil {
 		return nil, err
 	}
-	if params.Title != nil {
-		record.Title = params.Title
+	if params.Title.Set {
+		if params.Title.Value != nil {
+			title, err := normalizeOptionalText(params.Title.Value, "title", 500)
+			if err != nil {
+				return nil, err
+			}
+			record.Title = title
+		} else {
+			record.Title = nil
+		}
 	}
-	if params.Metadata != nil {
-		record.Metadata = cloneStringMap(params.Metadata)
+	if params.Metadata.Set {
+		metadata, err := mergeMetadataPatch(record.Metadata, params.Metadata, 16, 64, 512)
+		if err != nil {
+			return nil, err
+		}
+		record.Metadata = metadata
 	}
-	if params.WorkingDirectory != nil && strings.TrimSpace(*params.WorkingDirectory) != "" {
-		record.WorkingDirectory = strings.TrimSpace(*params.WorkingDirectory)
+	if params.VaultIDs.Set {
+		return nil, errors.New("vault_ids is not yet supported")
 	}
 	record.UpdatedAt = time.Now().UTC()
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
@@ -179,7 +222,8 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		return nil, err
 	}
 	processedAt := time.Now().UTC()
-	stampedEvents := stampEvents(params.Events, processedAt)
+	inputEventMaps := inputEventsToMaps(params.Events)
+	stampedEvents := stampEvents(inputEventMaps, processedAt)
 	if err := validateInputEvents(stampedEvents); err != nil {
 		return nil, err
 	}
@@ -214,7 +258,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 			return nil, err
 		}
-		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: stampedEvents})
+		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(stampedEvents)})
 		if err != nil {
 			return nil, err
 		}
@@ -244,7 +288,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 			if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 				return nil, err
 			}
-			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: stampedEvents}); err != nil {
+			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(stampedEvents)}); err != nil {
 				failureEvents := []map[string]any{
 					stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 					stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -287,7 +331,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 		return nil, err
 	}
-	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: stampedEvents}); err != nil {
+	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(stampedEvents)}); err != nil {
 		failureEvents := []map[string]any{
 			stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 			stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -337,7 +381,7 @@ func (s *Service) applyRuntimePayload(ctx context.Context, runtime *RuntimeRecor
 		return err
 	}
 	processedAt := time.Now().UTC()
-	stampedEvents := stampEvents(payload.Events, processedAt)
+	stampedEvents := stampEvents(sessionEventsToMaps(payload.Events), processedAt)
 	if err := s.repo.AppendEvents(ctx, runtime.SessionID, stampedEvents); err != nil {
 		return err
 	}
@@ -382,6 +426,7 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 		Agent:            cloneMap(record.Agent),
 		Resources:        cloneMapSlice(record.Resources),
 		VaultIDs:         append([]string(nil), record.VaultIDs...),
+		SkillNames:       []string{},
 		Engine:           cloneMap(engine),
 	}
 	return req
@@ -448,25 +493,191 @@ func validateInputEvents(events []map[string]any) error {
 	for _, event := range events {
 		switch stringValue(event["type"]) {
 		case "user.message":
-			if _, ok := event["content"].([]any); !ok && event["content"] == nil {
+			if err := validateAllowedFields(event, []string{"type", "id", "content", "processed_at"}); err != nil {
+				return err
+			}
+			content, ok := event["content"].([]any)
+			if !ok {
 				return errors.New("user.message content is required")
 			}
-		case "user.interrupt":
-		case "user.tool_confirmation":
-			if strings.TrimSpace(stringValue(event["tool_use_id"])) == "" {
-				return errors.New("user.tool_confirmation tool_use_id is required")
+			if err := validateUserContentBlocks(content); err != nil {
+				return err
 			}
+		case "user.interrupt":
+			if err := validateAllowedFields(event, []string{"type", "id", "processed_at"}); err != nil {
+				return err
+			}
+		case "user.tool_confirmation":
+			if err := validateAllowedFields(event, []string{"type", "id", "tool_use_id", "result", "deny_message", "processed_at"}); err != nil {
+				return err
+			}
+			toolUseID, err := normalizeRequiredText(stringValue(event["tool_use_id"]), "user.tool_confirmation tool_use_id", 128)
+			if err != nil {
+				return err
+			}
+			event["tool_use_id"] = toolUseID
 			result := strings.TrimSpace(stringValue(event["result"]))
 			if result != "allow" && result != "deny" {
 				return errors.New("user.tool_confirmation result must be allow or deny")
 			}
+			denyMessage, hasDenyMessage := event["deny_message"]
+			if hasDenyMessage && denyMessage != nil {
+				messageValue := stringValue(denyMessage)
+				if message, err := normalizeOptionalText(&messageValue, "user.tool_confirmation deny_message", 10000); err != nil {
+					return err
+				} else {
+					event["deny_message"] = message
+				}
+			}
+			if result != "deny" && hasDenyMessage && denyMessage != nil && strings.TrimSpace(stringValue(denyMessage)) != "" {
+				return errors.New("user.tool_confirmation deny_message is only allowed when result is deny")
+			}
 		case "user.custom_tool_result":
-			if strings.TrimSpace(stringValue(event["custom_tool_use_id"])) == "" {
-				return errors.New("user.custom_tool_result custom_tool_use_id is required")
+			if err := validateAllowedFields(event, []string{"type", "id", "custom_tool_use_id", "content", "is_error", "processed_at"}); err != nil {
+				return err
+			}
+			customToolUseID, err := normalizeRequiredText(stringValue(event["custom_tool_use_id"]), "user.custom_tool_result custom_tool_use_id", 128)
+			if err != nil {
+				return err
+			}
+			event["custom_tool_use_id"] = customToolUseID
+			if raw, ok := event["content"]; ok {
+				content, ok := raw.([]any)
+				if !ok {
+					return errors.New("user.custom_tool_result content must be an array")
+				}
+				if err := validateToolResultContentBlocks(content); err != nil {
+					return err
+				}
+			}
+			if raw, ok := event["is_error"]; ok && raw != nil {
+				if _, ok := raw.(bool); !ok {
+					return errors.New("user.custom_tool_result is_error must be a boolean")
+				}
 			}
 		default:
 			return errors.New("invalid event type")
 		}
+	}
+	return nil
+}
+
+func validateUserContentBlocks(blocks []any) error {
+	for _, raw := range blocks {
+		if err := validateContentBlock(raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateToolResultContentBlocks(blocks []any) error {
+	for _, raw := range blocks {
+		if err := validateContentBlock(raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateContentBlock(raw any) error {
+	block, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("content blocks must be objects")
+	}
+	switch stringValue(block["type"]) {
+	case "text":
+		if err := validateAllowedFields(block, []string{"type", "text"}); err != nil {
+			return err
+		}
+		if _, ok := block["text"].(string); !ok {
+			return errors.New("text content block requires text")
+		}
+	case "image":
+		if err := validateAllowedFields(block, []string{"type", "source"}); err != nil {
+			return err
+		}
+		return validateImageSource(block["source"])
+	case "document":
+		if err := validateAllowedFields(block, []string{"type", "source", "title", "context"}); err != nil {
+			return err
+		}
+		return validateDocumentSource(block["source"])
+	default:
+		return errors.New("content block type is invalid")
+	}
+	return nil
+}
+
+func validateImageSource(raw any) error {
+	source, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("image source must be an object")
+	}
+	switch stringValue(source["type"]) {
+	case "base64":
+		if err := validateAllowedFields(source, []string{"type", "media_type", "data"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["media_type"])) == "" || strings.TrimSpace(stringValue(source["data"])) == "" {
+			return errors.New("base64 image source requires media_type and data")
+		}
+	case "url":
+		if err := validateAllowedFields(source, []string{"type", "url"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["url"])) == "" {
+			return errors.New("url image source requires url")
+		}
+	case "file":
+		if err := validateAllowedFields(source, []string{"type", "file_id"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["file_id"])) == "" {
+			return errors.New("file image source requires file_id")
+		}
+	default:
+		return errors.New("image source type is invalid")
+	}
+	return nil
+}
+
+func validateDocumentSource(raw any) error {
+	source, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("document source must be an object")
+	}
+	switch stringValue(source["type"]) {
+	case "base64":
+		if err := validateAllowedFields(source, []string{"type", "media_type", "data"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["media_type"])) == "" || strings.TrimSpace(stringValue(source["data"])) == "" {
+			return errors.New("base64 document source requires media_type and data")
+		}
+	case "text":
+		if err := validateAllowedFields(source, []string{"type", "media_type", "data"}); err != nil {
+			return err
+		}
+		if stringValue(source["media_type"]) != "text/plain" || strings.TrimSpace(stringValue(source["data"])) == "" {
+			return errors.New("text document source requires media_type text/plain and data")
+		}
+	case "url":
+		if err := validateAllowedFields(source, []string{"type", "url"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["url"])) == "" {
+			return errors.New("url document source requires url")
+		}
+	case "file":
+		if err := validateAllowedFields(source, []string{"type", "file_id"}); err != nil {
+			return err
+		}
+		if strings.TrimSpace(stringValue(source["file_id"])) == "" {
+			return errors.New("file document source requires file_id")
+		}
+	default:
+		return errors.New("document source type is invalid")
 	}
 	return nil
 }
@@ -558,9 +769,7 @@ func anySlice(value any) []any {
 }
 
 func applySessionBatch(record *SessionRecord, processedAt time.Time, usage Usage, events []map[string]any) *SessionRecord {
-	record.Usage.InputTokens += usage.InputTokens
-	record.Usage.OutputTokens += usage.OutputTokens
-	record.Usage.CacheReadInputTokens += usage.CacheReadInputTokens
+	mergeUsageTotals(&record.Usage, usage)
 	for _, event := range events {
 		switch stringValue(event["type"]) {
 		case "session.status_running":
@@ -585,6 +794,26 @@ func applySessionBatch(record *SessionRecord, processedAt time.Time, usage Usage
 	}
 	record.UpdatedAt = processedAt
 	return record
+}
+
+func mergeUsageTotals(total *Usage, delta Usage) {
+	if total == nil {
+		return
+	}
+	total.InputTokens += delta.InputTokens
+	total.OutputTokens += delta.OutputTokens
+	total.CacheReadInputTokens += delta.CacheReadInputTokens
+	if delta.CacheCreation == nil {
+		return
+	}
+	if total.CacheCreation == nil {
+		total.CacheCreation = &CacheCreationUsage{}
+	}
+	total.CacheCreation.Ephemeral1HInputTokens += delta.CacheCreation.Ephemeral1HInputTokens
+	total.CacheCreation.Ephemeral5MInputTokens += delta.CacheCreation.Ephemeral5MInputTokens
+	if total.CacheCreation.Ephemeral1HInputTokens == 0 && total.CacheCreation.Ephemeral5MInputTokens == 0 {
+		total.CacheCreation = nil
+	}
 }
 
 func stopRunning(record *SessionRecord, processedAt time.Time) *SessionRecord {

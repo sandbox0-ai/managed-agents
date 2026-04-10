@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeRuntime, runtimeEnvForEngine } from '../src/adapters/claude.js';
+import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine } from '../src/adapters/claude.js';
 
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
@@ -112,4 +112,21 @@ test('runtimeEnvForEngine preserves base process environment', () => {
   assert.equal(merged.PATH, '/custom/bin');
   assert.equal(merged.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
   assert.equal(merged.HOME, process.env.HOME);
+});
+
+test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {
+  const servers = mcpServersFromAgent([
+    { type: 'url', name: 'issues', url: 'https://example.com/sse' },
+    { type: 'url', name: 'search', url: 'https://api.example.com/mcp' },
+  ]);
+
+  assert.deepEqual(servers, {
+    issues: { type: 'sse', url: 'https://example.com/sse' },
+    search: { type: 'http', url: 'https://api.example.com/mcp' },
+  });
+});
+
+test('querySkillNames trims and filters preload skill names', () => {
+  assert.deepEqual(querySkillNames({ skill_names: [' demo-skill ', '', null, 'search'] }), ['demo-skill', 'search']);
+  assert.equal(querySkillNames({ skill_names: [] }), undefined);
 });

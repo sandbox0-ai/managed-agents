@@ -4,9 +4,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
+	contract "github.com/sandbox0-ai/managed-agent/internal/apicontract/generated"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) CreateAgent(c *gin.Context) {
@@ -14,17 +15,28 @@ func (h *Handler) CreateAgent(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req CreateAgentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsCreateAgentParams
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsCreateAgentParams", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	agent, err := h.service.CreateAgent(c.Request.Context(), principal, req)
+	params, err := createAgentRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	agent, err := h.service.CreateAgent(c.Request.Context(), principal, params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, agent)
+	response, err := agentToContract(agent)
+	if err != nil {
+		h.logger.Error("failed to encode create-agent response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListAgents(c *gin.Context) {
@@ -32,32 +44,32 @@ func (h *Handler) ListAgents(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	createdAtGTE, err := parseTimestampQuery(c.Query("created_at[gte]"))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	createdAtLTE, err := parseTimestampQuery(c.Query("created_at[lte]"))
-	if err != nil {
+	var req contract.BetaListAgentsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	agents, nextPage, err := h.service.ListAgents(c.Request.Context(), principal, AgentListOptions{
-		Limit:           limit,
-		Page:            c.Query("page"),
-		Order:           c.Query("order"),
-		IncludeArchived: strings.EqualFold(strings.TrimSpace(c.Query("include_archived")), "true"),
+		Limit:           int32QueryValue(req.Limit),
+		Page:            stringQueryValue(req.Page),
+		Order:           "",
+		IncludeArchived: boolQueryValue(req.IncludeArchived),
 		CreatedAt: TimeFilter{
-			GTE: createdAtGTE,
-			LTE: createdAtLTE,
+			GTE: timestampQueryValue(req.CreatedAtGte),
+			LTE: timestampQueryValue(req.CreatedAtLte),
 		},
 	})
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": agents, "next_page": nextPage})
+	response, err := listAgentsToContract(agents, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-agents response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetAgent(c *gin.Context) {
@@ -65,13 +77,23 @@ func (h *Handler) GetAgent(c *gin.Context) {
 	if !ok {
 		return
 	}
-	version, _ := strconv.Atoi(strings.TrimSpace(c.Query("version")))
-	agent, err := h.service.GetAgent(c.Request.Context(), principal, c.Param("agent_id"), version)
+	var req contract.BetaGetAgentParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	agent, err := h.service.GetAgent(c.Request.Context(), principal, c.Param("agent_id"), int32QueryValue(req.Version))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, agent)
+	response, err := agentToContract(agent)
+	if err != nil {
+		h.logger.Error("failed to encode get-agent response", zap.Error(err), zap.String("agent_id", c.Param("agent_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateAgent(c *gin.Context) {
@@ -79,8 +101,13 @@ func (h *Handler) UpdateAgent(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateAgentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := readValidatedContractJSONBody(c, "BetaManagedAgentsUpdateAgentParams")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	req, err := updateAgentRequestFromJSON(body)
+	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
@@ -89,7 +116,13 @@ func (h *Handler) UpdateAgent(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, agent)
+	response, err := agentToContract(agent)
+	if err != nil {
+		h.logger.Error("failed to encode update-agent response", zap.Error(err), zap.String("agent_id", c.Param("agent_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ArchiveAgent(c *gin.Context) {
@@ -102,7 +135,13 @@ func (h *Handler) ArchiveAgent(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, agent)
+	response, err := agentToContract(agent)
+	if err != nil {
+		h.logger.Error("failed to encode archive-agent response", zap.Error(err), zap.String("agent_id", c.Param("agent_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListAgentVersions(c *gin.Context) {
@@ -110,13 +149,23 @@ func (h *Handler) ListAgentVersions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	versions, nextPage, err := h.service.ListAgentVersions(c.Request.Context(), principal, c.Param("agent_id"), limit, c.Query("page"))
+	var req contract.BetaListAgentVersionsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	versions, nextPage, err := h.service.ListAgentVersions(c.Request.Context(), principal, c.Param("agent_id"), int32QueryValue(req.Limit), stringQueryValue(req.Page))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": versions, "next_page": nextPage})
+	response, err := listAgentsToContract(versions, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-agent-versions response", zap.Error(err), zap.String("agent_id", c.Param("agent_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) CreateEnvironment(c *gin.Context) {
@@ -124,17 +173,28 @@ func (h *Handler) CreateEnvironment(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req CreateEnvironmentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaPublicEnvironmentCreateRequest
+	if err := decodeContractJSONBody(c, "BetaPublicEnvironmentCreateRequest", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	environment, err := h.service.CreateEnvironment(c.Request.Context(), principal, req)
+	params, err := createEnvironmentRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	environment, err := h.service.CreateEnvironment(c.Request.Context(), principal, params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, environment)
+	response, err := environmentToContract(environment)
+	if err != nil {
+		h.logger.Error("failed to encode create-environment response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListEnvironments(c *gin.Context) {
@@ -142,14 +202,23 @@ func (h *Handler) ListEnvironments(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	includeArchived := strings.EqualFold(strings.TrimSpace(c.Query("include_archived")), "true")
-	environments, nextPage, err := h.service.ListEnvironments(c.Request.Context(), principal, limit, c.Query("page"), includeArchived)
+	var req contract.BetaListEnvironmentsV1EnvironmentsGetParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	environments, nextPage, err := h.service.ListEnvironments(c.Request.Context(), principal, intQueryValue(req.Limit), stringQueryValue(req.Page), boolQueryValue(req.IncludeArchived))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": environments, "next_page": nextPage})
+	response, err := listEnvironmentsToContract(environments, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-environments response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetEnvironment(c *gin.Context) {
@@ -162,7 +231,13 @@ func (h *Handler) GetEnvironment(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, environment)
+	response, err := environmentToContract(environment)
+	if err != nil {
+		h.logger.Error("failed to encode get-environment response", zap.Error(err), zap.String("environment_id", c.Param("environment_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateEnvironment(c *gin.Context) {
@@ -170,8 +245,13 @@ func (h *Handler) UpdateEnvironment(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateEnvironmentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := readValidatedContractJSONBody(c, "BetaPublicEnvironmentUpdateRequest")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	req, err := updateEnvironmentRequestFromJSON(body)
+	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
@@ -180,7 +260,13 @@ func (h *Handler) UpdateEnvironment(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, environment)
+	response, err := environmentToContract(environment)
+	if err != nil {
+		h.logger.Error("failed to encode update-environment response", zap.Error(err), zap.String("environment_id", c.Param("environment_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteEnvironment(c *gin.Context) {
@@ -193,7 +279,13 @@ func (h *Handler) DeleteEnvironment(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedEnvironmentToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-environment response", zap.Error(err), zap.String("environment_id", c.Param("environment_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) ArchiveEnvironment(c *gin.Context) {
@@ -206,7 +298,13 @@ func (h *Handler) ArchiveEnvironment(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, environment)
+	response, err := environmentToContract(environment)
+	if err != nil {
+		h.logger.Error("failed to encode archive-environment response", zap.Error(err), zap.String("environment_id", c.Param("environment_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) CreateVault(c *gin.Context) {
@@ -214,17 +312,28 @@ func (h *Handler) CreateVault(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req CreateVaultRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsCreateVaultRequest
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsCreateVaultRequest", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	vault, err := h.service.CreateVault(c.Request.Context(), principal, req)
+	params, err := createVaultRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	vault, err := h.service.CreateVault(c.Request.Context(), principal, params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, vault)
+	response, err := vaultToContract(vault)
+	if err != nil {
+		h.logger.Error("failed to encode create-vault response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListVaults(c *gin.Context) {
@@ -232,14 +341,23 @@ func (h *Handler) ListVaults(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	includeArchived := strings.EqualFold(strings.TrimSpace(c.Query("include_archived")), "true")
-	vaults, nextPage, err := h.service.ListVaults(c.Request.Context(), principal, limit, c.Query("page"), includeArchived)
+	var req contract.BetaListVaultsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	vaults, nextPage, err := h.service.ListVaults(c.Request.Context(), principal, int32QueryValue(req.Limit), stringQueryValue(req.Page), boolQueryValue(req.IncludeArchived))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": vaults, "next_page": nextPage})
+	response, err := listVaultsToContract(vaults, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-vaults response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetVault(c *gin.Context) {
@@ -252,7 +370,13 @@ func (h *Handler) GetVault(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, vault)
+	response, err := vaultToContract(vault)
+	if err != nil {
+		h.logger.Error("failed to encode get-vault response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateVault(c *gin.Context) {
@@ -260,8 +384,13 @@ func (h *Handler) UpdateVault(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateVaultRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := readValidatedContractJSONBody(c, "BetaManagedAgentsUpdateVaultRequestBody")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	req, err := updateVaultRequestFromJSON(body)
+	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
@@ -270,7 +399,13 @@ func (h *Handler) UpdateVault(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, vault)
+	response, err := vaultToContract(vault)
+	if err != nil {
+		h.logger.Error("failed to encode update-vault response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteVault(c *gin.Context) {
@@ -283,7 +418,13 @@ func (h *Handler) DeleteVault(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedVaultToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-vault response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) ArchiveVault(c *gin.Context) {
@@ -296,7 +437,13 @@ func (h *Handler) ArchiveVault(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, vault)
+	response, err := vaultToContract(vault)
+	if err != nil {
+		h.logger.Error("failed to encode archive-vault response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) CreateCredential(c *gin.Context) {
@@ -304,17 +451,28 @@ func (h *Handler) CreateCredential(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req CreateCredentialRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsCreateCredentialRequestBody
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsCreateCredentialRequestBody", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	credential, err := h.service.CreateCredential(c.Request.Context(), principal, c.Param("vault_id"), req)
+	params, err := createCredentialRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	credential, err := h.service.CreateCredential(c.Request.Context(), principal, c.Param("vault_id"), params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, credential)
+	response, err := credentialToContract(credential)
+	if err != nil {
+		h.logger.Error("failed to encode create-credential response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListCredentials(c *gin.Context) {
@@ -322,14 +480,23 @@ func (h *Handler) ListCredentials(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	includeArchived := strings.EqualFold(strings.TrimSpace(c.Query("include_archived")), "true")
-	credentials, nextPage, err := h.service.ListCredentials(c.Request.Context(), principal, c.Param("vault_id"), limit, c.Query("page"), includeArchived)
+	var req contract.BetaListCredentialsParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	credentials, nextPage, err := h.service.ListCredentials(c.Request.Context(), principal, c.Param("vault_id"), int32QueryValue(req.Limit), stringQueryValue(req.Page), boolQueryValue(req.IncludeArchived))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": credentials, "next_page": nextPage})
+	response, err := listCredentialsToContract(credentials, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-credentials response", zap.Error(err), zap.String("vault_id", c.Param("vault_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetCredential(c *gin.Context) {
@@ -342,7 +509,13 @@ func (h *Handler) GetCredential(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, credential)
+	response, err := credentialToContract(credential)
+	if err != nil {
+		h.logger.Error("failed to encode get-credential response", zap.Error(err), zap.String("credential_id", c.Param("credential_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateCredential(c *gin.Context) {
@@ -350,8 +523,13 @@ func (h *Handler) UpdateCredential(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateCredentialRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := readValidatedContractJSONBody(c, "BetaManagedAgentsUpdateCredentialRequestBody")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	req, err := updateCredentialRequestFromJSON(body)
+	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
@@ -360,7 +538,13 @@ func (h *Handler) UpdateCredential(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, credential)
+	response, err := credentialToContract(credential)
+	if err != nil {
+		h.logger.Error("failed to encode update-credential response", zap.Error(err), zap.String("credential_id", c.Param("credential_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteCredential(c *gin.Context) {
@@ -373,7 +557,13 @@ func (h *Handler) DeleteCredential(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedCredentialToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-credential response", zap.Error(err), zap.String("credential_id", c.Param("credential_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) ArchiveCredential(c *gin.Context) {
@@ -386,7 +576,13 @@ func (h *Handler) ArchiveCredential(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, credential)
+	response, err := credentialToContract(credential)
+	if err != nil {
+		h.logger.Error("failed to encode archive-credential response", zap.Error(err), zap.String("credential_id", c.Param("credential_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UploadFile(c *gin.Context) {
@@ -415,7 +611,13 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, metadata)
+	response, err := fileMetadataToContract(metadata)
+	if err != nil {
+		h.logger.Error("failed to encode upload-file response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListFiles(c *gin.Context) {
@@ -423,18 +625,28 @@ func (h *Handler) ListFiles(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
+	var req contract.BetaListFilesV1FilesGetParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	response, err := h.service.ListFiles(c.Request.Context(), principal, FileListOptions{
-		Limit:    limit,
-		ScopeID:  c.Query("scope_id"),
-		BeforeID: c.Query("before_id"),
-		AfterID:  c.Query("after_id"),
+		Limit:    intQueryValue(req.Limit),
+		ScopeID:  stringQueryValue(req.ScopeId),
+		BeforeID: stringQueryValue(req.BeforeId),
+		AfterID:  stringQueryValue(req.AfterId),
 	})
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := fileListToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode list-files response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) GetFileMetadata(c *gin.Context) {
@@ -447,7 +659,13 @@ func (h *Handler) GetFileMetadata(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, metadata)
+	response, err := fileMetadataToContract(metadata)
+	if err != nil {
+		h.logger.Error("failed to encode get-file-metadata response", zap.Error(err), zap.String("file_id", c.Param("file_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DownloadFile(c *gin.Context) {
@@ -476,7 +694,13 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedFileToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-file response", zap.Error(err), zap.String("file_id", c.Param("file_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) ArchiveSession(c *gin.Context) {
@@ -489,7 +713,13 @@ func (h *Handler) ArchiveSession(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, session)
+	response, err := sessionToContract(session)
+	if err != nil {
+		h.logger.Error("failed to encode archive-session response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListSessionResources(c *gin.Context) {
@@ -497,13 +727,23 @@ func (h *Handler) ListSessionResources(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	resources, nextPage, err := h.service.ListSessionResources(c.Request.Context(), principal, c.Param("session_id"), limit, c.Query("page"))
+	var req contract.BetaListResourcesParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	resources, nextPage, err := h.service.ListSessionResources(c.Request.Context(), principal, c.Param("session_id"), int32QueryValue(req.Limit), stringQueryValue(req.Page))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": resources, "next_page": nextPage})
+	response, err := listSessionResourcesToContract(resources, nextPage)
+	if err != nil {
+		h.logger.Error("failed to encode list-session-resources response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) AddSessionResource(c *gin.Context) {
@@ -511,17 +751,28 @@ func (h *Handler) AddSessionResource(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req AddSessionResourceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsAddSessionResourceParams
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsAddSessionResourceParams", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	resource, err := h.service.AddSessionResource(c.Request.Context(), principal, c.Param("session_id"), req)
+	params, err := addSessionResourceRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	resource, err := h.service.AddSessionResource(c.Request.Context(), principal, c.Param("session_id"), params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, resource)
+	response, err := addedSessionResourceToContract(resource)
+	if err != nil {
+		h.logger.Error("failed to encode add-session-resource response", zap.Error(err), zap.String("session_id", c.Param("session_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetSessionResource(c *gin.Context) {
@@ -534,7 +785,13 @@ func (h *Handler) GetSessionResource(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, resource)
+	response, err := sessionResourceToContract(resource)
+	if err != nil {
+		h.logger.Error("failed to encode get-session-resource response", zap.Error(err), zap.String("resource_id", c.Param("resource_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateSessionResource(c *gin.Context) {
@@ -542,17 +799,28 @@ func (h *Handler) UpdateSessionResource(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req UpdateSessionResourceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var req contract.BetaManagedAgentsUpdateSessionResourceParams
+	if err := decodeContractJSONBody(c, "BetaManagedAgentsUpdateSessionResourceParams", &req); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	resource, err := h.service.UpdateSessionResource(c.Request.Context(), principal, c.Param("session_id"), c.Param("resource_id"), req)
+	params, err := updateSessionResourceRequestFromContract(req)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
+		return
+	}
+	resource, err := h.service.UpdateSessionResource(c.Request.Context(), principal, c.Param("session_id"), c.Param("resource_id"), params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, resource)
+	response, err := updatedSessionResourceToContract(resource)
+	if err != nil {
+		h.logger.Error("failed to encode update-session-resource response", zap.Error(err), zap.String("resource_id", c.Param("resource_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteSessionResource(c *gin.Context) {
@@ -565,5 +833,11 @@ func (h *Handler) DeleteSessionResource(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedSessionResourceToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-session-resource response", zap.Error(err), zap.String("resource_id", c.Param("resource_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }

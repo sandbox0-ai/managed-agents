@@ -109,17 +109,20 @@ func (a *Sandbox0Authenticator) authenticateUserToken(ctx context.Context, token
 }
 
 func (a *Sandbox0Authenticator) authenticateAPIKey(ctx context.Context, token, selectedTeamID string) (*Context, error) {
-	teamID := strings.TrimSpace(selectedTeamID)
-	if teamID == "" {
-		return nil, newAuthError(http.StatusBadRequest, "x-team-id is required for api key authentication", nil)
-	}
-
-	client, err := a.newClient(token, teamID)
+	client, err := a.newClient(token, "")
 	if err != nil {
 		return nil, newAuthError(http.StatusBadGateway, "failed to initialize sandbox0 client", err)
 	}
-	if err := a.verifyAPIKeyTeamAccess(ctx, client, teamID); err != nil {
-		return nil, err
+	apiKey, err := client.GetCurrentAPIKey(ctx)
+	if err != nil {
+		return nil, a.wrapSandbox0Error(err)
+	}
+	teamID := strings.TrimSpace(apiKey.TeamID)
+	if teamID == "" {
+		return nil, newAuthError(http.StatusBadGateway, "sandbox0 api key response missing team id", nil)
+	}
+	if selected := strings.TrimSpace(selectedTeamID); selected != "" && selected != teamID {
+		return nil, newAuthError(http.StatusForbidden, "x-team-id does not match the sandbox0 api key team", nil)
 	}
 
 	return &Context{TeamID: teamID}, nil
@@ -180,22 +183,6 @@ func (a *Sandbox0Authenticator) verifyUserTeamAccess(ctx context.Context, client
 	if strings.TrimSpace(team.ID) != teamID {
 		return newAuthError(http.StatusForbidden, "sandbox0 returned a mismatched team context", nil)
 	}
-	return nil
-}
-
-func (a *Sandbox0Authenticator) verifyAPIKeyTeamAccess(ctx context.Context, client *sandbox0sdk.Client, teamID string) error {
-	volumes, err := client.ListVolume(ctx)
-	if err != nil {
-		return a.wrapSandbox0Error(err)
-	}
-	if len(volumes) > 0 {
-		if actualTeamID := strings.TrimSpace(volumes[0].TeamID); actualTeamID != "" && actualTeamID != teamID {
-			return newAuthError(http.StatusForbidden, "x-team-id does not match the sandbox0 api key team", nil)
-		}
-	}
-
-	// sandbox0 does not currently expose a read-only api key introspection endpoint.
-	// When the team has no sandboxes or volumes yet, the header becomes the only explicit team selection signal.
 	return nil
 }
 
@@ -271,7 +258,42 @@ func writeAuthError(c *gin.Context, err error) {
 			message = authErr.msg
 		}
 	}
-	c.AbortWithStatusJSON(status, gin.H{"error": message})
+	requestID := authRequestID(c)
+	c.Header("Request-Id", requestID)
+	c.AbortWithStatusJSON(status, gin.H{
+		"type":       "error",
+		"request_id": requestID,
+		"error": gin.H{
+			"type":    authErrorType(status),
+			"message": message,
+		},
+	})
+}
+
+func authErrorType(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	default:
+		return "api_error"
+	}
+}
+
+func authRequestID(c *gin.Context) string {
+	if c == nil {
+		return "req_auth"
+	}
+	if requestID := strings.TrimSpace(c.GetHeader("Request-Id")); requestID != "" {
+		return requestID
+	}
+	if requestID := strings.TrimSpace(c.GetHeader("X-Request-Id")); requestID != "" {
+		return requestID
+	}
+	return "req_auth"
 }
 
 func extractRequestToken(c *gin.Context) string {

@@ -4,10 +4,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	contract "github.com/sandbox0-ai/managed-agent/internal/apicontract/generated"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) CreateSkill(c *gin.Context) {
@@ -26,7 +27,13 @@ func (h *Handler) CreateSkill(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, skill)
+	response, err := skillToCreateContract(skill)
+	if err != nil {
+		h.logger.Error("failed to encode create-skill response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListSkills(c *gin.Context) {
@@ -34,13 +41,23 @@ func (h *Handler) ListSkills(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	items, nextPage, hasMore, err := h.service.ListSkills(c.Request.Context(), principal, limit, c.Query("page"), c.Query("source"))
+	var req contract.BetaListSkillsV1SkillsGetParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	items, nextPage, hasMore, err := h.service.ListSkills(c.Request.Context(), principal, intQueryValue(req.Limit), stringQueryValue(req.Page), stringQueryValue(req.Source))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": items, "next_page": nextPage, "has_more": hasMore})
+	response, err := listSkillsToContract(items, nextPage, hasMore)
+	if err != nil {
+		h.logger.Error("failed to encode list-skills response", zap.Error(err))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetSkill(c *gin.Context) {
@@ -53,7 +70,13 @@ func (h *Handler) GetSkill(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, skill)
+	response, err := skillToGetContract(skill)
+	if err != nil {
+		h.logger.Error("failed to encode get-skill response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteSkill(c *gin.Context) {
@@ -66,7 +89,13 @@ func (h *Handler) DeleteSkill(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedSkillToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-skill response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func (h *Handler) CreateSkillVersion(c *gin.Context) {
@@ -84,7 +113,13 @@ func (h *Handler) CreateSkillVersion(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, version)
+	response, err := skillVersionToCreateContract(version)
+	if err != nil {
+		h.logger.Error("failed to encode create-skill-version response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) ListSkillVersions(c *gin.Context) {
@@ -92,13 +127,23 @@ func (h *Handler) ListSkillVersions(c *gin.Context) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
-	items, nextPage, hasMore, err := h.service.ListSkillVersions(c.Request.Context(), principal, c.Param("skill_id"), limit, c.Query("page"))
+	var req contract.BetaListSkillVersionsV1SkillsSkillIdVersionsGetParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	items, nextPage, hasMore, err := h.service.ListSkillVersions(c.Request.Context(), principal, c.Param("skill_id"), intQueryValue(req.Limit), stringQueryValue(req.Page))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": items, "next_page": nextPage, "has_more": hasMore})
+	response, err := listSkillVersionsToContract(items, nextPage, hasMore)
+	if err != nil {
+		h.logger.Error("failed to encode list-skill-versions response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetSkillVersion(c *gin.Context) {
@@ -111,7 +156,13 @@ func (h *Handler) GetSkillVersion(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, version)
+	response, err := skillVersionToGetContract(version)
+	if err != nil {
+		h.logger.Error("failed to encode get-skill-version response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")), zap.String("version", c.Param("version")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteSkillVersion(c *gin.Context) {
@@ -124,7 +175,13 @@ func (h *Handler) DeleteSkillVersion(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, response)
+	contractResponse, err := deletedSkillVersionToContract(response)
+	if err != nil {
+		h.logger.Error("failed to encode delete-skill-version response", zap.Error(err), zap.String("skill_id", c.Param("skill_id")), zap.String("version", c.Param("version")))
+		writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+		return
+	}
+	c.JSON(http.StatusOK, contractResponse)
 }
 
 func readUploadedSkillFiles(c *gin.Context) ([]uploadedSkillFile, error) {

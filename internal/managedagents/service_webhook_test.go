@@ -51,9 +51,9 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 		SessionID:       record.ID,
 		RunID:           activeRunID,
 		VendorSessionID: "vendor_123",
-		Events: []map[string]any{
-			{"type": "agent.message", "content": []any{map[string]any{"type": "text", "text": "done"}}},
-			{"type": "session.status_idle", "stop_reason": map[string]any{"type": "end_turn"}},
+		Events: []SessionEvent{
+			{Type: "agent.message", Content: []UserContentBlock{{Type: "text", Text: "done"}}},
+			{Type: "session.status_idle", StopReason: &SessionStopReason{Type: "end_turn"}},
 		},
 	})
 	body, _ := json.Marshal(map[string]any{

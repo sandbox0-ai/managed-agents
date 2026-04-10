@@ -119,6 +119,29 @@ test('agent-warper ignores vendor-neutral bootstrap fields and stays Claude-spec
   server.close();
 });
 
+test('agent-warper persists preload skill names during bootstrap', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
+  const server = createServer({
+    stateDir,
+    runtime: new FakeRuntime(),
+    callbackClient: { send: async () => {} },
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_skill', vendor: 'claude', skill_names: ['demo-skill', 'search'] }),
+  });
+  assert.equal(response.status, 200);
+
+  const store = new RuntimeStore(stateDir);
+  assert.deepEqual(store.getSession('sesn_skill')?.skill_names, ['demo-skill', 'search']);
+
+  server.close();
+});
+
 test('RuntimeStore falls back to in-memory state when persistence is unavailable', () => {
   const store = new RuntimeStore('/proc/agent-wrapper-state');
   const session = store.upsertSession('sesn_mem', () => ({ session_id: 'sesn_mem', ok: true }));

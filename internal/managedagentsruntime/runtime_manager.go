@@ -154,6 +154,9 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 }
 
 func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
+	if err := m.syncBootstrapState(ctx, credential, runtime, req); err != nil {
+		return err
+	}
 	return m.wrapperJSON(ctx, credential, runtime, http.MethodPut, "/v1/runtime/session", req)
 }
 
@@ -182,6 +185,7 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	if err != nil {
 		return err
 	}
+	m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID)
 	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
 		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
 	}

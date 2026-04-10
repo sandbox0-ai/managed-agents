@@ -3,6 +3,7 @@ package managedagents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *Repository) CreateAgent(ctx context.Context, teamID, vendor string, version int, snapshot map[string]any, now time.Time) error {
+func (r *Repository) CreateAgent(ctx context.Context, teamID, vendor string, version int, snapshot Agent, now time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal agent snapshot: %w", err)
@@ -19,21 +20,21 @@ func (r *Repository) CreateAgent(ctx context.Context, teamID, vendor string, ver
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_agents (id, team_id, vendor, current_version, snapshot, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5::jsonb, NULL, $6, $7)
-	`, stringValue(snapshot["id"]), teamID, vendor, version, string(payloadJSON), now, now)
+	`, snapshot.ID, teamID, vendor, version, string(payloadJSON), now, now)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent agent: %w", err)
 	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_agent_versions (agent_id, version, snapshot, created_at)
 		VALUES ($1, $2, $3::jsonb, $4)
-	`, stringValue(snapshot["id"]), version, string(payloadJSON), now)
+	`, snapshot.ID, version, string(payloadJSON), now)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent agent version: %w", err)
 	}
 	return nil
 }
 
-func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentListOptions) ([]map[string]any, *string, error) {
+func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentListOptions) ([]Agent, *string, error) {
 	limit := opts.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 20
@@ -72,7 +73,7 @@ func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentLi
 		return nil, nil, fmt.Errorf("list managed-agent agents: %w", err)
 	}
 	defer rows.Close()
-	agents := make([]map[string]any, 0, limit)
+	agents := make([]Agent, 0, limit)
 	createdAt := make([]time.Time, 0, limit)
 	ids := make([]string, 0, limit)
 	for rows.Next() {
@@ -82,7 +83,7 @@ func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentLi
 		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
 			return nil, nil, fmt.Errorf("scan managed-agent agent: %w", err)
 		}
-		snapshot, err := decodeSnapshot(payloadJSON)
+		snapshot, err := decodeAgentSnapshot(payloadJSON)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -98,7 +99,7 @@ func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentLi
 	return agents, nextPage, nil
 }
 
-func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, version int) (map[string]any, string, error) {
+func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, version int) (*Agent, string, error) {
 	trimmedID := strings.TrimSpace(agentID)
 	if version > 0 {
 		var (
@@ -117,11 +118,11 @@ func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, versi
 			}
 			return nil, "", fmt.Errorf("query managed-agent agent version: %w", err)
 		}
-		snapshot, err := decodeSnapshot(payloadJSON)
+		snapshot, err := decodeAgentSnapshot(payloadJSON)
 		if err != nil {
 			return nil, "", err
 		}
-		return snapshot, vendor, nil
+		return &snapshot, vendor, nil
 	}
 	var (
 		payloadJSON []byte
@@ -138,14 +139,14 @@ func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, versi
 		}
 		return nil, "", fmt.Errorf("query managed-agent agent: %w", err)
 	}
-	snapshot, err := decodeSnapshot(payloadJSON)
+	snapshot, err := decodeAgentSnapshot(payloadJSON)
 	if err != nil {
 		return nil, "", err
 	}
-	return snapshot, vendor, nil
+	return &snapshot, vendor, nil
 }
 
-func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor string, version int, snapshot map[string]any, archivedAt *time.Time, updatedAt time.Time) error {
+func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor string, expectedVersion, version int, snapshot *Agent, archivedAt *time.Time, updatedAt time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal agent snapshot: %w", err)
@@ -153,13 +154,20 @@ func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor st
 	result, err := r.pool.Exec(ctx, `
 		UPDATE managed_agent_agents
 		SET vendor = $3, current_version = $4, snapshot = $5::jsonb, archived_at = $6, updated_at = $7
-		WHERE team_id = $1 AND id = $2
-	`, teamID, strings.TrimSpace(agentID), vendor, version, string(payloadJSON), archivedAt, updatedAt)
+		WHERE team_id = $1 AND id = $2 AND current_version = $8
+	`, teamID, strings.TrimSpace(agentID), vendor, version, string(payloadJSON), archivedAt, updatedAt, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("update managed-agent agent: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return ErrAgentNotFound
+		var exists bool
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_agent_agents WHERE team_id = $1 AND id = $2)`, teamID, strings.TrimSpace(agentID)).Scan(&exists); err != nil {
+			return fmt.Errorf("query managed-agent agent existence: %w", err)
+		}
+		if !exists {
+			return ErrAgentNotFound
+		}
+		return errors.New("invalid version")
 	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_agent_versions (agent_id, version, snapshot, created_at)
@@ -172,7 +180,7 @@ func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor st
 	return nil
 }
 
-func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID string, limit int, page string) ([]map[string]any, *string, error) {
+func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID string, limit int, page string) ([]Agent, *string, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -203,7 +211,7 @@ func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID stri
 		return nil, nil, fmt.Errorf("list managed-agent agent versions: %w", err)
 	}
 	defer rows.Close()
-	versions := make([]map[string]any, 0, limit)
+	versions := make([]Agent, 0, limit)
 	createdAt := make([]time.Time, 0, limit)
 	versionNumbers := make([]int, 0, limit)
 	for rows.Next() {
@@ -215,7 +223,7 @@ func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID stri
 		if err := rows.Scan(&payloadJSON, &version, &when); err != nil {
 			return nil, nil, fmt.Errorf("scan managed-agent agent version: %w", err)
 		}
-		snapshot, err := decodeSnapshot(payloadJSON)
+		snapshot, err := decodeAgentSnapshot(payloadJSON)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -234,11 +242,22 @@ func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID stri
 	return versions, nextPage, nil
 }
 
-func (r *Repository) CreateEnvironment(ctx context.Context, teamID string, snapshot map[string]any, archivedAt *time.Time, now time.Time) error {
-	return r.createSnapshotObject(ctx, "managed_agent_environments", teamID, snapshot, archivedAt, now)
+func (r *Repository) CreateEnvironment(ctx context.Context, teamID string, snapshot Environment, archivedAt *time.Time, now time.Time) error {
+	payloadJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal managed_agent_environments snapshot: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO managed_agent_environments (id, team_id, snapshot, archived_at, created_at, updated_at)
+		VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+	`, snapshot.ID, teamID, string(payloadJSON), archivedAt, now, now)
+	if err != nil {
+		return fmt.Errorf("insert managed_agent_environments: %w", err)
+	}
+	return nil
 }
 
-func (r *Repository) ListEnvironments(ctx context.Context, teamID string, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (r *Repository) ListEnvironments(ctx context.Context, teamID string, limit int, page string, includeArchived bool) ([]Environment, *string, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 20
 	}
@@ -258,26 +277,67 @@ func (r *Repository) ListEnvironments(ctx context.Context, teamID string, limit 
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	return r.listSnapshotsWithCursor(ctx, query, limit, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
+	}
+	defer rows.Close()
+	return scanEnvironmentPage(rows, limit)
 }
 
-func (r *Repository) GetEnvironment(ctx context.Context, teamID, environmentID string) (map[string]any, error) {
-	return r.getSnapshotObject(ctx, "managed_agent_environments", teamID, environmentID, ErrEnvironmentNotFound)
+func (r *Repository) GetEnvironment(ctx context.Context, teamID, environmentID string) (*Environment, error) {
+	var payloadJSON []byte
+	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_environments WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(environmentID)).Scan(&payloadJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrEnvironmentNotFound
+		}
+		return nil, fmt.Errorf("query managed_agent_environments: %w", err)
+	}
+	snapshot, err := decodeEnvironmentSnapshot(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
-func (r *Repository) UpdateEnvironment(ctx context.Context, teamID, environmentID string, snapshot map[string]any, archivedAt *time.Time, updatedAt time.Time) error {
-	return r.updateSnapshotObject(ctx, "managed_agent_environments", teamID, environmentID, snapshot, archivedAt, updatedAt, ErrEnvironmentNotFound)
+func (r *Repository) UpdateEnvironment(ctx context.Context, teamID, environmentID string, snapshot *Environment, archivedAt *time.Time, updatedAt time.Time) error {
+	payloadJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal managed_agent_environments snapshot: %w", err)
+	}
+	result, err := r.pool.Exec(ctx, `
+		UPDATE managed_agent_environments SET snapshot = $3::jsonb, archived_at = $4, updated_at = $5 WHERE team_id = $1 AND id = $2
+	`, teamID, strings.TrimSpace(environmentID), string(payloadJSON), archivedAt, updatedAt)
+	if err != nil {
+		return fmt.Errorf("update managed_agent_environments: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrEnvironmentNotFound
+	}
+	return nil
 }
 
 func (r *Repository) DeleteEnvironment(ctx context.Context, teamID, environmentID string) error {
 	return r.deleteSnapshotObject(ctx, "managed_agent_environments", teamID, environmentID, ErrEnvironmentNotFound)
 }
 
-func (r *Repository) CreateVault(ctx context.Context, teamID string, snapshot map[string]any, archivedAt *time.Time, now time.Time) error {
-	return r.createSnapshotObject(ctx, "managed_agent_vaults", teamID, snapshot, archivedAt, now)
+func (r *Repository) CreateVault(ctx context.Context, teamID string, snapshot Vault, archivedAt *time.Time, now time.Time) error {
+	payloadJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal managed_agent_vaults snapshot: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO managed_agent_vaults (id, team_id, snapshot, archived_at, created_at, updated_at)
+		VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+	`, snapshot.ID, teamID, string(payloadJSON), archivedAt, now, now)
+	if err != nil {
+		return fmt.Errorf("insert managed_agent_vaults: %w", err)
+	}
+	return nil
 }
 
-func (r *Repository) ListVaults(ctx context.Context, teamID string, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (r *Repository) ListVaults(ctx context.Context, teamID string, limit int, page string, includeArchived bool) ([]Vault, *string, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -297,22 +357,52 @@ func (r *Repository) ListVaults(ctx context.Context, teamID string, limit int, p
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	return r.listSnapshotsWithCursor(ctx, query, limit, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
+	}
+	defer rows.Close()
+	return scanVaultPage(rows, limit)
 }
 
-func (r *Repository) GetVault(ctx context.Context, teamID, vaultID string) (map[string]any, error) {
-	return r.getSnapshotObject(ctx, "managed_agent_vaults", teamID, vaultID, ErrVaultNotFound)
+func (r *Repository) GetVault(ctx context.Context, teamID, vaultID string) (*Vault, error) {
+	var payloadJSON []byte
+	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_vaults WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(vaultID)).Scan(&payloadJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrVaultNotFound
+		}
+		return nil, fmt.Errorf("query managed_agent_vaults: %w", err)
+	}
+	snapshot, err := decodeVaultSnapshot(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
-func (r *Repository) UpdateVault(ctx context.Context, teamID, vaultID string, snapshot map[string]any, archivedAt *time.Time, updatedAt time.Time) error {
-	return r.updateSnapshotObject(ctx, "managed_agent_vaults", teamID, vaultID, snapshot, archivedAt, updatedAt, ErrVaultNotFound)
+func (r *Repository) UpdateVault(ctx context.Context, teamID, vaultID string, snapshot *Vault, archivedAt *time.Time, updatedAt time.Time) error {
+	payloadJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal managed_agent_vaults snapshot: %w", err)
+	}
+	result, err := r.pool.Exec(ctx, `
+		UPDATE managed_agent_vaults SET snapshot = $3::jsonb, archived_at = $4, updated_at = $5 WHERE team_id = $1 AND id = $2
+	`, teamID, strings.TrimSpace(vaultID), string(payloadJSON), archivedAt, updatedAt)
+	if err != nil {
+		return fmt.Errorf("update managed_agent_vaults: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrVaultNotFound
+	}
+	return nil
 }
 
 func (r *Repository) DeleteVault(ctx context.Context, teamID, vaultID string) error {
 	return r.deleteSnapshotObject(ctx, "managed_agent_vaults", teamID, vaultID, ErrVaultNotFound)
 }
 
-func (r *Repository) CreateCredential(ctx context.Context, teamID, vaultID string, snapshot map[string]any, secret map[string]any, archivedAt *time.Time, now time.Time) error {
+func (r *Repository) CreateCredential(ctx context.Context, teamID, vaultID string, snapshot Credential, secret map[string]any, archivedAt *time.Time, now time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal credential snapshot: %w", err)
@@ -324,14 +414,14 @@ func (r *Repository) CreateCredential(ctx context.Context, teamID, vaultID strin
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_credentials (id, team_id, vault_id, snapshot, secret, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
-	`, stringValue(snapshot["id"]), teamID, vaultID, string(payloadJSON), string(secretJSON), archivedAt, now, now)
+	`, snapshot.ID, teamID, vaultID, string(payloadJSON), string(secretJSON), archivedAt, now, now)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent credential: %w", err)
 	}
 	return nil
 }
 
-func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string, limit int, page string, includeArchived bool) ([]map[string]any, *string, error) {
+func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string, limit int, page string, includeArchived bool) ([]Credential, *string, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -351,10 +441,52 @@ func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	return r.listSnapshotsWithCursor(ctx, query, limit, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
+	}
+	defer rows.Close()
+	return scanCredentialPage(rows, limit)
 }
 
-func (r *Repository) GetCredential(ctx context.Context, teamID, vaultID, credentialID string) (map[string]any, map[string]any, error) {
+func (r *Repository) ListActiveCredentialsForVault(ctx context.Context, teamID, vaultID string) ([]StoredCredential, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT snapshot, secret
+		FROM managed_agent_credentials
+		WHERE team_id = $1 AND vault_id = $2 AND archived_at IS NULL
+		ORDER BY created_at ASC, id ASC
+	`, teamID, strings.TrimSpace(vaultID))
+	if err != nil {
+		return nil, fmt.Errorf("list managed-agent credentials for vault: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]StoredCredential, 0)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			secretJSON  []byte
+		)
+		if err := rows.Scan(&payloadJSON, &secretJSON); err != nil {
+			return nil, fmt.Errorf("scan managed-agent credential for vault: %w", err)
+		}
+		snapshot, err := decodeCredentialSnapshot(payloadJSON)
+		if err != nil {
+			return nil, err
+		}
+		secret, err := decodeSnapshot(secretJSON)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, StoredCredential{Snapshot: snapshot, Secret: secret})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate managed-agent credentials for vault: %w", err)
+	}
+	return out, nil
+}
+
+func (r *Repository) GetCredential(ctx context.Context, teamID, vaultID, credentialID string) (*Credential, map[string]any, error) {
 	var (
 		payloadJSON []byte
 		secretJSON  []byte
@@ -370,7 +502,7 @@ func (r *Repository) GetCredential(ctx context.Context, teamID, vaultID, credent
 		}
 		return nil, nil, fmt.Errorf("query managed-agent credential: %w", err)
 	}
-	snapshot, err := decodeSnapshot(payloadJSON)
+	snapshot, err := decodeCredentialSnapshot(payloadJSON)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -378,10 +510,10 @@ func (r *Repository) GetCredential(ctx context.Context, teamID, vaultID, credent
 	if err != nil {
 		return nil, nil, err
 	}
-	return snapshot, secret, nil
+	return &snapshot, secret, nil
 }
 
-func (r *Repository) UpdateCredential(ctx context.Context, teamID, vaultID, credentialID string, snapshot map[string]any, secret map[string]any, archivedAt *time.Time, updatedAt time.Time) error {
+func (r *Repository) UpdateCredential(ctx context.Context, teamID, vaultID, credentialID string, snapshot *Credential, secret map[string]any, archivedAt *time.Time, updatedAt time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal credential snapshot: %w", err)
@@ -435,7 +567,7 @@ func (r *Repository) CreateFile(ctx context.Context, record *managedFileRecord) 
 	return nil
 }
 
-func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileListOptions) ([]map[string]any, bool, error) {
+func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileListOptions) ([]FileMetadata, bool, error) {
 	limit := opts.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 20
@@ -462,9 +594,25 @@ func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileList
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	items, err := r.listSnapshots(ctx, query, args...)
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("list managed-agent files: %w", err)
+	}
+	defer rows.Close()
+	items := make([]FileMetadata, 0, limit)
+	for rows.Next() {
+		var payloadJSON []byte
+		if err := rows.Scan(&payloadJSON); err != nil {
+			return nil, false, fmt.Errorf("scan managed-agent file snapshot: %w", err)
+		}
+		var item FileMetadata
+		if err := json.Unmarshal(payloadJSON, &item); err != nil {
+			return nil, false, fmt.Errorf("decode managed-agent file snapshot: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate managed-agent file snapshots: %w", err)
 	}
 	hasMore := len(items) > limit
 	if hasMore {
@@ -622,4 +770,123 @@ func decodeSnapshot(payloadJSON []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("decode snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func decodeAgentSnapshot(payloadJSON []byte) (Agent, error) {
+	var snapshot Agent
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return Agent{}, fmt.Errorf("decode agent snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func decodeEnvironmentSnapshot(payloadJSON []byte) (Environment, error) {
+	var snapshot Environment
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return Environment{}, fmt.Errorf("decode environment snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func decodeVaultSnapshot(payloadJSON []byte) (Vault, error) {
+	var snapshot Vault
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return Vault{}, fmt.Errorf("decode vault snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func decodeCredentialSnapshot(payloadJSON []byte) (Credential, error) {
+	var snapshot Credential
+	if err := json.Unmarshal(payloadJSON, &snapshot); err != nil {
+		return Credential{}, fmt.Errorf("decode credential snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func scanEnvironmentPage(rows pgx.Rows, limit int) ([]Environment, *string, error) {
+	items := make([]Environment, 0, limit)
+	createdAt := make([]time.Time, 0, limit)
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			id          string
+			when        time.Time
+		)
+		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+			return nil, nil, fmt.Errorf("scan snapshot page: %w", err)
+		}
+		snapshot, err := decodeEnvironmentSnapshot(payloadJSON)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, snapshot)
+		createdAt = append(createdAt, when)
+		ids = append(ids, id)
+	}
+	var nextPage *string
+	if len(items) > limit {
+		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		items = items[:limit]
+	}
+	return items, nextPage, nil
+}
+
+func scanVaultPage(rows pgx.Rows, limit int) ([]Vault, *string, error) {
+	items := make([]Vault, 0, limit)
+	createdAt := make([]time.Time, 0, limit)
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			id          string
+			when        time.Time
+		)
+		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+			return nil, nil, fmt.Errorf("scan snapshot page: %w", err)
+		}
+		snapshot, err := decodeVaultSnapshot(payloadJSON)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, snapshot)
+		createdAt = append(createdAt, when)
+		ids = append(ids, id)
+	}
+	var nextPage *string
+	if len(items) > limit {
+		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		items = items[:limit]
+	}
+	return items, nextPage, nil
+}
+
+func scanCredentialPage(rows pgx.Rows, limit int) ([]Credential, *string, error) {
+	items := make([]Credential, 0, limit)
+	createdAt := make([]time.Time, 0, limit)
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var (
+			payloadJSON []byte
+			id          string
+			when        time.Time
+		)
+		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+			return nil, nil, fmt.Errorf("scan snapshot page: %w", err)
+		}
+		snapshot, err := decodeCredentialSnapshot(payloadJSON)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, snapshot)
+		createdAt = append(createdAt, when)
+		ids = append(ids, id)
+	}
+	var nextPage *string
+	if len(items) > limit {
+		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		items = items[:limit]
+	}
+	return items, nextPage, nil
 }

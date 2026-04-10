@@ -46,6 +46,93 @@ func TestRedactCredentialAuthRemovesSecrets(t *testing.T) {
 	}
 }
 
+func TestNormalizeCreateCredentialAuthStaticBearer(t *testing.T) {
+	normalized, err := normalizeCreateCredentialAuth(map[string]any{
+		"type":           "static_bearer",
+		"token":          "bearer-secret",
+		"mcp_server_url": "https://mcp.example.com/sse",
+	})
+	if err != nil {
+		t.Fatalf("normalizeCreateCredentialAuth: %v", err)
+	}
+	if got := stringValue(normalized.Public["type"]); got != "static_bearer" {
+		t.Fatalf("public auth type = %q, want static_bearer", got)
+	}
+	if got := stringValue(normalized.Public["mcp_server_url"]); got != "https://mcp.example.com/sse" {
+		t.Fatalf("public auth mcp_server_url = %q", got)
+	}
+	if _, ok := normalized.Public["token"]; ok {
+		t.Fatal("public auth must not expose token")
+	}
+	if got := stringValue(normalized.Secret["token"]); got != "bearer-secret" {
+		t.Fatalf("secret token = %q, want bearer-secret", got)
+	}
+}
+
+func TestNormalizeUpdateCredentialAuthMcpOAuth(t *testing.T) {
+	normalized, err := normalizeUpdateCredentialAuth(
+		map[string]any{
+			"type":           "mcp_oauth",
+			"mcp_server_url": "https://mcp.example.com/sse",
+			"refresh": map[string]any{
+				"token_endpoint": "https://auth.example.com/token",
+				"client_id":      "client-1",
+				"token_endpoint_auth": map[string]any{
+					"type": "client_secret_basic",
+				},
+			},
+		},
+		map[string]any{
+			"type":           "mcp_oauth",
+			"mcp_server_url": "https://mcp.example.com/sse",
+			"access_token":   "old-access",
+			"refresh": map[string]any{
+				"refresh_token":  "old-refresh",
+				"token_endpoint": "https://auth.example.com/token",
+				"client_id":      "client-1",
+				"token_endpoint_auth": map[string]any{
+					"type":          "client_secret_basic",
+					"client_secret": "old-secret",
+				},
+			},
+		},
+		map[string]any{
+			"type":         "mcp_oauth",
+			"access_token": "new-access",
+			"refresh": map[string]any{
+				"refresh_token": "new-refresh",
+				"scope":         "scope-a",
+				"token_endpoint_auth": map[string]any{
+					"type":          "client_secret_post",
+					"client_secret": "new-secret",
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("normalizeUpdateCredentialAuth: %v", err)
+	}
+	if got := stringValue(normalized.Secret["access_token"]); got != "new-access" {
+		t.Fatalf("access_token = %q, want new-access", got)
+	}
+	refresh := mapValue(normalized.Public["refresh"])
+	if got := stringValue(refresh["scope"]); got != "scope-a" {
+		t.Fatalf("refresh scope = %q, want scope-a", got)
+	}
+	refreshSecret := mapValue(normalized.Secret["refresh"])
+	if got := stringValue(refreshSecret["refresh_token"]); got != "new-refresh" {
+		t.Fatalf("refresh_token = %q, want new-refresh", got)
+	}
+	tokenEndpointAuth := mapValue(refresh["token_endpoint_auth"])
+	if got := stringValue(tokenEndpointAuth["type"]); got != "client_secret_post" {
+		t.Fatalf("token_endpoint_auth.type = %q, want client_secret_post", got)
+	}
+	tokenEndpointAuthSecret := mapValue(refreshSecret["token_endpoint_auth"])
+	if got := stringValue(tokenEndpointAuthSecret["client_secret"]); got != "new-secret" {
+		t.Fatalf("token_endpoint_auth.client_secret = %q, want new-secret", got)
+	}
+}
+
 func TestNormalizeSessionResourceSetsIdentityAndTimestamps(t *testing.T) {
 	when := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 	resource := normalizeSessionResource(map[string]any{
@@ -78,37 +165,195 @@ func TestEnsureEnvironmentConfigProvidesCloudDefault(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentToolsResolvesDefaults(t *testing.T) {
+	tools, err := normalizeAgentTools([]any{
+		map[string]any{"type": "agent_toolset_20260401"},
+		map[string]any{
+			"type":            "mcp_toolset",
+			"mcp_server_name": "docs",
+			"configs": []any{
+				map[string]any{"name": "search"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeAgentTools: %v", err)
+	}
+	agentToolset := mapValue(tools[0])
+	defaultConfig := mapValue(agentToolset["default_config"])
+	if got, ok := defaultConfig["enabled"].(bool); !ok || !got {
+		t.Fatalf("default_config.enabled = %v, want true", defaultConfig["enabled"])
+	}
+	permissionPolicy := mapValue(defaultConfig["permission_policy"])
+	if got := stringValue(permissionPolicy["type"]); got != "always_ask" {
+		t.Fatalf("default_config.permission_policy.type = %q, want always_ask", got)
+	}
+	mcpToolset := mapValue(tools[1])
+	configs, ok := mcpToolset["configs"].([]any)
+	if !ok || len(configs) != 1 {
+		t.Fatalf("configs = %#v, want 1 entry", mcpToolset["configs"])
+	}
+	config := mapValue(configs[0])
+	if got := stringValue(config["name"]); got != "search" {
+		t.Fatalf("config.name = %q, want search", got)
+	}
+	if got, ok := config["enabled"].(bool); !ok || !got {
+		t.Fatalf("config.enabled = %v, want true", config["enabled"])
+	}
+}
+
+func TestNormalizeUpdateEnvironmentConfigMergesExistingState(t *testing.T) {
+	existing := map[string]any{
+		"type": "cloud",
+		"networking": map[string]any{
+			"type":                   "limited",
+			"allowed_hosts":          []any{"api.example.com"},
+			"allow_package_managers": false,
+			"allow_mcp_servers":      false,
+		},
+		"packages": map[string]any{
+			"type":  "packages",
+			"pip":   []any{"pandas"},
+			"npm":   []any{},
+			"apt":   []any{},
+			"cargo": []any{},
+			"gem":   []any{},
+			"go":    []any{},
+		},
+	}
+	updated, err := normalizeUpdateEnvironmentConfig(existing, map[string]any{
+		"type": "cloud",
+		"networking": map[string]any{
+			"type":              "limited",
+			"allow_mcp_servers": true,
+		},
+		"packages": map[string]any{
+			"pip": []any{"numpy"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeUpdateEnvironmentConfig: %v", err)
+	}
+	networking := mapValue(updated["networking"])
+	allowedHosts, ok := networking["allowed_hosts"].([]any)
+	if !ok || len(allowedHosts) != 1 || stringValue(allowedHosts[0]) != "api.example.com" {
+		t.Fatalf("allowed_hosts = %#v, want existing host preserved", networking["allowed_hosts"])
+	}
+	if got, ok := networking["allow_mcp_servers"].(bool); !ok || !got {
+		t.Fatalf("allow_mcp_servers = %v, want true", networking["allow_mcp_servers"])
+	}
+	packages := mapValue(updated["packages"])
+	pip, ok := packages["pip"].([]any)
+	if !ok || len(pip) != 1 || stringValue(pip[0]) != "numpy" {
+		t.Fatalf("packages.pip = %#v, want numpy", packages["pip"])
+	}
+	npm, ok := packages["npm"].([]any)
+	if !ok || len(npm) != 0 {
+		t.Fatalf("packages.npm = %#v, want existing empty array", packages["npm"])
+	}
+}
+
+func TestServiceUpdateAgentRejectsVersionMismatch(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	created, err := service.CreateAgent(context.Background(), principal, CreateAgentRequest{
+		Name:  "Claude Agent",
+		Model: "claude-sonnet-4-5",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	_, err = service.UpdateAgent(context.Background(), principal, created.ID, UpdateAgentRequest{
+		Version: 99,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid version") {
+		t.Fatalf("UpdateAgent error = %v, want invalid version", err)
+	}
+}
+
+func TestCreateSessionRejectsInvalidAgentReferenceObject(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, time.Now().UTC(), nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, time.Now().UTC()); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	_, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent: map[string]any{
+			"type":    "agent",
+			"id":      "agent_123",
+			"version": 1,
+			"name":    "unexpected",
+		},
+		EnvironmentID: "env_123",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource field") {
+		t.Fatalf("CreateSession error = %v, want invalid field rejection", err)
+	}
+}
+
+func TestCreateSessionRejectsEmptyVaultID(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	_, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: "env_123",
+		VaultIDs:      []string{"   "},
+	})
+	if err == nil || !strings.Contains(err.Error(), "vault_ids entries must be non-empty") {
+		t.Fatalf("CreateSession error = %v, want vault_ids rejection", err)
+	}
+}
+
 func TestListAgentVersionsSupportsCursorPagination(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	principal := Principal{TeamID: "team_123"}
 	baseTime := time.Date(2026, 4, 10, 1, 0, 0, 0, time.UTC)
 
-	agent := map[string]any{
-		"id":          "agent_123",
-		"type":        "agent",
-		"version":     1,
-		"name":        "Claude Agent",
-		"description": nil,
-		"model":       map[string]any{"id": "claude-sonnet-4-20250514", "speed": "standard"},
-		"system":      nil,
-		"tools":       []any{},
-		"mcp_servers": []any{},
-		"skills":      []any{},
-		"created_at":  baseTime.Format(time.RFC3339),
-		"updated_at":  baseTime.Format(time.RFC3339),
+	agent := Agent{
+		ID:         "agent_123",
+		Type:       "agent",
+		Version:    1,
+		Name:       "Claude Agent",
+		Model:      SessionModelConfig{ID: "claude-sonnet-4-20250514", Speed: "standard"},
+		Tools:      []AgentTool{},
+		MCPServers: []MCPServer{},
+		Skills:     []AgentSkill{},
+		Metadata:   map[string]string{},
+		CreatedAt:  baseTime.Format(time.RFC3339),
+		UpdatedAt:  baseTime.Format(time.RFC3339),
 	}
 	if err := repo.CreateAgent(context.Background(), principal.TeamID, "claude", 1, agent, baseTime); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 	for version := 2; version <= 3; version++ {
 		when := baseTime.Add(time.Duration(version-1) * time.Minute)
-		snapshot := cloneMap(agent)
-		snapshot["version"] = version
-		snapshot["updated_at"] = when.Format(time.RFC3339)
-		if err := repo.UpdateAgent(context.Background(), principal.TeamID, "agent_123", "claude", version, snapshot, nil, when); err != nil {
+		snapshot := agent
+		snapshot.Version = version
+		snapshot.UpdatedAt = when.Format(time.RFC3339)
+		if err := repo.UpdateAgent(context.Background(), principal.TeamID, "agent_123", "claude", version-1, version, &snapshot, nil, when); err != nil {
 			t.Fatalf("UpdateAgent version %d: %v", version, err)
 		}
+		agent = snapshot
 	}
 
 	page1, nextPage, err := service.ListAgentVersions(context.Background(), principal, "agent_123", 2, "")
@@ -118,10 +363,10 @@ func TestListAgentVersionsSupportsCursorPagination(t *testing.T) {
 	if len(page1) != 2 {
 		t.Fatalf("page1 len = %d, want 2", len(page1))
 	}
-	if got := intValue(page1[0]["version"]); got != 3 {
+	if got := page1[0].Version; got != 3 {
 		t.Fatalf("page1[0].version = %d, want 3", got)
 	}
-	if got := intValue(page1[1]["version"]); got != 2 {
+	if got := page1[1].Version; got != 2 {
 		t.Fatalf("page1[1].version = %d, want 2", got)
 	}
 	if nextPage == nil || *nextPage == "" {
@@ -135,7 +380,7 @@ func TestListAgentVersionsSupportsCursorPagination(t *testing.T) {
 	if len(page2) != 1 {
 		t.Fatalf("page2 len = %d, want 1", len(page2))
 	}
-	if got := intValue(page2[0]["version"]); got != 1 {
+	if got := page2[0].Version; got != 1 {
 		t.Fatalf("page2[0].version = %d, want 1", got)
 	}
 	if finalNextPage != nil {

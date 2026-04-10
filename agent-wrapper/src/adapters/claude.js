@@ -11,6 +11,16 @@ export function runtimeEnvForEngine(engine) {
   };
 }
 
+export function querySkillNames(session) {
+  if (!Array.isArray(session?.skill_names)) {
+    return undefined;
+  }
+  const names = session.skill_names
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value.length > 0);
+  return names.length > 0 ? names : undefined;
+}
+
 export class ClaudeRuntime {
   constructor() {
     this.activeRuns = new Map();
@@ -21,24 +31,43 @@ export class ClaudeRuntime {
   async startRun(session, run, callbackClient, sessionStore) {
     const prompt = buildPromptInput(run.input_events);
     const options = this.#buildOptions(session, run, callbackClient, sessionStore);
+    const modelRequestStartID = newEventID('span');
     if (session.vendor_session_id) {
       options.resume = session.vendor_session_id;
     }
+
+    await callbackClient.send(session, {
+      session_id: session.session_id,
+      run_id: run.run_id,
+      vendor_session_id: session.vendor_session_id,
+      events: [{ type: 'span.model_request_start', id: modelRequestStartID }],
+    });
+
+    let currentSession = session;
     const stream = query({ prompt, options });
     this.activeRuns.set(run.run_id, { stream, sessionID: session.session_id });
     try {
       for await (const message of stream) {
-        if (!session.vendor_session_id && message?.session_id) {
-          session = sessionStore.persistSession((current) => ({
+        if (!currentSession.vendor_session_id && message?.session_id) {
+          currentSession = sessionStore.persistSession((current) => ({
             ...current,
             vendor_session_id: message.session_id,
           }));
         }
-        const callbackPayload = this.#mapMessage(session, run, message);
+        const callbackPayload = this.#mapMessage(currentSession, run, message, modelRequestStartID);
         if (callbackPayload) {
-          await callbackClient.send(session, callbackPayload);
+          await callbackClient.send(currentSession, callbackPayload);
         }
       }
+    } catch (error) {
+      const latestSession = sessionStore.getSession?.() ?? currentSession;
+      await callbackClient.send(latestSession, {
+        session_id: latestSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: latestSession.vendor_session_id,
+        events: [buildModelRequestEndEvent(modelRequestStartID, null, true)],
+      }).catch(() => {});
+      throw error;
     } finally {
       this.pendingActions.delete(session.session_id);
       this.emittedToolUses.delete(session.session_id);
@@ -159,7 +188,8 @@ export class ClaudeRuntime {
       systemPrompt: typeof session.agent?.system === 'string' ? session.agent.system : undefined,
       pathToClaudeCodeExecutable: engine.path_to_claude_code_executable,
       maxTurns: engine.max_turns,
-      mcpServers: mergeMcpServers(engine.mcp_servers, customTools.mcpServers),
+      skills: querySkillNames(session),
+      mcpServers: mergeMcpServers(mcpServersFromAgent(session.agent?.mcp_servers), engine.mcp_servers, customTools.mcpServers),
       settings: engine.settings,
       extraArgs: engine.extra_args,
       env: runtimeEnvForEngine(engine),
@@ -178,6 +208,7 @@ export class ClaudeRuntime {
             }
             const currentSession = sessionStore.getSession() ?? session;
             const askForConfirmation = permissionPolicies.get(normalizedToolName) !== 'always_allow';
+            const toolUseEvent = buildToolUseEvent(input, eventID, askForConfirmation ? 'ask' : 'allow');
             const resolution = currentSession?.tool_confirmation_resolutions?.[eventID]?.result;
             if (resolution) {
               sessionStore.persistSession((latest) => ({
@@ -197,6 +228,34 @@ export class ClaudeRuntime {
                 },
               };
             }
+            if (!this.#wasToolUseEmitted(currentSession.session_id, eventID)) {
+              this.#markToolUseEmitted(currentSession.session_id, eventID);
+              if (askForConfirmation) {
+                sessionStore.persistSession((latest) => ({
+                  ...latest,
+                  pending_actions: pendingActionSnapshots(addPendingAction(latest?.pending_actions, {
+                    id: eventID,
+                    kind: 'tool_confirmation',
+                    tool_use_id: eventID,
+                  })),
+                  updated_at: new Date().toISOString(),
+                }));
+              }
+              await callbackClient.send(currentSession, {
+                session_id: currentSession.session_id,
+                run_id: run.run_id,
+                vendor_session_id: currentSession.vendor_session_id,
+                events: askForConfirmation
+                  ? [toolUseEvent, {
+                    type: 'session.status_idle',
+                    stop_reason: {
+                      type: 'requires_action',
+                      event_ids: [eventID],
+                    },
+                  }]
+                  : [toolUseEvent],
+              });
+            }
             if (!askForConfirmation) {
               return {
                 continue: true,
@@ -206,39 +265,6 @@ export class ClaudeRuntime {
                   permissionDecisionReason: 'Auto-allowed by managed-agent policy',
                 },
               };
-            }
-            if (!this.#wasToolUseEmitted(currentSession.session_id, eventID)) {
-              this.#markToolUseEmitted(currentSession.session_id, eventID);
-              sessionStore.persistSession((latest) => ({
-                ...latest,
-                pending_actions: pendingActionSnapshots(addPendingAction(latest?.pending_actions, {
-                  id: eventID,
-                  kind: 'tool_confirmation',
-                  tool_use_id: eventID,
-                })),
-                updated_at: new Date().toISOString(),
-              }));
-              await callbackClient.send(currentSession, {
-                session_id: currentSession.session_id,
-                run_id: run.run_id,
-                vendor_session_id: currentSession.vendor_session_id,
-                events: [
-                  {
-                    type: 'agent.tool_use',
-                    id: eventID,
-                    name: normalizedToolName,
-                    input: asStruct(input.tool_input),
-                    evaluated_permission: 'ask',
-                  },
-                  {
-                    type: 'session.status_idle',
-                    stop_reason: {
-                      type: 'requires_action',
-                      event_ids: [eventID],
-                    },
-                  },
-                ],
-              });
             }
             return {
               continue: true,
@@ -260,11 +286,7 @@ export class ClaudeRuntime {
               session_id: currentSession.session_id,
               run_id: run.run_id,
               vendor_session_id: currentSession.vendor_session_id,
-              events: [{
-                type: 'agent.tool_result',
-                tool_use_id: String(input.tool_use_id ?? ''),
-                content: toolResultContent(input.tool_response),
-              }],
+              events: [buildToolResultEvent(input, toolResultContent(input.tool_response), false)],
             });
             return { continue: true };
           }],
@@ -279,12 +301,19 @@ export class ClaudeRuntime {
               session_id: currentSession.session_id,
               run_id: run.run_id,
               vendor_session_id: currentSession.vendor_session_id,
-              events: [{
-                type: 'agent.tool_result',
-                tool_use_id: String(input.tool_use_id ?? ''),
-                content: toolResultContent(input.error ?? 'tool execution failed'),
-                is_error: true,
-              }],
+              events: [buildToolResultEvent(input, toolResultContent(input.error ?? 'tool execution failed'), true)],
+            });
+            return { continue: true };
+          }],
+        }],
+        PostCompact: [{
+          hooks: [async () => {
+            const currentSession = sessionStore.getSession() ?? session;
+            await callbackClient.send(currentSession, {
+              session_id: currentSession.session_id,
+              run_id: run.run_id,
+              vendor_session_id: currentSession.vendor_session_id,
+              events: [{ type: 'agent.thread_context_compacted' }],
             });
             return { continue: true };
           }],
@@ -368,7 +397,7 @@ export class ClaudeRuntime {
     this.emittedToolUses.set(sessionID, seen);
   }
 
-  #mapMessage(session, run, message) {
+  #mapMessage(session, run, message, modelRequestStartID) {
     if (!message || typeof message !== 'object') {
       return null;
     }
@@ -423,30 +452,39 @@ export class ClaudeRuntime {
     }
 
     if (message.type === 'result') {
+      const usageDelta = buildUsageDelta(message.usage);
+      const modelRequestEnd = buildModelRequestEndEvent(modelRequestStartID, message.usage, message.subtype !== 'success');
       if (message.subtype === 'success') {
         if (message.stop_reason === 'tool_deferred') {
-          return null;
+          return {
+            session_id: session.session_id,
+            run_id: run.run_id,
+            vendor_session_id: message.session_id,
+            usage_delta: usageDelta,
+            events: [modelRequestEnd],
+          };
         }
         return {
           session_id: session.session_id,
           run_id: run.run_id,
           vendor_session_id: message.session_id,
-          usage_delta: {
-            input_tokens: message.usage?.input_tokens ?? 0,
-            output_tokens: message.usage?.output_tokens ?? 0,
-            cache_read_input_tokens: message.usage?.cache_read_input_tokens ?? 0,
-          },
-          events: [{
-            type: 'session.status_idle',
-            stop_reason: { type: 'end_turn' },
-          }],
+          usage_delta: usageDelta,
+          events: [
+            modelRequestEnd,
+            {
+              type: 'session.status_idle',
+              stop_reason: { type: 'end_turn' },
+            },
+          ],
         };
       }
       return {
         session_id: session.session_id,
         run_id: run.run_id,
         vendor_session_id: message.session_id,
+        usage_delta: usageDelta,
         events: [
+          modelRequestEnd,
           {
             type: 'session.error',
             error: {
@@ -479,6 +517,159 @@ function filteredPromptEvents(events) {
 
 function normalizeToolName(toolName) {
   return String(toolName ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function buildToolUseEvent(input, eventID, evaluatedPermission) {
+  const mcp = mcpToolMetadata(input);
+  if (mcp) {
+    return {
+      type: 'agent.mcp_tool_use',
+      id: eventID,
+      name: mcp.name,
+      mcp_server_name: mcp.serverName,
+      input: asStruct(input.tool_input),
+      evaluated_permission: evaluatedPermission,
+    };
+  }
+  return {
+    type: 'agent.tool_use',
+    id: eventID,
+    name: normalizeToolName(input.tool_name),
+    input: asStruct(input.tool_input),
+    evaluated_permission: evaluatedPermission,
+  };
+}
+
+function buildToolResultEvent(input, content, isError) {
+  const mcp = mcpToolMetadata(input);
+  if (mcp) {
+    return {
+      type: 'agent.mcp_tool_result',
+      id: newEventID('evt'),
+      mcp_tool_use_id: String(input.tool_use_id ?? ''),
+      content,
+      is_error: isError || undefined,
+    };
+  }
+  return {
+    type: 'agent.tool_result',
+    tool_use_id: String(input.tool_use_id ?? ''),
+    content,
+    is_error: isError || undefined,
+  };
+}
+
+function mcpToolMetadata(input) {
+  const toolName = normalizeToolName(input?.tool_name);
+  const parsed = parseMcpToolName(toolName);
+  if (parsed) {
+    return parsed;
+  }
+  const serverName = firstNonEmptyString(
+    input?.mcp_server_name,
+    input?.mcpServerName,
+    input?.server_name,
+    input?.serverName,
+  );
+  if (!serverName) {
+    return null;
+  }
+  return {
+    name: toolName,
+    serverName,
+  };
+}
+
+function parseMcpToolName(toolName) {
+  if (!toolName.startsWith('mcp__')) {
+    return null;
+  }
+  const parts = toolName.split('__');
+  if (parts.length < 3) {
+    return null;
+  }
+  return {
+    serverName: parts[1],
+    name: parts.slice(2).join('__'),
+  };
+}
+
+function buildUsageDelta(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+  const cacheCreation = normalizeCacheCreationUsage(usage);
+  const delta = {
+    input_tokens: numberValue(usage.input_tokens),
+    output_tokens: numberValue(usage.output_tokens),
+    cache_read_input_tokens: numberValue(usage.cache_read_input_tokens),
+  };
+  if (cacheCreation) {
+    delta.cache_creation = cacheCreation;
+  }
+  return delta;
+}
+
+function buildModelRequestEndEvent(modelRequestStartID, usage, isError) {
+  return {
+    type: 'span.model_request_end',
+    id: newEventID('span'),
+    is_error: isError,
+    model_request_start_id: modelRequestStartID,
+    model_usage: buildModelUsage(usage),
+  };
+}
+
+function buildModelUsage(usage) {
+  const cacheCreation = normalizeCacheCreationUsage(usage);
+  const value = {
+    input_tokens: numberValue(usage?.input_tokens),
+    output_tokens: numberValue(usage?.output_tokens),
+    cache_creation_input_tokens: sumCacheCreationTokens(cacheCreation, usage?.cache_creation_input_tokens),
+    cache_read_input_tokens: numberValue(usage?.cache_read_input_tokens),
+  };
+  const speed = firstNonEmptyString(usage?.speed);
+  if (speed) {
+    value.speed = speed;
+  }
+  return value;
+}
+
+function normalizeCacheCreationUsage(usage) {
+  const ephemeral1h = numberValue(usage?.cache_creation?.ephemeral_1h_input_tokens);
+  let ephemeral5m = numberValue(usage?.cache_creation?.ephemeral_5m_input_tokens);
+  if (ephemeral1h === 0 && ephemeral5m === 0) {
+    ephemeral5m = numberValue(usage?.cache_creation_input_tokens);
+  }
+  if (ephemeral1h === 0 && ephemeral5m === 0) {
+    return undefined;
+  }
+  return {
+    ...(ephemeral1h > 0 ? { ephemeral_1h_input_tokens: ephemeral1h } : {}),
+    ...(ephemeral5m > 0 ? { ephemeral_5m_input_tokens: ephemeral5m } : {}),
+  };
+}
+
+function sumCacheCreationTokens(cacheCreation, fallback) {
+  if (cacheCreation) {
+    return numberValue(cacheCreation.ephemeral_1h_input_tokens) + numberValue(cacheCreation.ephemeral_5m_input_tokens);
+  }
+  return numberValue(fallback);
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const normalized = String(value ?? '').trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return '';
+}
+
+function numberValue(value) {
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function buildPermissionPolicies(tools) {
@@ -547,6 +738,41 @@ function mergeMcpServers(...candidates) {
     Object.assign(merged, candidate);
   }
   return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+export function mcpServersFromAgent(definitions) {
+  const servers = {};
+  for (const entry of Array.isArray(definitions) ? definitions : []) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      continue;
+    }
+    if (String(entry.type ?? '').trim() !== 'url') {
+      continue;
+    }
+    const name = String(entry.name ?? '').trim();
+    const serverURL = String(entry.url ?? '').trim();
+    if (!name || !serverURL) {
+      continue;
+    }
+    servers[name] = mcpServerConfigForURL(serverURL);
+  }
+  return Object.keys(servers).length > 0 ? servers : undefined;
+}
+
+function mcpServerConfigForURL(serverURL) {
+  return {
+    type: isSSEServerURL(serverURL) ? 'sse' : 'http',
+    url: serverURL,
+  };
+}
+
+function isSSEServerURL(serverURL) {
+  try {
+    const parsed = new URL(serverURL);
+    return /\/sse$/i.test(parsed.pathname.replace(/\/+$/, ''));
+  } catch {
+    return /\/sse(?:$|[?#])/i.test(String(serverURL));
+  }
 }
 
 function jsonSchemaObjectToZodShape(schema) {
@@ -724,4 +950,8 @@ function omitActionResolution(resolutions, actionID) {
 
 function newCustomToolUseID() {
   return `ctu_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function newEventID(prefix) {
+  return `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
 }

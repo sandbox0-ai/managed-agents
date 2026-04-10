@@ -2,6 +2,7 @@ package managedagents
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,10 +102,10 @@ func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
 		t.Fatalf("AppendEvents: %v", err)
 	}
 
-	events, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []map[string]any{{
-		"type":        "user.tool_confirmation",
-		"tool_use_id": "tool_1",
-		"result":      "allow",
+	events, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{
+		Type:      "user.tool_confirmation",
+		ToolUseID: "tool_1",
+		Result:    "allow",
 	}}}, "http://gateway.test")
 	if err != nil {
 		t.Fatalf("SendEvents: %v", err)
@@ -136,5 +137,67 @@ func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
 	}
 	if updatedRuntime.ActiveRunID == nil || *updatedRuntime.ActiveRunID != runtime.startRunReqs[0].RunID {
 		t.Fatalf("active run id = %v, want %q", updatedRuntime.ActiveRunID, runtime.startRunReqs[0].RunID)
+	}
+}
+
+func TestValidateInputEventsRejectsUnexpectedToolConfirmationFields(t *testing.T) {
+	err := validateInputEvents([]map[string]any{{
+		"type":        "user.tool_confirmation",
+		"tool_use_id": "tool_1",
+		"result":      "allow",
+		"unexpected":  true,
+	}})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateInputEventsAcceptsDocumentContent(t *testing.T) {
+	err := validateInputEvents([]map[string]any{{
+		"type": "user.message",
+		"content": []any{map[string]any{
+			"type": "document",
+			"source": map[string]any{
+				"type":       "text",
+				"media_type": "text/plain",
+				"data":       "hello",
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("validateInputEvents: %v", err)
+	}
+}
+
+func TestValidateInputEventsRejectsTooLongToolConfirmationID(t *testing.T) {
+	err := validateInputEvents([]map[string]any{{
+		"type":        "user.tool_confirmation",
+		"tool_use_id": strings.Repeat("a", 129),
+		"result":      "allow",
+	}})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateInputEventsRejectsTooLongDenyMessage(t *testing.T) {
+	err := validateInputEvents([]map[string]any{{
+		"type":         "user.tool_confirmation",
+		"tool_use_id":  "tool_1",
+		"result":       "deny",
+		"deny_message": strings.Repeat("a", 10001),
+	}})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateInputEventsRejectsTooLongCustomToolUseID(t *testing.T) {
+	err := validateInputEvents([]map[string]any{{
+		"type":               "user.custom_tool_result",
+		"custom_tool_use_id": strings.Repeat("a", 129),
+	}})
+	if err == nil {
+		t.Fatal("expected validation error")
 	}
 }
