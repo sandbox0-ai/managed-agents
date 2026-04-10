@@ -1,7 +1,9 @@
 package managedagents
 
 import (
+	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 
@@ -590,9 +592,9 @@ func (h *Handler) UploadFile(c *gin.Context) {
 	if !ok {
 		return
 	}
-	fileHeader, err := c.FormFile("file")
+	fileHeader, err := readValidatedUploadedFile(c, "file")
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", "file is required")
+		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 	file, err := fileHeader.Open()
@@ -647,6 +649,39 @@ func (h *Handler) ListFiles(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, contractResponse)
+}
+
+func readValidatedUploadedFile(c *gin.Context, fieldName string) (*multipart.FileHeader, error) {
+	form, err := c.MultipartForm()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSingleFileMultipartForm(form, fieldName); err != nil {
+		return nil, err
+	}
+	fileHeaders := form.File[fieldName]
+	if len(fileHeaders) == 0 {
+		return nil, errors.New(fieldName + " is required")
+	}
+	if len(fileHeaders) > 1 {
+		return nil, errors.New("exactly one " + fieldName + " upload is required")
+	}
+	return fileHeaders[0], nil
+}
+
+func validateSingleFileMultipartForm(form *multipart.Form, fieldName string) error {
+	if form == nil {
+		return errors.New("multipart form is required")
+	}
+	for key := range form.Value {
+		return errors.New("invalid multipart field: " + key)
+	}
+	for key := range form.File {
+		if key != fieldName {
+			return errors.New("invalid multipart field: " + key)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) GetFileMetadata(c *gin.Context) {

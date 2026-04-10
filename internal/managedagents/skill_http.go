@@ -3,6 +3,7 @@ package managedagents
 import (
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 
@@ -16,8 +17,7 @@ func (h *Handler) CreateSkill(c *gin.Context) {
 	if !ok {
 		return
 	}
-	displayTitle := optionalTrimmedString(c.PostForm("display_title"))
-	files, err := readUploadedSkillFiles(c)
+	displayTitle, files, err := readValidatedSkillCreateUpload(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -103,7 +103,7 @@ func (h *Handler) CreateSkillVersion(c *gin.Context) {
 	if !ok {
 		return
 	}
-	files, err := readUploadedSkillFiles(c)
+	files, err := readValidatedSkillVersionUpload(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -189,6 +189,43 @@ func readUploadedSkillFiles(c *gin.Context) ([]uploadedSkillFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return uploadedSkillFilesFromForm(form)
+}
+
+func readValidatedSkillCreateUpload(c *gin.Context) (*string, []uploadedSkillFile, error) {
+	form, err := c.MultipartForm()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateSkillMultipartForm(form, true); err != nil {
+		return nil, nil, err
+	}
+	displayTitle, err := singleOptionalMultipartValue(form, "display_title")
+	if err != nil {
+		return nil, nil, err
+	}
+	files, err := uploadedSkillFilesFromForm(form)
+	if err != nil {
+		return nil, nil, err
+	}
+	return displayTitle, files, nil
+}
+
+func readValidatedSkillVersionUpload(c *gin.Context) ([]uploadedSkillFile, error) {
+	form, err := c.MultipartForm()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSkillMultipartForm(form, false); err != nil {
+		return nil, err
+	}
+	return uploadedSkillFilesFromForm(form)
+}
+
+func uploadedSkillFilesFromForm(form *multipart.Form) ([]uploadedSkillFile, error) {
+	if form == nil {
+		return nil, errors.New("multipart form is required")
+	}
 	fileHeaders := form.File["files"]
 	if len(fileHeaders) == 0 {
 		return nil, errors.New("files are required")
@@ -207,6 +244,43 @@ func readUploadedSkillFiles(c *gin.Context) ([]uploadedSkillFile, error) {
 		files = append(files, uploadedSkillFile{Path: header.Filename, Content: content})
 	}
 	return files, nil
+}
+
+func validateSkillMultipartForm(form *multipart.Form, allowDisplayTitle bool) error {
+	if form == nil {
+		return errors.New("multipart form is required")
+	}
+	for key := range form.Value {
+		if key == "display_title" && allowDisplayTitle {
+			continue
+		}
+		return errors.New("invalid multipart field: " + key)
+	}
+	for key := range form.File {
+		if key != "files" {
+			return errors.New("invalid multipart field: " + key)
+		}
+	}
+	if !allowDisplayTitle {
+		if values := form.Value["display_title"]; len(values) > 0 {
+			return errors.New("invalid multipart field: display_title")
+		}
+	}
+	return nil
+}
+
+func singleOptionalMultipartValue(form *multipart.Form, key string) (*string, error) {
+	if form == nil {
+		return nil, nil
+	}
+	values := form.Value[key]
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > 1 {
+		return nil, errors.New("invalid multipart field: " + key)
+	}
+	return optionalTrimmedString(values[0]), nil
 }
 
 func optionalTrimmedString(value string) *string {

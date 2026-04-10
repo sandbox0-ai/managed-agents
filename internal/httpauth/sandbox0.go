@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	contractutil "github.com/sandbox0-ai/managed-agent/internal/apicontractutil"
 	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
 	"go.uber.org/zap"
@@ -56,7 +58,7 @@ func (a *Sandbox0Authenticator) Authenticate() gin.HandlerFunc {
 			return
 		}
 
-		authCtx, err := a.AuthenticateRequest(c.Request.Context(), token, strings.TrimSpace(c.GetHeader(teamIDHeader)))
+		authCtx, err := a.AuthenticateRequest(c.Request.Context(), token, "")
 		if err != nil {
 			writeAuthError(c, err)
 			return
@@ -161,10 +163,20 @@ func (a *Sandbox0Authenticator) resolveUserTeamID(ctx context.Context, client *s
 	if len(teams) == 0 {
 		return "", newAuthError(http.StatusForbidden, "authenticated user is not a member of any team", nil)
 	}
-	if len(teams) > 1 {
-		return "", newAuthError(http.StatusBadRequest, "x-team-id is required when the token can access multiple teams", nil)
+	if len(teams) == 1 {
+		return strings.TrimSpace(teams[0].ID), nil
 	}
-	return strings.TrimSpace(teams[0].ID), nil
+	teamIDs := make([]string, 0, len(teams))
+	for _, team := range teams {
+		if teamID := strings.TrimSpace(team.ID); teamID != "" {
+			teamIDs = append(teamIDs, teamID)
+		}
+	}
+	if len(teamIDs) == 0 {
+		return "", newAuthError(http.StatusBadGateway, "sandbox0 teams response missing team ids", nil)
+	}
+	slices.Sort(teamIDs)
+	return teamIDs[0], nil
 }
 
 func (a *Sandbox0Authenticator) verifyUserTeamAccess(ctx context.Context, client *sandbox0sdk.Client, teamID string) error {
@@ -260,27 +272,7 @@ func writeAuthError(c *gin.Context, err error) {
 	}
 	requestID := authRequestID(c)
 	c.Header("Request-Id", requestID)
-	c.AbortWithStatusJSON(status, gin.H{
-		"type":       "error",
-		"request_id": requestID,
-		"error": gin.H{
-			"type":    authErrorType(status),
-			"message": message,
-		},
-	})
-}
-
-func authErrorType(status int) string {
-	switch status {
-	case http.StatusBadRequest:
-		return "invalid_request_error"
-	case http.StatusForbidden:
-		return "permission_error"
-	case http.StatusUnauthorized:
-		return "authentication_error"
-	default:
-		return "api_error"
-	}
+	c.AbortWithStatusJSON(status, contractutil.ErrorResponse(contractutil.ErrorCodeForStatus(status), message, &requestID))
 }
 
 func authRequestID(c *gin.Context) string {

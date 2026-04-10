@@ -193,8 +193,8 @@ func sendSessionEventsToContract(events []map[string]any) (contract.BetaManagedA
 	return convertJSON[contract.BetaManagedAgentsSendSessionEvents](map[string]any{"data": events})
 }
 
-func sessionEventsToContract(events []map[string]any) ([]contract.BetaManagedAgentsStreamSessionEvents, error) {
-	return convertJSON[[]contract.BetaManagedAgentsStreamSessionEvents](events)
+func streamSessionEventToContract(event map[string]any) (contract.BetaManagedAgentsStreamSessionEvents, error) {
+	return convertJSON[contract.BetaManagedAgentsStreamSessionEvents](event)
 }
 
 func jsonValueToMap(value any) (map[string]any, error) {

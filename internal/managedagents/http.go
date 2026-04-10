@@ -3,8 +3,6 @@ package managedagents
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,8 +10,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	contract "github.com/sandbox0-ai/managed-agent/internal/apicontract/generated"
+	"github.com/sandbox0-ai/managed-agent/internal/apicontractutil"
 	"github.com/sandbox0-ai/managed-agent/internal/httpauth"
 	"go.uber.org/zap"
+)
+
+var (
+	streamPollInterval = 1 * time.Second
+	streamPollTimeout  = 30 * time.Second
 )
 
 // Handler serves the managed-agent HTTP contract.
@@ -231,116 +235,31 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 		return
 	}
 	lastEventID := strings.TrimSpace(c.GetHeader("Last-Event-ID"))
-	initialEvents, err := h.service.repo.ListEventsAfterID(c.Request.Context(), sessionID, lastEventID, 200)
-	if err != nil {
-		h.writeServiceError(c, err)
-		return
-	}
-	writer := c.Writer
-	flusher, ok := writer.(http.Flusher)
-	if !ok {
-		writeError(c, http.StatusInternalServerError, "api_error", "streaming is unavailable")
-		return
-	}
-	writer.Header().Set("Content-Type", "text/event-stream")
-	writer.Header().Set("Cache-Control", "no-cache")
-	writer.Header().Set("Connection", "keep-alive")
-	writer.Header().Set("X-Accel-Buffering", "no")
-	writer.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	heartbeat := time.NewTicker(15 * time.Second)
-	poll := time.NewTicker(1 * time.Second)
-	defer heartbeat.Stop()
-	defer poll.Stop()
-
-	sendEvents := func(events []map[string]any) (bool, error) {
-		contractEvents, err := sessionEventsToContract(events)
-		if err != nil {
-			return false, err
-		}
-		for _, event := range contractEvents {
-			payload, err := json.Marshal(event)
-			if err != nil {
-				return false, err
-			}
-			contractEventMap, err := jsonValueToMap(event)
-			if err != nil {
-				return false, err
-			}
-			if eventID := stringValue(contractEventMap["id"]); eventID != "" {
-				if _, err := fmt.Fprintf(writer, "id: %s\n", eventID); err != nil {
-					return false, err
-				}
-			}
-			if _, err := io.WriteString(writer, "event: message\n"); err != nil {
-				return false, err
-			}
-			if _, err := fmt.Fprintf(writer, "data: %s\n\n", payload); err != nil {
-				return false, err
-			}
-			flusher.Flush()
-			if stringValue(contractEventMap["type"]) == "session.deleted" {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-
-	fetch := func(events []map[string]any) (bool, error) {
-		if len(events) == 0 {
-			fetched, err := h.service.repo.ListEventsAfterID(c.Request.Context(), sessionID, lastEventID, 200)
-			if err != nil {
-				return false, err
-			}
-			events = fetched
-		}
-		if len(events) == 0 {
-			return false, nil
-		}
-		terminated, err := sendEvents(events)
-		if err != nil {
-			return false, err
-		}
-		last := events[len(events)-1]
-		if eventID := stringValue(last["id"]); eventID != "" {
-			lastEventID = eventID
-		}
-		return terminated, nil
-	}
-
-	terminated, err := sendEvents(initialEvents)
-	if err != nil {
-		h.logger.Warn("managed-agent stream initial fetch failed", zap.Error(err), zap.String("session_id", sessionID))
-		return
-	}
-	if len(initialEvents) > 0 {
-		last := initialEvents[len(initialEvents)-1]
-		if eventID := stringValue(last["id"]); eventID != "" {
-			lastEventID = eventID
-		}
-	}
-	if terminated {
-		return
-	}
+	deadline := time.Now().Add(streamPollTimeout)
 	for {
+		events, err := h.service.repo.ListEventsAfterID(c.Request.Context(), sessionID, lastEventID, 1)
+		if err != nil {
+			h.writeServiceError(c, err)
+			return
+		}
+		if len(events) > 0 {
+			payload, err := streamSessionEventToContract(events[0])
+			if err != nil {
+				h.logger.Error("failed to encode stream event response", zap.Error(err), zap.String("session_id", sessionID))
+				writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
+				return
+			}
+			c.JSON(http.StatusOK, payload)
+			return
+		}
+		if time.Now().After(deadline) {
+			writeError(c, http.StatusRequestTimeout, "gateway_timeout_error", "stream timed out waiting for the next event")
+			return
+		}
 		select {
 		case <-c.Request.Context().Done():
 			return
-		case <-heartbeat.C:
-			if _, err := io.WriteString(writer, ": keep-alive\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-poll.C:
-			terminated, err := fetch(nil)
-			if err != nil {
-				h.logger.Warn("managed-agent stream poll failed", zap.Error(err), zap.String("session_id", sessionID))
-				return
-			}
-			if terminated {
-				return
-			}
+		case <-time.After(streamPollInterval):
 		}
 	}
 }
@@ -394,14 +313,7 @@ func (h *Handler) writeServiceError(c *gin.Context, err error) {
 func writeError(c *gin.Context, status int, code, message string) {
 	requestID := managedAgentsRequestID(c)
 	c.Header("Request-Id", requestID)
-	c.JSON(status, gin.H{
-		"type":       "error",
-		"request_id": requestID,
-		"error": gin.H{
-			"type":    code,
-			"message": message,
-		},
-	})
+	c.JSON(status, apicontractutil.ErrorResponse(code, message, &requestID))
 }
 
 func requestBaseURL(c *gin.Context) string {

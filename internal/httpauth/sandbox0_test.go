@@ -49,7 +49,7 @@ func TestSandbox0AuthenticatorUserTokenSingleTeamWithoutHeader(t *testing.T) {
 	}
 }
 
-func TestSandbox0AuthenticatorUserTokenRequiresTeamHeaderForMultipleTeams(t *testing.T) {
+func TestSandbox0AuthenticatorUserTokenAutoSelectsStableTeamForMultipleTeams(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/users/me":
@@ -58,6 +58,9 @@ func TestSandbox0AuthenticatorUserTokenRequiresTeamHeaderForMultipleTeams(t *tes
 		case "/teams":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"data":{"teams":[{"id":"team_1","name":"Team 1","slug":"team-1","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},{"id":"team_2","name":"Team 2","slug":"team-2","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}}`))
+		case "/teams/team_1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"team_1","name":"Team 1","slug":"team-1","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -69,12 +72,12 @@ func TestSandbox0AuthenticatorUserTokenRequiresTeamHeaderForMultipleTeams(t *tes
 		t.Fatalf("new authenticator: %v", err)
 	}
 
-	_, err = authenticator.AuthenticateRequest(t.Context(), "jwt-token", "")
-	if err == nil {
-		t.Fatal("expected error for multi-team token without x-team-id")
+	authCtx, err := authenticator.AuthenticateRequest(t.Context(), "jwt-token", "")
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
 	}
-	if err.Error() != "x-team-id is required when the token can access multiple teams" {
-		t.Fatalf("error = %q, want multi-team selection error", err.Error())
+	if authCtx.TeamID != "team_1" {
+		t.Fatalf("team id = %q, want team_1", authCtx.TeamID)
 	}
 }
 
