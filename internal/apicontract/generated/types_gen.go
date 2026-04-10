@@ -4589,7 +4589,6 @@ type BetaListEnvironmentsV1EnvironmentsGetParams struct {
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
 	XApiKey          *string `json:"x-api-key,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaCreateEnvironmentV1EnvironmentsPostParams defines parameters for BetaCreateEnvironmentV1EnvironmentsPost.
@@ -4603,7 +4602,6 @@ type BetaCreateEnvironmentV1EnvironmentsPostParams struct {
 	//
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaDeleteEnvironmentV1EnvironmentsEnvironmentIdDeleteParams defines parameters for BetaDeleteEnvironmentV1EnvironmentsEnvironmentIdDelete.
@@ -4618,7 +4616,6 @@ type BetaDeleteEnvironmentV1EnvironmentsEnvironmentIdDeleteParams struct {
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
 	XApiKey          *string `json:"x-api-key,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaGetEnvironmentV1EnvironmentsEnvironmentIdGetParams defines parameters for BetaGetEnvironmentV1EnvironmentsEnvironmentIdGet.
@@ -4633,7 +4630,6 @@ type BetaGetEnvironmentV1EnvironmentsEnvironmentIdGetParams struct {
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
 	XApiKey          *string `json:"x-api-key,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaUpdateEnvironmentV1EnvironmentsEnvironmentIdPostParams defines parameters for BetaUpdateEnvironmentV1EnvironmentsEnvironmentIdPost.
@@ -4647,7 +4643,6 @@ type BetaUpdateEnvironmentV1EnvironmentsEnvironmentIdPostParams struct {
 	//
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaArchiveEnvironmentV1EnvironmentsEnvironmentIdArchivePostParams defines parameters for BetaArchiveEnvironmentV1EnvironmentsEnvironmentIdArchivePost.
@@ -4661,7 +4656,6 @@ type BetaArchiveEnvironmentV1EnvironmentsEnvironmentIdArchivePostParams struct {
 	//
 	// Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
 	AnthropicVersion *string `json:"anthropic-version,omitempty"`
-	SessionKey       *string `form:"sessionKey,omitempty" json:"sessionKey,omitempty"`
 }
 
 // BetaListFilesV1FilesGetParams defines parameters for BetaListFilesV1FilesGet.

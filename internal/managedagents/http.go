@@ -3,6 +3,7 @@ package managedagents
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -234,8 +235,18 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 		h.writeServiceError(c, err)
 		return
 	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		writeError(c, http.StatusInternalServerError, "api_error", "streaming not supported")
+		return
+	}
 	lastEventID := strings.TrimSpace(c.GetHeader("Last-Event-ID"))
 	deadline := time.Now().Add(streamPollTimeout)
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+	flusher.Flush()
 	for {
 		events, err := h.service.repo.ListEventsAfterID(c.Request.Context(), sessionID, lastEventID, 1)
 		if err != nil {
@@ -243,17 +254,28 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 			return
 		}
 		if len(events) > 0 {
-			payload, err := streamSessionEventToContract(events[0])
-			if err != nil {
-				h.logger.Error("failed to encode stream event response", zap.Error(err), zap.String("session_id", sessionID))
-				writeError(c, http.StatusInternalServerError, "api_error", "failed to encode response")
-				return
+			for _, event := range events {
+				payload, err := streamSessionEventToContract(event)
+				if err != nil {
+					h.logger.Error("failed to encode stream event response", zap.Error(err), zap.String("session_id", sessionID))
+					return
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					h.logger.Error("failed to marshal stream event response", zap.Error(err), zap.String("session_id", sessionID))
+					return
+				}
+				if eventID := strings.TrimSpace(stringValue(event["id"])); eventID != "" {
+					_, _ = c.Writer.WriteString("id: " + eventID + "\n")
+					lastEventID = eventID
+				}
+				_, _ = c.Writer.WriteString("data: ")
+				_, _ = c.Writer.Write(body)
+				_, _ = c.Writer.WriteString("\n\n")
+				flusher.Flush()
 			}
-			c.JSON(http.StatusOK, payload)
-			return
 		}
 		if time.Now().After(deadline) {
-			writeError(c, http.StatusRequestTimeout, "gateway_timeout_error", "stream timed out waiting for the next event")
 			return
 		}
 		select {

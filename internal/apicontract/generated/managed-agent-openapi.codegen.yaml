@@ -25,6 +25,7 @@ components:
                     - skills-2025-10-02
                     - fast-mode-2026-02-01
                     - output-300k-2026-03-24
+                    - advisor-tool-2026-03-01
                   type: string
                   x-stainless-nominal: false
         BetaAPIError:
@@ -1707,9 +1708,11 @@ components:
             properties:
                 data:
                     description: Base64-encoded document data.
+                    minLength: 1
                     type: string
                 media_type:
                     description: MIME type of the document (e.g., "application/pdf").
+                    minLength: 1
                     type: string
                 type:
                     enum:
@@ -1726,9 +1729,11 @@ components:
             properties:
                 data:
                     description: Base64-encoded image data.
+                    minLength: 1
                     type: string
                 media_type:
                     description: MIME type of the image (e.g., "image/png", "image/jpeg", "image/gif", "image/webp").
+                    minLength: 1
                     type: string
                 type:
                     enum:
@@ -2347,6 +2352,7 @@ components:
             properties:
                 file_id:
                     description: ID of a previously uploaded file.
+                    minLength: 1
                     type: string
                 type:
                     enum:
@@ -2362,6 +2368,7 @@ components:
             properties:
                 file_id:
                     description: ID of a previously uploaded file.
+                    minLength: 1
                     type: string
                 type:
                     enum:
@@ -3314,8 +3321,6 @@ components:
                   x-stainless-skip:
                     - go
                     - cli
-                    - java
-                    - kotlin
                 - $ref: '#/components/schemas/BetaManagedAgentsModelConfigParams'
         BetaManagedAgentsModelRateLimitedError:
             additionalProperties: false
@@ -3374,6 +3379,7 @@ components:
             properties:
                 data:
                     description: The plain text content.
+                    minLength: 1
                     type: string
                 media_type:
                     description: MIME type of the text content. Must be "text/plain".
@@ -4259,6 +4265,7 @@ components:
                 text:
                     description: The text content.
                     example: 'Where is my order #1234?'
+                    minLength: 1
                     type: string
                 type:
                     enum:
@@ -4404,6 +4411,7 @@ components:
                     type: string
                 url:
                     description: URL of the document to fetch.
+                    minLength: 1
                     type: string
             required:
                 - type
@@ -4419,6 +4427,7 @@ components:
                     type: string
                 url:
                     description: URL of the image to fetch.
+                    minLength: 1
                     type: string
             required:
                 - type
@@ -5367,7 +5376,7 @@ info:
     description: |-
         Extracted from the official Anthropic Stainless OpenAPI source used to generate the TypeScript, Python, and Go SDKs. This subset keeps only Managed Agents beta endpoints and the recursively referenced component schemas.
 
-        Source spec URL: https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic%2Fanthropic-69486316563eb49043ec1ef0b8e1d4164b6fadb58c7ae27477f9971448ede066.yml
+        Source spec URL: https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic%2Fanthropic-d87d3ef6f636c667a0256be82cebef0699d17403d409c26ec15813683cfc3263.yml
         Beta header required by these endpoints: managed-agents-2026-04-01
     title: Anthropic Managed Agents API (extracted subset)
     version: managed-agent-spec
@@ -6287,13 +6296,6 @@ paths:
                     nullable: true
                     title: X-Api-Key
                     type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
-                    type: string
             responses:
                 4XX:
                     content:
@@ -6351,13 +6353,6 @@ paths:
 
                         Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
                     title: Anthropic-Version
-                    type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
                     type: string
             requestBody:
                 content:
@@ -6438,13 +6433,6 @@ paths:
                     nullable: true
                     title: X-Api-Key
                     type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
-                    type: string
             responses:
                 4XX:
                     content:
@@ -6517,13 +6505,6 @@ paths:
                     nullable: true
                     title: X-Api-Key
                     type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
-                    type: string
             responses:
                 4XX:
                     content:
@@ -6588,13 +6569,6 @@ paths:
 
                         Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
                     title: Anthropic-Version
-                    type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
                     type: string
             requestBody:
                 content:
@@ -6667,13 +6641,6 @@ paths:
 
                         Read more about versioning and our version history [here](https://docs.claude.com/en/api/versioning).
                     title: Anthropic-Version
-                    type: string
-                - in: cookie
-                  name: sessionKey
-                  required: false
-                  schema:
-                    nullable: true
-                    title: Sessionkey
                     type: string
             responses:
                 4XX:
@@ -8277,10 +8244,15 @@ paths:
             responses:
                 "200":
                     content:
-                        application/json:
+                        text/event-stream:
                             schema:
                                 $ref: '#/components/schemas/BetaManagedAgentsStreamSessionEvents'
                     description: Successful response (OK)
+                    x-sdk-streaming: true
+                    x-sdk-streaming-sdks:
+                        - go
+                        - python
+                        - typescript
                 "400":
                     content:
                         application/json:

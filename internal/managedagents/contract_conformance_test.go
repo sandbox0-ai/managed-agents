@@ -76,11 +76,11 @@ func TestMountRoutesUsesSpecUpdateMethodsOnly(t *testing.T) {
 	}
 	for _, path := range updateOnlyRoutes {
 		methods := routesByPath[path]
-		if !methods[http.MethodPut] {
-			t.Fatalf("route %s missing PUT method", path)
+		if !methods[http.MethodPost] {
+			t.Fatalf("route %s missing POST method", path)
 		}
-		if methods[http.MethodPost] {
-			t.Fatalf("route %s unexpectedly exposes POST method", path)
+		if methods[http.MethodPut] {
+			t.Fatalf("route %s unexpectedly exposes PUT method", path)
 		}
 	}
 	if !routesByPath[InternalWebhookPath][http.MethodPost] {
@@ -301,7 +301,7 @@ func TestUploadFileRejectsUnknownMultipartField(t *testing.T) {
 	}
 }
 
-func TestStreamEventsReturnsJSONEventPayload(t *testing.T) {
+func TestStreamEventsReturnsSSEPayload(t *testing.T) {
 	repo := newTestRepository(t)
 	now := time.Date(2026, 4, 11, 10, 0, 0, 0, time.UTC)
 	record := &SessionRecord{
@@ -343,11 +343,19 @@ func TestStreamEventsReturnsJSONEventPayload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if contentType := rec.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
-		t.Fatalf("content-type = %q, want application/json", contentType)
+	if contentType := rec.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", contentType)
 	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "id: evt_stream_123\n") {
+		t.Fatalf("stream body missing event id: %q", body)
+	}
+	if !strings.Contains(body, "data: ") {
+		t.Fatalf("stream body missing data field: %q", body)
+	}
+	payloadJSON := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(body, "data: ", 2)[1], ""))
 	var payload contract.BetaManagedAgentsStreamSessionEvents
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		t.Fatalf("unmarshal stream payload: %v", err)
 	}
 	discriminator, err := payload.Discriminator()
