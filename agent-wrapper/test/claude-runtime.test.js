@@ -1,0 +1,115 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ClaudeRuntime, runtimeEnvForEngine } from '../src/adapters/claude.js';
+
+test('ClaudeRuntime resolves custom tool results as pending actions', () => {
+  const runtime = new ClaudeRuntime();
+  const resolved = [];
+  runtime.pendingActions.set('sesn_123', new Map([
+    ['ctu_1', {
+      id: 'ctu_1',
+      kind: 'custom_tool_result',
+      resolve: (value) => resolved.push(value),
+      reject: () => {},
+    }],
+  ]));
+
+  const result = runtime.resolveActions(
+    'sesn_123',
+    [{
+      type: 'user.custom_tool_result',
+      custom_tool_use_id: 'ctu_1',
+      content: [{ type: 'text', text: '{"ok":true}' }],
+      is_error: false,
+    }],
+    {
+      persistSession: (updater) => updater({ session_id: 'sesn_123', pending_actions: [] }),
+    },
+  );
+
+  assert.deepEqual(result, { resolved_count: 1, remaining_action_ids: [], resume_required: false });
+  assert.deepEqual(resolved, [{
+    content: [{ type: 'text', text: '{"ok":true}' }],
+    isError: false,
+  }]);
+});
+
+test('ClaudeRuntime resolves builtin tool confirmations into deferred resume state', () => {
+  const runtime = new ClaudeRuntime();
+  let persisted = null;
+
+  const result = runtime.resolveActions(
+    'sesn_456',
+    [{
+      type: 'user.tool_confirmation',
+      tool_use_id: 'tool_1',
+      result: 'allow',
+    }],
+    {
+      getSession: () => ({
+        session_id: 'sesn_456',
+        pending_actions: [{ id: 'tool_1', kind: 'tool_confirmation', tool_use_id: 'tool_1' }],
+        tool_confirmation_resolutions: {},
+      }),
+      persistSession: (updater) => {
+        persisted = updater({
+          session_id: 'sesn_456',
+          pending_actions: [{ id: 'tool_1', kind: 'tool_confirmation', tool_use_id: 'tool_1' }],
+          tool_confirmation_resolutions: {},
+        });
+        return persisted;
+      },
+    },
+  );
+
+  assert.deepEqual(result, { resolved_count: 1, remaining_action_ids: [], resume_required: true });
+  assert.deepEqual(persisted.pending_actions, []);
+  assert.equal(persisted.tool_confirmation_resolutions.tool_1.result.behavior, 'allow');
+});
+
+test('ClaudeRuntime can resume builtin tool confirmations from vendor session state alone', () => {
+  const runtime = new ClaudeRuntime();
+  let persisted = null;
+
+  const result = runtime.resolveActions(
+    'sesn_789',
+    [{
+      type: 'user.tool_confirmation',
+      tool_use_id: 'tool_2',
+      result: 'allow',
+    }],
+    {
+      getSession: () => ({
+        session_id: 'sesn_789',
+        vendor_session_id: 'vendor_sesn_789',
+        pending_actions: [],
+        tool_confirmation_resolutions: {},
+      }),
+      persistSession: (updater) => {
+        persisted = updater({
+          session_id: 'sesn_789',
+          vendor_session_id: 'vendor_sesn_789',
+          pending_actions: [],
+          tool_confirmation_resolutions: {},
+        });
+        return persisted;
+      },
+    },
+  );
+
+  assert.deepEqual(result, { resolved_count: 1, remaining_action_ids: [], resume_required: true });
+  assert.equal(persisted.tool_confirmation_resolutions.tool_2.result.behavior, 'allow');
+});
+
+test('runtimeEnvForEngine preserves base process environment', () => {
+  const merged = runtimeEnvForEngine({
+    env: {
+      PATH: '/custom/bin',
+      ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+    },
+  });
+
+  assert.equal(merged.PATH, '/custom/bin');
+  assert.equal(merged.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
+  assert.equal(merged.HOME, process.env.HOME);
+});

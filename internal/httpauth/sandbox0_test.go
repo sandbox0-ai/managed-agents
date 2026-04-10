@@ -1,0 +1,162 @@
+package httpauth
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+func TestSandbox0AuthenticatorUserTokenSingleTeamWithoutHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"user_123","email":"u@example.com","name":"User","email_verified":true,"is_admin":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		case "/teams":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"teams":[{"id":"team_123","name":"Team","slug":"team","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}}`))
+		case "/teams/team_123":
+			if got := r.Header.Get(teamIDHeader); got != "team_123" {
+				t.Fatalf("x-team-id = %q, want team_123", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"team_123","name":"Team","slug":"team","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	authCtx, err := authenticator.AuthenticateRequest(t.Context(), "jwt-token", "")
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.TeamID != "team_123" {
+		t.Fatalf("team id = %q, want team_123", authCtx.TeamID)
+	}
+	if authCtx.UserID != "user_123" {
+		t.Fatalf("user id = %q, want user_123", authCtx.UserID)
+	}
+}
+
+func TestSandbox0AuthenticatorUserTokenRequiresTeamHeaderForMultipleTeams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"user_123","email":"u@example.com","name":"User","email_verified":true,"is_admin":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		case "/teams":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"teams":[{"id":"team_1","name":"Team 1","slug":"team-1","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},{"id":"team_2","name":"Team 2","slug":"team-2","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	_, err = authenticator.AuthenticateRequest(t.Context(), "jwt-token", "")
+	if err == nil {
+		t.Fatal("expected error for multi-team token without x-team-id")
+	}
+	if err.Error() != "x-team-id is required when the token can access multiple teams" {
+		t.Fatalf("error = %q, want multi-team selection error", err.Error())
+	}
+}
+
+func TestSandbox0AuthenticatorAPIKeyUsesTeamHeaderAndProbe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(teamIDHeader); got != "team_123" {
+			t.Fatalf("x-team-id = %q, want team_123", got)
+		}
+		switch r.URL.Path {
+		case "/api/v1/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"sandboxes":[],"count":0,"has_more":false}}`))
+		case "/api/v1/sandboxvolumes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	authCtx, err := authenticator.AuthenticateRequest(t.Context(), "s0_region_token", "team_123")
+	if err != nil {
+		t.Fatalf("authenticate request: %v", err)
+	}
+	if authCtx.TeamID != "team_123" {
+		t.Fatalf("team id = %q, want team_123", authCtx.TeamID)
+	}
+	if authCtx.UserID != "" {
+		t.Fatalf("user id = %q, want empty for api key auth", authCtx.UserID)
+	}
+}
+
+func TestSandbox0AuthenticatorMiddlewareStoresContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"user_123","email":"u@example.com","name":"User","email_verified":true,"is_admin":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		case "/teams":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"teams":[{"id":"team_123","name":"Team","slug":"team","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}}`))
+		case "/teams/team_123":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"team_123","name":"Team","slug":"team","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(authenticator.Authenticate())
+	router.GET("/protected", func(c *gin.Context) {
+		authCtx := GetContext(c)
+		if authCtx == nil {
+			c.String(http.StatusInternalServerError, "missing auth context")
+			return
+		}
+		c.String(http.StatusOK, fmt.Sprintf("%s:%s", authCtx.TeamID, authCtx.UserID))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer jwt-token")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); body != "team_123:user_123" {
+		t.Fatalf("body = %q, want team_123:user_123", body)
+	}
+}

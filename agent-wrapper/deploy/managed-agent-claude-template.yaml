@@ -1,0 +1,49 @@
+apiVersion: sandbox0.ai/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: managed-agent-claude
+  namespace: tpl-managed-agent-claude
+  labels:
+    sandbox0.ai/template-logical-id: managed-agent-claude
+    sandbox0.ai/template-scope: public
+spec:
+  clusterId: default
+  displayName: Claude Managed Agent
+  description: Sandbox template for the Claude managed-agent wrapper sidecar.
+  mainContainer:
+    image: sandbox0ai/managed-agent-claude:latest
+    resources:
+      cpu: 250m
+      memory: 256Mi
+  sidecars:
+    - name: agent-wrapper
+      image: sandbox0ai/managed-agent-claude:latest
+      env:
+        - name: PORT
+          value: "8080"
+        - name: AGENT_WRAPPER_STATE_DIR
+          value: /var/lib/agent-wrapper
+      resources:
+        cpu: 250m
+        memory: 256Mi
+      mounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: engine-state
+          mountPath: /var/lib/agent-wrapper
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 2
+        periodSeconds: 2
+  sharedVolumes:
+    - name: workspace
+      mountPath: /workspace
+    - name: engine-state
+      mountPath: /var/lib/agent-wrapper
+  network:
+    mode: allow-all
+  pool:
+    minIdle: 1
+    maxIdle: 2
