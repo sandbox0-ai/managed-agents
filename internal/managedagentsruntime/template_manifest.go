@@ -137,22 +137,22 @@ func normalizeYAMLValue(value any) any {
 	}
 }
 
-func (m *SDKRuntimeManager) ensureManagedTemplate(ctx context.Context, client templateClient) error {
-	if m.templateRequest == nil {
+func (m *SDKRuntimeManager) ensureManagedTemplate(ctx context.Context, client templateClient, request *apispec.TemplateCreateRequest) error {
+	if request == nil {
 		return nil
 	}
-	existing, err := client.GetTemplate(ctx, m.templateRequest.TemplateID)
+	existing, err := client.GetTemplate(ctx, request.TemplateID)
 	if err != nil {
 		var apiErr *sandbox0sdk.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			_, err = client.CreateTemplate(ctx, *m.templateRequest)
+			_, err = client.CreateTemplate(ctx, *request)
 			return err
 		}
 		return err
 	}
-	if reflect.DeepEqual(existing.Spec, m.templateRequest.Spec) {
+	if reflect.DeepEqual(existing.Spec, request.Spec) {
 		return nil
 	}
-	_, err = client.UpdateTemplate(ctx, m.templateRequest.TemplateID, apispec.TemplateUpdateRequest{Spec: m.templateRequest.Spec})
+	_, err = client.UpdateTemplate(ctx, request.TemplateID, apispec.TemplateUpdateRequest{Spec: request.Spec})
 	return err
 }

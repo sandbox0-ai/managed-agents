@@ -242,6 +242,7 @@ type WrapperSessionBootstrapRequest struct {
 	ControlToken     string           `json:"control_token,omitempty"`
 	WorkingDirectory string           `json:"working_directory,omitempty"`
 	EnvironmentID    string           `json:"environment_id"`
+	Environment      map[string]any   `json:"environment,omitempty"`
 	Agent            map[string]any   `json:"agent"`
 	Resources        []map[string]any `json:"resources,omitempty"`
 	VaultIDs         []string         `json:"vault_ids,omitempty"`

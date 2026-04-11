@@ -122,7 +122,15 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if err != nil {
 		return nil, err
 	}
-	if err := m.ensureManagedTemplate(ctx, client); err != nil {
+	environment, err := m.repo.GetEnvironment(ctx, session.TeamID, session.EnvironmentID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve environment: %w", err)
+	}
+	templateRequest, err := m.templateRequestForEnvironment(environment)
+	if err != nil {
+		return nil, fmt.Errorf("prepare environment template: %w", err)
+	}
+	if err := m.ensureManagedTemplate(ctx, client, templateRequest); err != nil {
 		return nil, fmt.Errorf("ensure managed template: %w", err)
 	}
 	workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
@@ -145,10 +153,8 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
 		}),
 	}
-	if networkPolicy, ok := decodeNetworkPolicy(engine); ok {
-		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(networkPolicy))
-	}
-	sandbox, err := client.ClaimSandbox(ctx, m.templateForVendor(session.Vendor), claimOpts...)
+	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine)))
+	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("claim sandbox: %w", err)
 	}
@@ -258,6 +264,13 @@ func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
 		return m.templateRequest.TemplateID
 	}
 	return m.cfg.ClaudeTemplate
+}
+
+func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *apispec.TemplateCreateRequest) string {
+	if request != nil && strings.TrimSpace(request.TemplateID) != "" {
+		return request.TemplateID
+	}
+	return m.templateForVendor(vendor)
 }
 
 func sortedMapKeys(in map[string]any) []string {

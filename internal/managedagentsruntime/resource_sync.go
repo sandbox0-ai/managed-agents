@@ -41,6 +41,11 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
+	environment, err := m.repo.GetEnvironment(ctx, record.TeamID, record.EnvironmentID)
+	if err != nil {
+		return fmt.Errorf("resolve environment: %w", err)
+	}
+	req.Environment = environmentSnapshot(environment)
 	if err := m.materializeFileResources(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.Resources); err != nil {
 		return err
 	}
@@ -72,7 +77,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	}
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
-	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, req.Engine, bindings)
+	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, runtimeNetworkPolicy(environment, req.Engine), bindings)
 }
 
 func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string) ([]gatewaymanagedagents.StoredCredential, error) {
@@ -334,8 +339,7 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 	return binding, nil
 }
 
-func (m *SDKRuntimeManager) syncSandboxNetworkPolicy(ctx context.Context, sandbox *sandbox0sdk.Sandbox, sessionID string, engine map[string]any, bindings []managedCredentialBinding) error {
-	policy, _ := decodeNetworkPolicy(engine)
+func (m *SDKRuntimeManager) syncSandboxNetworkPolicy(ctx context.Context, sandbox *sandbox0sdk.Sandbox, sessionID string, policy apispec.SandboxNetworkPolicy, bindings []managedCredentialBinding) error {
 	policy = mergeManagedCredentialPolicy(policy, sessionID, bindings)
 	_, err := sandbox.UpdateNetworkPolicy(ctx, policy)
 	if err != nil {
@@ -381,6 +385,9 @@ func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID s
 		filteredRules = append(filteredRules, rule)
 	}
 	for _, binding := range bindings {
+		if base.Mode == apispec.SandboxNetworkPolicyModeBlockAll {
+			egress.AllowedDomains = appendUniqueStrings(egress.AllowedDomains, binding.domains...)
+		}
 		ref := managedCredentialBindingRef(sessionID, binding.key)
 		filteredBindings = append(filteredBindings, apispec.CredentialBinding{
 			Ref:       ref,

@@ -54,7 +54,7 @@ func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 	client := &fakeTemplateClient{
 		getErr: &sandbox0sdk.APIError{StatusCode: http.StatusNotFound},
 	}
-	if err := mgr.ensureManagedTemplate(context.Background(), client); err != nil {
+	if err := mgr.ensureManagedTemplate(context.Background(), client, mgr.templateRequest); err != nil {
 		t.Fatalf("ensureManagedTemplate returned error: %v", err)
 	}
 	if client.created == nil {
@@ -79,7 +79,7 @@ func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 	existing := &apispec.Template{TemplateID: request.TemplateID, Spec: request.Spec}
 	existing.Spec.DisplayName = apispec.NewOptString("stale")
 	client := &fakeTemplateClient{getTemplate: existing}
-	if err := mgr.ensureManagedTemplate(context.Background(), client); err != nil {
+	if err := mgr.ensureManagedTemplate(context.Background(), client, mgr.templateRequest); err != nil {
 		t.Fatalf("ensureManagedTemplate returned error: %v", err)
 	}
 	if client.updated == nil {

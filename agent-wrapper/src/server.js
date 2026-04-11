@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readJSON, writeJSON } from './lib/http.js';
 import { RuntimeStore } from './runtime/store.js';
 import { ProcdWebhookClient } from './runtime/callbacks.js';
+import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
 import { ClaudeRuntime } from './adapters/claude.js';
 
@@ -75,6 +76,7 @@ export function createServer({
           tool_confirmation_resolutions: current?.tool_confirmation_resolutions ?? {},
           updated_at: new Date().toISOString(),
         };
+        await materializeSessionEnvironment(session, { stateDir });
         await materializeSessionResources(session);
         store.upsertSession(body.session_id, () => session);
         writeJSON(res, 200, { session_id: session.session_id, vendor_session_id: session.vendor_session_id });
