@@ -213,9 +213,19 @@ func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, re
 	req.Description = description
 	req.Metadata = metadata
 	req.Config = config
+	exists, err := s.repo.EnvironmentNameExists(ctx, principal.TeamID, req.Name, "")
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrEnvironmentNameConflict
+	}
 	now := time.Now().UTC()
 	environment := buildEnvironmentObject(NewID("env"), req, now, nil)
 	if err := s.repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		return nil, err
+	}
+	if _, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment); err != nil {
 		return nil, err
 	}
 	return &environment, nil
@@ -238,6 +248,13 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, en
 		trimmed, err := normalizeRequiredText(*req.Name, "name", 256)
 		if err != nil {
 			return nil, err
+		}
+		exists, err := s.repo.EnvironmentNameExists(ctx, principal.TeamID, trimmed, environmentID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, ErrEnvironmentNameConflict
 		}
 		environment.Name = trimmed
 	}
@@ -271,10 +288,20 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, en
 	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, parseTimestampPointer(environment.ArchivedAt), now); err != nil {
 		return nil, err
 	}
+	if _, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment); err != nil {
+		return nil, err
+	}
 	return environment, nil
 }
 
 func (s *Service) DeleteEnvironment(ctx context.Context, principal Principal, environmentID string) (map[string]any, error) {
+	count, err := s.repo.CountActiveSessionsForEnvironment(ctx, principal.TeamID, environmentID)
+	if err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, ErrEnvironmentInUse
+	}
 	if err := s.repo.DeleteEnvironment(ctx, principal.TeamID, environmentID); err != nil {
 		return nil, err
 	}

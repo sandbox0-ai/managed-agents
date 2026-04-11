@@ -234,20 +234,21 @@ type RuntimeCallbackPayload struct {
 
 // WrapperSessionBootstrapRequest provisions or refreshes wrapper-side runtime state.
 type WrapperSessionBootstrapRequest struct {
-	SessionID        string           `json:"session_id"`
-	Vendor           string           `json:"vendor"`
-	VendorSessionID  string           `json:"vendor_session_id,omitempty"`
-	SandboxID        string           `json:"sandbox_id,omitempty"`
-	CallbackURL      string           `json:"callback_url,omitempty"`
-	ControlToken     string           `json:"control_token,omitempty"`
-	WorkingDirectory string           `json:"working_directory,omitempty"`
-	EnvironmentID    string           `json:"environment_id"`
-	Environment      map[string]any   `json:"environment,omitempty"`
-	Agent            map[string]any   `json:"agent"`
-	Resources        []map[string]any `json:"resources,omitempty"`
-	VaultIDs         []string         `json:"vault_ids,omitempty"`
-	SkillNames       []string         `json:"skill_names,omitempty"`
-	Engine           map[string]any   `json:"engine,omitempty"`
+	SessionID           string           `json:"session_id"`
+	Vendor              string           `json:"vendor"`
+	VendorSessionID     string           `json:"vendor_session_id,omitempty"`
+	SandboxID           string           `json:"sandbox_id,omitempty"`
+	CallbackURL         string           `json:"callback_url,omitempty"`
+	ControlToken        string           `json:"control_token,omitempty"`
+	WorkingDirectory    string           `json:"working_directory,omitempty"`
+	EnvironmentID       string           `json:"environment_id"`
+	Environment         map[string]any   `json:"environment,omitempty"`
+	EnvironmentArtifact map[string]any   `json:"environment_artifact,omitempty"`
+	Agent               map[string]any   `json:"agent"`
+	Resources           []map[string]any `json:"resources,omitempty"`
+	VaultIDs            []string         `json:"vault_ids,omitempty"`
+	SkillNames          []string         `json:"skill_names,omitempty"`
+	Engine              map[string]any   `json:"engine,omitempty"`
 }
 
 // WrapperRunRequest starts a new wrapper-side turn.
@@ -270,25 +271,26 @@ type WrapperResolveActionsResponse struct {
 }
 
 type SessionRecord struct {
-	ID                  string
-	TeamID              string
-	CreatedByUserID     string
-	Vendor              string
-	EnvironmentID       string
-	WorkingDirectory    string
-	Title               *string
-	Metadata            map[string]string
-	Agent               map[string]any
-	Resources           []map[string]any
-	VaultIDs            []string
-	Status              string
-	Usage               Usage
-	StatsActiveSeconds  float64
-	LastStatusStartedAt *time.Time
-	ArchivedAt          *time.Time
-	DeletedAt           *time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                    string
+	TeamID                string
+	CreatedByUserID       string
+	Vendor                string
+	EnvironmentID         string
+	EnvironmentArtifactID string
+	WorkingDirectory      string
+	Title                 *string
+	Metadata              map[string]string
+	Agent                 map[string]any
+	Resources             []map[string]any
+	VaultIDs              []string
+	Status                string
+	Usage                 Usage
+	StatsActiveSeconds    float64
+	LastStatusStartedAt   *time.Time
+	ArchivedAt            *time.Time
+	DeletedAt             *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type RuntimeRecord struct {
@@ -305,6 +307,31 @@ type RuntimeRecord struct {
 	ActiveRunID         *string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+}
+
+type EnvironmentArtifact struct {
+	ID             string
+	TeamID         string
+	EnvironmentID  string
+	Digest         string
+	Status         string
+	ConfigSnapshot map[string]any
+	Compatibility  map[string]any
+	Assets         EnvironmentArtifactAssets
+	BuildLog       string
+	FailureReason  *string
+	ArchivedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type EnvironmentArtifactAssets struct {
+	AptVolumeID   string `json:"apt_volume_id,omitempty"`
+	CargoVolumeID string `json:"cargo_volume_id,omitempty"`
+	GemVolumeID   string `json:"gem_volume_id,omitempty"`
+	GoVolumeID    string `json:"go_volume_id,omitempty"`
+	NPMVolumeID   string `json:"npm_volume_id,omitempty"`
+	PipVolumeID   string `json:"pip_volume_id,omitempty"`
 }
 
 type ContentSource struct {

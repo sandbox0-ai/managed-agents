@@ -584,10 +584,7 @@ func defaultEnvironmentConfig() map[string]any {
 	return map[string]any{
 		"type": "cloud",
 		"networking": map[string]any{
-			"type":                   "limited",
-			"allowed_hosts":          []any{},
-			"allow_package_managers": false,
-			"allow_mcp_servers":      false,
+			"type": "unrestricted",
 		},
 		"packages": map[string]any{
 			"type":  "packages",
@@ -627,7 +624,7 @@ func resolveCloudConfig(existing map[string]any, patch map[string]any) (map[stri
 func normalizeEnvironmentNetworking(existing map[string]any, raw any) (map[string]any, error) {
 	if raw == nil {
 		if len(existing) == 0 {
-			return map[string]any{"type": "limited", "allowed_hosts": []any{}, "allow_package_managers": false, "allow_mcp_servers": false}, nil
+			return map[string]any{"type": "unrestricted"}, nil
 		}
 		return cloneMap(existing), nil
 	}

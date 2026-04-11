@@ -27,24 +27,6 @@ func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewayma
 	if err != nil {
 		return nil, err
 	}
-	if environment == nil {
-		return request, nil
-	}
-	request.TemplateID = environmentTemplateID(request.TemplateID, environment.ID)
-	displayName := strings.TrimSpace(environment.Name)
-	if displayName == "" {
-		displayName = environment.ID
-	}
-	request.Spec.DisplayName = apispec.NewOptString(fmt.Sprintf("Claude Managed Agent - %s", displayName))
-	request.Spec.Network = apispec.NewOptSandboxNetworkPolicy(environmentNetworkPolicy(environment))
-	envVars := map[string]string{}
-	if existing, ok := request.Spec.EnvVars.Get(); ok {
-		for key, value := range existing {
-			envVars[key] = value
-		}
-	}
-	envVars["MANAGED_AGENT_ENVIRONMENT_ID"] = environment.ID
-	request.Spec.EnvVars = apispec.NewOptSandboxTemplateSpecEnvVars(envVars)
 	return request, nil
 }
 
@@ -63,26 +45,6 @@ func cloneTemplateRequest(request *apispec.TemplateCreateRequest) (*apispec.Temp
 	return &cloned, nil
 }
 
-func environmentTemplateID(baseTemplateID, environmentID string) string {
-	base := sanitizeName(baseTemplateID)
-	if base == "unknown" {
-		base = "managed-agent"
-	}
-	env := sanitizeName(environmentID)
-	if env == "unknown" {
-		return base
-	}
-	return truncateTemplateID(base + "-" + env)
-}
-
-func truncateTemplateID(value string) string {
-	const maxTemplateIDLength = 255
-	if len(value) <= maxTemplateIDLength {
-		return value
-	}
-	return strings.TrimRight(value[:maxTemplateIDLength], "-")
-}
-
 func runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any) apispec.SandboxNetworkPolicy {
 	if policy, ok := decodeNetworkPolicy(engine); ok {
 		return policy
@@ -95,7 +57,7 @@ func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment) api
 		return apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
 	}
 	domains := append([]string(nil), environment.Config.Networking.AllowedHosts...)
-	if environment.Config.Networking.AllowPackageManagers || environmentHasPackages(environment.Config.Packages) {
+	if environment.Config.Networking.AllowPackageManagers {
 		domains = append(domains, domainsForPackages(environment.Config.Packages)...)
 	}
 	domains = normalizeDomains(domains)
@@ -106,8 +68,18 @@ func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment) api
 	return policy
 }
 
-func environmentHasPackages(packages gatewaymanagedagents.EnvironmentPackages) bool {
-	return len(packages.Apt)+len(packages.Cargo)+len(packages.Gem)+len(packages.Go)+len(packages.NPM)+len(packages.Pip) > 0
+func builderNetworkPolicy(environment *gatewaymanagedagents.Environment) apispec.SandboxNetworkPolicy {
+	if environment == nil || strings.TrimSpace(environment.Config.Networking.Type) == "unrestricted" {
+		return apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
+	}
+	domains := append([]string(nil), environment.Config.Networking.AllowedHosts...)
+	domains = append(domains, domainsForPackages(environment.Config.Packages)...)
+	domains = normalizeDomains(domains)
+	policy := apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeBlockAll}
+	if len(domains) > 0 {
+		policy.Egress = apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{AllowedDomains: domains})
+	}
+	return policy
 }
 
 func domainsForPackages(packages gatewaymanagedagents.EnvironmentPackages) []string {

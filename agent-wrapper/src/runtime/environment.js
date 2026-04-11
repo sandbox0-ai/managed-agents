@@ -1,30 +1,46 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
+const managerOrder = ['apt', 'cargo', 'gem', 'go', 'npm', 'pip'];
 
-export async function materializeSessionEnvironment(session, options = {}) {
+export async function materializeSessionEnvironment(session) {
+  return activateSessionEnvironment(session);
+}
+
+export async function activateSessionEnvironment(session) {
   const packages = normalizePackages(session?.environment?.config?.packages);
   if (!hasPackages(packages)) {
-    return;
+    return session;
   }
 
-  const stateDir = options.stateDir ?? process.env.AGENT_WRAPPER_STATE_DIR ?? '/var/lib/agent-wrapper';
-  const run = options.runCommand ?? runCommand;
-  const environmentID = safeEnvironmentID(session?.environment_id ?? session?.environment?.id ?? 'default');
-  const markerDir = path.join(stateDir, 'environment');
-  const markerPath = path.join(markerDir, `${environmentID}.sha256`);
-  const digest = hashPackages(packages);
-  if (await markerMatches(markerPath, digest)) {
-    return;
+  const artifact = normalizeEnvironmentArtifact(session?.environment_artifact);
+  if (!artifact) {
+    throw new Error('environment artifact is required when packages are configured');
+  }
+  assertCompatibility(artifact.compatibility);
+
+  const existingEngine = session?.engine && typeof session.engine === 'object' ? session.engine : {};
+  const existingEnv = existingEngine.env && typeof existingEngine.env === 'object' ? existingEngine.env : {};
+  const nextEnv = { ...existingEnv };
+  const pathEntries = [];
+
+  for (const manager of managerOrder) {
+    if (packages[manager].length === 0) {
+      continue;
+    }
+    const asset = artifact.assets[manager];
+    if (!asset?.mountPath) {
+      throw new Error(`environment artifact is missing ${manager} mount metadata`);
+    }
+    await activateManager(manager, asset.mountPath, nextEnv, pathEntries);
   }
 
-  await installPackages(packages, run);
-  await fs.mkdir(markerDir, { recursive: true });
-  await fs.writeFile(markerPath, digest, 'utf8');
+  nextEnv.PATH = joinPathEntries(pathEntries, existingEnv.PATH ?? process.env.PATH ?? '');
+  session.engine = {
+    ...existingEngine,
+    env: nextEnv,
+  };
+  return session;
 }
 
 export function normalizePackages(raw) {
@@ -39,46 +55,160 @@ export function normalizePackages(raw) {
   };
 }
 
-async function installPackages(packages, run) {
-  const aptPackages = [...packages.apt];
-  if (packages.pip.length > 0) {
-    aptPackages.push('python3', 'python3-pip');
+function normalizeEnvironmentArtifact(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
   }
-  if (packages.gem.length > 0) {
-    aptPackages.push('ruby-full');
+  const assets = {};
+  for (const manager of managerOrder) {
+    const asset = raw.assets?.[manager];
+    assets[manager] = {
+      volumeID: stringValue(asset?.volume_id),
+      mountPath: stringValue(asset?.mount_path),
+    };
   }
-  if (packages.cargo.length > 0) {
-    aptPackages.push('cargo');
-  }
-  if (packages.go.length > 0) {
-    aptPackages.push('golang-go');
-  }
-  const uniqueAptPackages = unique(aptPackages);
-  if (uniqueAptPackages.length > 0) {
-    await run('apt-get', ['update']);
-    await run('apt-get', ['install', '-y', '--no-install-recommends', ...uniqueAptPackages]);
-  }
-  if (packages.pip.length > 0) {
-    await run('python3', ['-m', 'pip', 'install', '--break-system-packages', ...packages.pip]);
-  }
-  if (packages.npm.length > 0) {
-    await run('npm', ['install', '-g', ...packages.npm]);
-  }
-  if (packages.gem.length > 0) {
-    await run('gem', ['install', ...packages.gem]);
-  }
-  for (const item of packages.cargo) {
-    await run('cargo', ['install', item]);
-  }
-  for (const item of packages.go) {
-    await run('go', ['install', normalizeGoInstallTarget(item)]);
+  return {
+    compatibility: raw.compatibility && typeof raw.compatibility === 'object' ? raw.compatibility : {},
+    assets,
+  };
+}
+
+async function activateManager(manager, mountPath, env, pathEntries) {
+  switch (manager) {
+    case 'apt':
+      await activateApt(mountPath, env, pathEntries);
+      return;
+    case 'cargo':
+      await activateCargo(mountPath, env, pathEntries);
+      return;
+    case 'gem':
+      await activateGem(mountPath, env, pathEntries);
+      return;
+    case 'go':
+      await activateGo(mountPath, env, pathEntries);
+      return;
+    case 'npm':
+      await activateNPM(mountPath, env, pathEntries);
+      return;
+    case 'pip':
+      await activatePip(mountPath, env, pathEntries);
+      return;
+    default:
+      throw new Error(`unsupported environment package manager: ${manager}`);
   }
 }
 
-async function markerMatches(markerPath, digest) {
+async function activateApt(mountPath, env, pathEntries) {
+  const rootfs = path.join(mountPath, 'rootfs');
+  await requirePath(rootfs, 'apt rootfs');
+  for (const dir of ['usr/local/sbin', 'usr/local/bin', 'usr/sbin', 'usr/bin', 'sbin', 'bin']) {
+    await pushDirIfExists(pathEntries, path.join(rootfs, dir));
+  }
+  const libDirs = [
+    'usr/local/lib',
+    'usr/lib',
+    'usr/lib/x86_64-linux-gnu',
+    'usr/lib/aarch64-linux-gnu',
+    'lib',
+    'lib/x86_64-linux-gnu',
+    'lib/aarch64-linux-gnu',
+  ];
+  for (const dir of libDirs) {
+    const absolute = path.join(rootfs, dir);
+    if (await pathExists(absolute)) {
+      appendDelimitedEnv(env, 'LD_LIBRARY_PATH', absolute);
+    }
+  }
+  for (const dir of ['usr/lib/pkgconfig', 'usr/lib/x86_64-linux-gnu/pkgconfig', 'usr/lib/aarch64-linux-gnu/pkgconfig']) {
+    const absolute = path.join(rootfs, dir);
+    if (await pathExists(absolute)) {
+      appendDelimitedEnv(env, 'PKG_CONFIG_PATH', absolute);
+    }
+  }
+}
+
+async function activateCargo(mountPath, env, pathEntries) {
+  const root = path.join(mountPath, 'root');
+  const home = path.join(mountPath, 'home');
+  await requirePath(root, 'cargo root');
+  env.CARGO_HOME = home;
+  await pushDirIfExists(pathEntries, path.join(root, 'bin'));
+}
+
+async function activateGem(mountPath, env, pathEntries) {
+  const home = path.join(mountPath, 'home');
+  const bin = path.join(mountPath, 'bin');
+  await requirePath(home, 'gem home');
+  env.GEM_HOME = home;
+  env.GEM_PATH = home;
+  await pushDirIfExists(pathEntries, bin);
+}
+
+async function activateGo(mountPath, env, pathEntries) {
+  const bin = path.join(mountPath, 'bin');
+  await requirePath(mountPath, 'go mount');
+  env.GOBIN = bin;
+  await pushDirIfExists(pathEntries, bin);
+}
+
+async function activateNPM(mountPath, env, pathEntries) {
+  await requirePath(mountPath, 'npm mount');
+  await pushDirIfExists(pathEntries, path.join(mountPath, 'bin'));
+  const nodePath = path.join(mountPath, 'lib', 'node_modules');
+  if (await pathExists(nodePath)) {
+    appendDelimitedEnv(env, 'NODE_PATH', nodePath);
+  }
+}
+
+async function activatePip(mountPath, env, pathEntries) {
+  const venv = path.join(mountPath, 'venv');
+  await requirePath(venv, 'pip virtualenv');
+  env.VIRTUAL_ENV = venv;
+  await pushDirIfExists(pathEntries, path.join(venv, 'bin'));
+}
+
+function assertCompatibility(compatibility) {
+  if (!compatibility || typeof compatibility !== 'object') {
+    return;
+  }
+  const expectedOS = stringValue(compatibility.os);
+  if (expectedOS && expectedOS !== process.platform) {
+    throw new Error(`environment artifact requires ${expectedOS}, current runtime is ${process.platform}`);
+  }
+  const expectedArch = stringValue(compatibility.arch);
+  const currentArch = currentGoArch();
+  if (expectedArch && expectedArch !== currentArch) {
+    throw new Error(`environment artifact requires ${expectedArch}, current runtime is ${currentArch}`);
+  }
+}
+
+function currentGoArch() {
+  switch (process.arch) {
+    case 'x64':
+      return 'amd64';
+    case 'arm64':
+      return 'arm64';
+    default:
+      return process.arch;
+  }
+}
+
+async function requirePath(target, label) {
+  if (!(await pathExists(target))) {
+    throw new Error(`${label} is missing at ${target}`);
+  }
+}
+
+async function pushDirIfExists(entries, target) {
+  if (await pathExists(target)) {
+    entries.push(target);
+  }
+}
+
+async function pathExists(target) {
   try {
-    const existing = await fs.readFile(markerPath, 'utf8');
-    return existing.trim() === digest;
+    await fs.access(target);
+    return true;
   } catch (error) {
     if (error?.code === 'ENOENT') {
       return false;
@@ -87,8 +217,27 @@ async function markerMatches(markerPath, digest) {
   }
 }
 
-function hashPackages(packages) {
-  return crypto.createHash('sha256').update(JSON.stringify(packages)).digest('hex');
+function appendDelimitedEnv(env, key, value) {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) {
+    return;
+  }
+  const current = String(env[key] ?? '').trim();
+  env[key] = current ? `${trimmed}:${current}` : trimmed;
+}
+
+function joinPathEntries(entries, basePath) {
+  const seen = new Set();
+  const ordered = [];
+  for (const entry of [...entries, ...String(basePath ?? '').split(':')]) {
+    const trimmed = String(entry ?? '').trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    ordered.push(trimmed);
+  }
+  return ordered.join(':');
 }
 
 function stringList(value) {
@@ -106,29 +255,6 @@ function unique(items) {
   return Array.from(new Set(items));
 }
 
-function safeEnvironmentID(value) {
-  const normalized = String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return normalized || 'default';
-}
-
-function normalizeGoInstallTarget(value) {
-  const target = String(value ?? '').trim();
-  if (target.includes('@')) {
-    return target;
-  }
-  return `${target}@latest`;
-}
-
-async function runCommand(command, args) {
-  try {
-    await execFileAsync(command, args, {
-      env: process.env,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    const stdout = String(error?.stdout ?? '').trim();
-    const detail = stderr || stdout || error?.message || `${command} failed`;
-    throw new Error(detail);
-  }
+function stringValue(value) {
+  return String(value ?? '').trim();
 }

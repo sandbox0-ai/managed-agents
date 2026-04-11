@@ -2,8 +2,10 @@ package managedagents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -160,8 +162,8 @@ func TestEnsureEnvironmentConfigProvidesCloudDefault(t *testing.T) {
 	if !ok {
 		t.Fatal("expected networking map")
 	}
-	if got := stringValue(networking["type"]); got != "limited" {
-		t.Fatalf("networking.type = %q, want limited", got)
+	if got := stringValue(networking["type"]); got != "unrestricted" {
+		t.Fatalf("networking.type = %q, want unrestricted", got)
 	}
 }
 
@@ -380,6 +382,367 @@ func TestCreateSessionRejectsEmptyVaultID(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "vault_ids entries must be non-empty") {
 		t.Fatalf("CreateSession error = %v, want vault_ids rejection", err)
+	}
+}
+
+func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{
+		Name: "python",
+		Config: map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+			"packages": map[string]any{
+				"type": "packages",
+				"pip":  []any{"ruff==0.9.0"},
+			},
+		},
+	}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	artifact, err := service.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment)
+	if err != nil {
+		t.Fatalf("ensureEnvironmentArtifactRecord: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	session, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	stored, _, err := repo.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if stored.EnvironmentArtifactID != artifact.ID {
+		t.Fatalf("environment_artifact_id = %q, want %q", stored.EnvironmentArtifactID, artifact.ID)
+	}
+}
+
+func TestCreateSessionRejectsArchivedEnvironment(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, &now)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, &now, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	_, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "archived environments cannot create new sessions") {
+		t.Fatalf("CreateSession error = %v, want archived-environment rejection", err)
+	}
+}
+
+func TestCreateEnvironmentRejectsDuplicateName(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	first, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: "python"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment first: %v", err)
+	}
+	if first == nil {
+		t.Fatal("expected first environment")
+	}
+	_, err = service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: " python "})
+	if err == nil || !strings.Contains(err.Error(), "environment already exists") {
+		t.Fatalf("CreateEnvironment duplicate error = %v, want conflict", err)
+	}
+}
+
+func TestCreateEnvironmentRoundTripsAllPackageFields(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "toolbox",
+		Config: map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+			"packages": map[string]any{
+				"type":  "packages",
+				"apt":   []any{"ripgrep", "git"},
+				"cargo": []any{"bat"},
+				"gem":   []any{"bundler"},
+				"go":    []any{"golang.org/x/tools/cmd/stringer@latest"},
+				"npm":   []any{"typescript"},
+				"pip":   []any{"ruff==0.9.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	stored, err := service.GetEnvironment(ctx, principal, environment.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+
+	if !reflect.DeepEqual(stored.Config.Packages.Apt, []string{"ripgrep", "git"}) {
+		t.Fatalf("packages.apt = %#v", stored.Config.Packages.Apt)
+	}
+	if !reflect.DeepEqual(stored.Config.Packages.Cargo, []string{"bat"}) {
+		t.Fatalf("packages.cargo = %#v", stored.Config.Packages.Cargo)
+	}
+	if !reflect.DeepEqual(stored.Config.Packages.Gem, []string{"bundler"}) {
+		t.Fatalf("packages.gem = %#v", stored.Config.Packages.Gem)
+	}
+	if !reflect.DeepEqual(stored.Config.Packages.Go, []string{"golang.org/x/tools/cmd/stringer@latest"}) {
+		t.Fatalf("packages.go = %#v", stored.Config.Packages.Go)
+	}
+	if !reflect.DeepEqual(stored.Config.Packages.NPM, []string{"typescript"}) {
+		t.Fatalf("packages.npm = %#v", stored.Config.Packages.NPM)
+	}
+	if !reflect.DeepEqual(stored.Config.Packages.Pip, []string{"ruff==0.9.0"}) {
+		t.Fatalf("packages.pip = %#v", stored.Config.Packages.Pip)
+	}
+}
+
+func TestEnvironmentLifecycleFlow(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	created, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "python",
+		Config: map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	fetched, err := service.GetEnvironment(ctx, principal, created.ID)
+	if err != nil {
+		t.Fatalf("GetEnvironment: %v", err)
+	}
+	if fetched.ID != created.ID {
+		t.Fatalf("GetEnvironment ID = %q, want %q", fetched.ID, created.ID)
+	}
+
+	active, nextPage, err := service.ListEnvironments(ctx, principal, 10, "", false)
+	if err != nil {
+		t.Fatalf("ListEnvironments active: %v", err)
+	}
+	if nextPage != nil {
+		t.Fatalf("ListEnvironments active next_page = %v, want nil", *nextPage)
+	}
+	if len(active) != 1 || active[0].ID != created.ID {
+		t.Fatalf("ListEnvironments active = %#v, want [%s]", active, created.ID)
+	}
+
+	name := "python tools"
+	updated, err := service.UpdateEnvironment(ctx, principal, created.ID, UpdateEnvironmentRequest{
+		Name: &name,
+		Config: map[string]any{
+			"packages": map[string]any{
+				"pip": []any{"ruff==0.9.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateEnvironment: %v", err)
+	}
+	if updated.Name != "python tools" {
+		t.Fatalf("updated name = %q, want python tools", updated.Name)
+	}
+	if !reflect.DeepEqual(updated.Config.Packages.Pip, []string{"ruff==0.9.0"}) {
+		t.Fatalf("updated packages.pip = %#v", updated.Config.Packages.Pip)
+	}
+
+	archived, err := service.ArchiveEnvironment(ctx, principal, created.ID)
+	if err != nil {
+		t.Fatalf("ArchiveEnvironment: %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("ArchiveEnvironment did not set archived_at")
+	}
+
+	active, _, err = service.ListEnvironments(ctx, principal, 10, "", false)
+	if err != nil {
+		t.Fatalf("ListEnvironments active after archive: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active environments after archive = %#v, want none", active)
+	}
+
+	all, _, err := service.ListEnvironments(ctx, principal, 10, "", true)
+	if err != nil {
+		t.Fatalf("ListEnvironments includeArchived: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != created.ID {
+		t.Fatalf("ListEnvironments includeArchived = %#v, want archived environment", all)
+	}
+
+	deleted, err := service.DeleteEnvironment(ctx, principal, created.ID)
+	if err != nil {
+		t.Fatalf("DeleteEnvironment: %v", err)
+	}
+	if got := stringValue(deleted["id"]); got != created.ID {
+		t.Fatalf("DeleteEnvironment id = %q, want %q", got, created.ID)
+	}
+	if _, err := service.GetEnvironment(ctx, principal, created.ID); !errors.Is(err, ErrEnvironmentNotFound) {
+		t.Fatalf("GetEnvironment after delete error = %v, want ErrEnvironmentNotFound", err)
+	}
+}
+
+func TestEnvironmentUpdateOnlyAffectsNewSessionsAndReusesArtifactsForStableConfig(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "python",
+		Config: map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+			"packages": map[string]any{
+				"type": "packages",
+				"pip":  []any{"ruff==0.9.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	first, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession first: %v", err)
+	}
+	second, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession second: %v", err)
+	}
+
+	storedFirst, _, err := repo.GetSession(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("GetSession first: %v", err)
+	}
+	storedSecond, _, err := repo.GetSession(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("GetSession second: %v", err)
+	}
+	if storedFirst.EnvironmentArtifactID == "" {
+		t.Fatal("expected first session to pin an environment artifact")
+	}
+	if storedFirst.EnvironmentArtifactID != storedSecond.EnvironmentArtifactID {
+		t.Fatalf("artifact ids = %q and %q, want identical artifact reuse", storedFirst.EnvironmentArtifactID, storedSecond.EnvironmentArtifactID)
+	}
+
+	updated, err := service.UpdateEnvironment(ctx, principal, environment.ID, UpdateEnvironmentRequest{
+		Config: map[string]any{
+			"packages": map[string]any{
+				"pip": []any{"ruff==0.10.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateEnvironment: %v", err)
+	}
+	if !reflect.DeepEqual(updated.Config.Packages.Pip, []string{"ruff==0.10.0"}) {
+		t.Fatalf("updated packages.pip = %#v", updated.Config.Packages.Pip)
+	}
+
+	third, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession third: %v", err)
+	}
+	storedThird, _, err := repo.GetSession(ctx, third.ID)
+	if err != nil {
+		t.Fatalf("GetSession third: %v", err)
+	}
+	if storedThird.EnvironmentArtifactID == "" {
+		t.Fatal("expected third session to pin an environment artifact")
+	}
+	if storedThird.EnvironmentArtifactID == storedFirst.EnvironmentArtifactID {
+		t.Fatalf("third session artifact id = %q, want new artifact after environment update", storedThird.EnvironmentArtifactID)
+	}
+
+	reloadedFirst, _, err := repo.GetSession(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("GetSession first after update: %v", err)
+	}
+	if reloadedFirst.EnvironmentArtifactID != storedFirst.EnvironmentArtifactID {
+		t.Fatalf("first session artifact id changed from %q to %q", storedFirst.EnvironmentArtifactID, reloadedFirst.EnvironmentArtifactID)
+	}
+}
+
+func TestDeleteEnvironmentRejectsReferencedSessions(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	if _, err := service.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment); err != nil {
+		t.Fatalf("ensureEnvironmentArtifactRecord: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if _, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := service.DeleteEnvironment(ctx, principal, environment.ID)
+	if err == nil || !strings.Contains(err.Error(), "referenced by existing sessions") {
+		t.Fatalf("DeleteEnvironment error = %v, want in-use rejection", err)
 	}
 }
 

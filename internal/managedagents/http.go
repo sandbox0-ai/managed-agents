@@ -322,6 +322,8 @@ func (h *Handler) writeServiceError(c *gin.Context, err error) {
 		writeError(c, http.StatusForbidden, "permission_error", err.Error())
 	case strings.Contains(err.Error(), "not found"):
 		writeError(c, http.StatusNotFound, "not_found_error", err.Error())
+	case strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "referenced by existing sessions") || strings.Contains(err.Error(), "conflict"):
+		writeError(c, http.StatusConflict, "invalid_request_error", err.Error())
 	case strings.Contains(err.Error(), "invalid webhook signature"):
 		writeError(c, http.StatusUnauthorized, "authentication_error", err.Error())
 	case strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid"):

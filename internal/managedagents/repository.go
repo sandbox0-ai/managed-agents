@@ -13,17 +13,20 @@ import (
 )
 
 var (
-	ErrSessionNotFound      = errors.New("managed-agent session not found")
-	ErrRuntimeNotFound      = errors.New("managed-agent runtime not found")
-	ErrAgentNotFound        = errors.New("managed-agent agent not found")
-	ErrEnvironmentNotFound  = errors.New("managed-agent environment not found")
-	ErrVaultNotFound        = errors.New("managed-agent vault not found")
-	ErrCredentialNotFound   = errors.New("managed-agent credential not found")
-	ErrFileNotFound         = errors.New("managed-agent file not found")
-	ErrSkillNotFound        = errors.New("managed-agent skill not found")
-	ErrSkillVersionNotFound = errors.New("managed-agent skill version not found")
-	ErrResourceNotFound     = errors.New("managed-agent session resource not found")
-	ErrEventNotFound        = errors.New("managed-agent event not found")
+	ErrSessionNotFound             = errors.New("managed-agent session not found")
+	ErrRuntimeNotFound             = errors.New("managed-agent runtime not found")
+	ErrAgentNotFound               = errors.New("managed-agent agent not found")
+	ErrEnvironmentNotFound         = errors.New("managed-agent environment not found")
+	ErrEnvironmentArtifactNotFound = errors.New("managed-agent environment artifact not found")
+	ErrEnvironmentNameConflict     = errors.New("managed-agent environment already exists")
+	ErrEnvironmentInUse            = errors.New("managed-agent environment is referenced by existing sessions")
+	ErrVaultNotFound               = errors.New("managed-agent vault not found")
+	ErrCredentialNotFound          = errors.New("managed-agent credential not found")
+	ErrFileNotFound                = errors.New("managed-agent file not found")
+	ErrSkillNotFound               = errors.New("managed-agent skill not found")
+	ErrSkillVersionNotFound        = errors.New("managed-agent skill version not found")
+	ErrResourceNotFound            = errors.New("managed-agent session resource not found")
+	ErrEventNotFound               = errors.New("managed-agent event not found")
 )
 
 // Repository persists managed-agent session state.
@@ -59,15 +62,15 @@ func (r *Repository) CreateSession(ctx context.Context, record *SessionRecord, e
 	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_sessions (
-			id, team_id, created_by_user_id, vendor, environment_id, working_directory, title, metadata,
+			id, team_id, created_by_user_id, vendor, environment_id, environment_artifact_id, working_directory, title, metadata,
 			agent, resources, vault_ids, engine, status,
 			usage_input_tokens, usage_output_tokens, usage_cache_read_input_tokens,
 			usage_cache_creation_ephemeral_1h_input_tokens, usage_cache_creation_ephemeral_5m_input_tokens,
 			stats_active_seconds, last_status_started_at, archived_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13,
-			$14, $15, $16, $17, $18, $19, $20, $21, NULL, $22, $23)
-	`, record.ID, record.TeamID, nullableString(record.CreatedByUserID), record.Vendor, record.EnvironmentID, record.WorkingDirectory, nullableStringPointer(record.Title),
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14,
+			$15, $16, $17, $18, $19, $20, $21, $22, NULL, $23, $24)
+	`, record.ID, record.TeamID, nullableString(record.CreatedByUserID), record.Vendor, record.EnvironmentID, nullableString(record.EnvironmentArtifactID), record.WorkingDirectory, nullableStringPointer(record.Title),
 		string(metadataJSON), string(agentJSON), string(resourcesJSON), string(vaultIDsJSON), string(engineJSON), record.Status,
 		record.Usage.InputTokens, record.Usage.OutputTokens, record.Usage.CacheReadInputTokens,
 		usageCacheCreationEphemeral1H(record.Usage), usageCacheCreationEphemeral5M(record.Usage),
@@ -88,7 +91,7 @@ func (r *Repository) GetSession(ctx context.Context, sessionID string) (*Session
 		engineJSON    []byte
 	)
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, team_id, COALESCE(created_by_user_id::text, ''), vendor, environment_id, working_directory, title,
+		SELECT id, team_id, COALESCE(created_by_user_id::text, ''), vendor, environment_id, COALESCE(environment_artifact_id, ''), working_directory, title,
 			metadata, agent, resources, vault_ids, engine, status,
 			usage_input_tokens, usage_output_tokens, usage_cache_read_input_tokens,
 			usage_cache_creation_ephemeral_1h_input_tokens, usage_cache_creation_ephemeral_5m_input_tokens,
@@ -96,7 +99,7 @@ func (r *Repository) GetSession(ctx context.Context, sessionID string) (*Session
 		FROM managed_agent_sessions
 		WHERE id = $1 AND deleted_at IS NULL
 	`, strings.TrimSpace(sessionID)).Scan(
-		&record.ID, &record.TeamID, &record.CreatedByUserID, &record.Vendor, &record.EnvironmentID, &record.WorkingDirectory, &record.Title,
+		&record.ID, &record.TeamID, &record.CreatedByUserID, &record.Vendor, &record.EnvironmentID, &record.EnvironmentArtifactID, &record.WorkingDirectory, &record.Title,
 		&metadataJSON, &agentJSON, &resourcesJSON, &vaultIDsJSON, &engineJSON, &record.Status,
 		&record.Usage.InputTokens, &record.Usage.OutputTokens, &record.Usage.CacheReadInputTokens,
 		usageCacheCreationEphemeral1HTarget(&record.Usage), usageCacheCreationEphemeral5MTarget(&record.Usage),
@@ -141,7 +144,7 @@ func (r *Repository) ListSessions(ctx context.Context, teamID string, opts Sessi
 	}
 	order := normalizeListOrder(opts.Order)
 	query := `
-		SELECT id, team_id, COALESCE(created_by_user_id::text, ''), vendor, environment_id, working_directory, title,
+		SELECT id, team_id, COALESCE(created_by_user_id::text, ''), vendor, environment_id, COALESCE(environment_artifact_id, ''), working_directory, title,
 			metadata, agent, resources, vault_ids, '{}'::jsonb, status,
 			usage_input_tokens, usage_output_tokens, usage_cache_read_input_tokens,
 			usage_cache_creation_ephemeral_1h_input_tokens, usage_cache_creation_ephemeral_5m_input_tokens,
@@ -205,7 +208,7 @@ func (r *Repository) ListSessions(ctx context.Context, teamID string, opts Sessi
 			ignoredEngine []byte
 		)
 		if err := rows.Scan(
-			&record.ID, &record.TeamID, &record.CreatedByUserID, &record.Vendor, &record.EnvironmentID, &record.WorkingDirectory, &record.Title,
+			&record.ID, &record.TeamID, &record.CreatedByUserID, &record.Vendor, &record.EnvironmentID, &record.EnvironmentArtifactID, &record.WorkingDirectory, &record.Title,
 			&metadataJSON, &agentJSON, &resourcesJSON, &vaultIDsJSON, &ignoredEngine, &record.Status,
 			&record.Usage.InputTokens, &record.Usage.OutputTokens, &record.Usage.CacheReadInputTokens,
 			usageCacheCreationEphemeral1HTarget(&record.Usage), usageCacheCreationEphemeral5MTarget(&record.Usage),
@@ -252,13 +255,13 @@ func (r *Repository) UpdateSession(ctx context.Context, record *SessionRecord, e
 	}
 	result, err := r.pool.Exec(ctx, `
 		UPDATE managed_agent_sessions
-		SET working_directory = $2, title = $3, metadata = $4::jsonb, agent = $5::jsonb, resources = $6::jsonb,
-			vault_ids = $7::jsonb, engine = $8::jsonb, status = $9,
-			usage_input_tokens = $10, usage_output_tokens = $11, usage_cache_read_input_tokens = $12,
-			usage_cache_creation_ephemeral_1h_input_tokens = $13, usage_cache_creation_ephemeral_5m_input_tokens = $14,
-			stats_active_seconds = $15, last_status_started_at = $16, archived_at = $17, deleted_at = $18, updated_at = $19
+		SET environment_artifact_id = $2, working_directory = $3, title = $4, metadata = $5::jsonb, agent = $6::jsonb, resources = $7::jsonb,
+			vault_ids = $8::jsonb, engine = $9::jsonb, status = $10,
+			usage_input_tokens = $11, usage_output_tokens = $12, usage_cache_read_input_tokens = $13,
+			usage_cache_creation_ephemeral_1h_input_tokens = $14, usage_cache_creation_ephemeral_5m_input_tokens = $15,
+			stats_active_seconds = $16, last_status_started_at = $17, archived_at = $18, deleted_at = $19, updated_at = $20
 		WHERE id = $1
-	`, record.ID, record.WorkingDirectory, nullableStringPointer(record.Title), string(metadataJSON), string(agentJSON), string(resourcesJSON),
+	`, record.ID, nullableString(record.EnvironmentArtifactID), record.WorkingDirectory, nullableStringPointer(record.Title), string(metadataJSON), string(agentJSON), string(resourcesJSON),
 		string(vaultIDsJSON), string(engineJSON), record.Status,
 		record.Usage.InputTokens, record.Usage.OutputTokens, record.Usage.CacheReadInputTokens,
 		usageCacheCreationEphemeral1H(record.Usage), usageCacheCreationEphemeral5M(record.Usage),

@@ -8,7 +8,7 @@ import (
 	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
 )
 
-func TestTemplateRequestForEnvironmentAppliesEnvironmentTemplateAndNetwork(t *testing.T) {
+func TestTemplateRequestForEnvironmentKeepsSharedTemplateStable(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:              true,
 		ClaudeTemplate:       "managed-agent-claude",
@@ -23,29 +23,14 @@ func TestTemplateRequestForEnvironmentAppliesEnvironmentTemplateAndNetwork(t *te
 	if err != nil {
 		t.Fatalf("templateRequestForEnvironment returned error: %v", err)
 	}
-	if request.TemplateID != "managed-agent-claude-env-123" {
-		t.Fatalf("TemplateID = %q, want managed-agent-claude-env-123", request.TemplateID)
+	if request.TemplateID != "managed-agent-claude" {
+		t.Fatalf("TemplateID = %q, want managed-agent-claude", request.TemplateID)
 	}
 	if mgr.templateRequest.TemplateID != "managed-agent-claude" {
 		t.Fatalf("base template mutated: %q", mgr.templateRequest.TemplateID)
 	}
-	envVars, ok := request.Spec.EnvVars.Get()
-	if !ok || envVars["MANAGED_AGENT_ENVIRONMENT_ID"] != "env_123" {
-		t.Fatalf("env vars = %#v, %v", envVars, ok)
-	}
-	policy, ok := request.Spec.Network.Get()
-	if !ok {
-		t.Fatal("network policy not set")
-	}
-	if policy.Mode != apispec.SandboxNetworkPolicyModeBlockAll {
-		t.Fatalf("network mode = %q, want block-all", policy.Mode)
-	}
-	egress, ok := policy.Egress.Get()
-	if !ok {
-		t.Fatal("egress policy not set")
-	}
-	if !containsString(egress.AllowedDomains, "api.example.com") || !containsString(egress.AllowedDomains, "pypi.org") {
-		t.Fatalf("allowed domains = %#v, want api.example.com and pypi.org", egress.AllowedDomains)
+	if _, ok := request.Spec.Network.Get(); !ok {
+		t.Fatal("template network should remain configured")
 	}
 }
 
@@ -54,6 +39,33 @@ func TestRuntimeNetworkPolicyAllowsEngineOverride(t *testing.T) {
 	policy := runtimeNetworkPolicy(environment, map[string]any{"network": map[string]any{"mode": "allow-all"}})
 	if policy.Mode != apispec.SandboxNetworkPolicyModeAllowAll {
 		t.Fatalf("policy mode = %q, want allow-all", policy.Mode)
+	}
+}
+
+func TestEnvironmentNetworkPolicyRequiresAllowPackageManagersFlag(t *testing.T) {
+	environment := testEnvironment()
+	policy := environmentNetworkPolicy(environment)
+	egress, ok := policy.Egress.Get()
+	if !ok {
+		t.Fatal("egress policy not set")
+	}
+	if containsString(egress.AllowedDomains, "pypi.org") {
+		t.Fatalf("allowed domains = %#v, did not expect package-manager domains", egress.AllowedDomains)
+	}
+	if !containsString(egress.AllowedDomains, "api.example.com") {
+		t.Fatalf("allowed domains = %#v, want api.example.com", egress.AllowedDomains)
+	}
+}
+
+func TestBuilderNetworkPolicyIncludesPackageRegistries(t *testing.T) {
+	environment := testEnvironment()
+	policy := builderNetworkPolicy(environment)
+	egress, ok := policy.Egress.Get()
+	if !ok {
+		t.Fatal("egress policy not set")
+	}
+	if !containsString(egress.AllowedDomains, "pypi.org") {
+		t.Fatalf("allowed domains = %#v, want pypi.org", egress.AllowedDomains)
 	}
 }
 

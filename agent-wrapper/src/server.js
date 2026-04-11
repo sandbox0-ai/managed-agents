@@ -67,6 +67,7 @@ export function createServer({
           agent: body.agent ?? current?.agent ?? null,
           environment_id: body.environment_id ?? current?.environment_id ?? null,
           environment: body.environment ?? current?.environment ?? null,
+          environment_artifact: body.environment_artifact ?? current?.environment_artifact ?? null,
           resources: body.resources ?? current?.resources ?? [],
           vault_ids: body.vault_ids ?? current?.vault_ids ?? [],
           skill_names: body.skill_names ?? current?.skill_names ?? [],

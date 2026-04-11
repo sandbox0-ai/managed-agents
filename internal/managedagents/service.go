@@ -73,8 +73,19 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, params
 	if err := ensureClaudeVendor(vendor); err != nil {
 		return nil, err
 	}
+	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureEnvironmentUsable(environment); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	resources, resourceSecrets, err := s.validateSessionDependencies(ctx, principal, environmentID, vaultIDs, cloneMapSlice(params.Resources))
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -87,20 +98,21 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, params
 		return nil, err
 	}
 	record := &SessionRecord{
-		ID:               NewID("sesn"),
-		TeamID:           strings.TrimSpace(principal.TeamID),
-		CreatedByUserID:  strings.TrimSpace(principal.UserID),
-		Vendor:           vendor,
-		EnvironmentID:    environmentID,
-		WorkingDirectory: "/workspace",
-		Title:            title,
-		Metadata:         metadata,
-		Agent:            agentSnapshot,
-		Resources:        resources,
-		VaultIDs:         append([]string(nil), vaultIDs...),
-		Status:           "idle",
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		ID:                    NewID("sesn"),
+		TeamID:                strings.TrimSpace(principal.TeamID),
+		CreatedByUserID:       strings.TrimSpace(principal.UserID),
+		Vendor:                vendor,
+		EnvironmentID:         environmentID,
+		EnvironmentArtifactID: artifact.ID,
+		WorkingDirectory:      "/workspace",
+		Title:                 title,
+		Metadata:              metadata,
+		Agent:                 agentSnapshot,
+		Resources:             resources,
+		VaultIDs:              append([]string(nil), vaultIDs...),
+		Status:                "idle",
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	if err := s.repo.CreateSession(ctx, record, nil); err != nil {
 		return nil, err

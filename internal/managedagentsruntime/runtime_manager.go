@@ -133,6 +133,10 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if err := m.ensureManagedTemplate(ctx, client, templateRequest); err != nil {
 		return nil, fmt.Errorf("ensure managed template: %w", err)
 	}
+	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve environment artifact: %w", err)
+	}
 	workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("create workspace volume: %w", err)
@@ -152,6 +156,14 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		sandbox0sdk.WithSandboxEnvVars(map[string]string{
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
 		}),
+	}
+	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
+		volumeID := artifact.Assets.VolumeIDForManager(manager)
+		mountPath := gatewaymanagedagents.ManagedEnvironmentMountPath(manager)
+		if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(mountPath) == "" {
+			return nil, fmt.Errorf("environment artifact %s is missing %s volume", artifact.ID, manager)
+		}
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath, nil))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine)))
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)

@@ -46,6 +46,13 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		return fmt.Errorf("resolve environment: %w", err)
 	}
 	req.Environment = environmentSnapshot(environment)
+	if strings.TrimSpace(record.EnvironmentArtifactID) != "" {
+		artifact, err := m.repo.GetEnvironmentArtifact(ctx, record.TeamID, record.EnvironmentArtifactID)
+		if err != nil {
+			return fmt.Errorf("resolve environment artifact: %w", err)
+		}
+		req.EnvironmentArtifact = gatewaymanagedagents.EnvironmentArtifactSnapshotForRuntime(artifact)
+	}
 	if err := m.materializeFileResources(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.Resources); err != nil {
 		return err
 	}
