@@ -1,3 +1,3 @@
 1. Create the runtime secret referenced by `agentGateway.secretKeys.databaseURL.secretName` before install.
 2. Set `agentGateway.env.sandbox0BaseURL` to the in-cluster or externally reachable sandbox0 API base URL.
-3. `sandboxTemplate.enabled=true` assumes the sandbox0 `SandboxTemplate` CRD is already installed in the cluster.
+3. Configure `agentGateway.env.templateMainImage` and `agentGateway.env.templateSidecarImage`; agent-gateway will ensure the sandbox0 template via SDK at runtime.

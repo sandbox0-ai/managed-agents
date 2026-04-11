@@ -56,6 +56,9 @@ agentGateway:
     anthropicSkillsBaseURL: ""
     anthropicSkillsVersion: ""
     anthropicSkillsTimeout: 15s
+    templateManifestPath: ""
+    templateMainImage: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude:latest
+    templateSidecarImage: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude:latest
   extraEnv: []
   envFromSecrets: []
   envFromConfigMaps: []
@@ -70,45 +73,3 @@ agentGateway:
       envName: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY
-
-sandboxTemplate:
-  enabled: true
-  namespace:
-    create: true
-    name: tpl-managed-agent-claude
-    labels: {}
-    annotations: {}
-  name: managed-agent-claude
-  clusterId: default
-  displayName: Claude Managed Agent
-  description: Sandbox template for the Claude managed-agent wrapper sidecar.
-  labels:
-    sandbox0.ai/template-logical-id: managed-agent-claude
-    sandbox0.ai/template-scope: public
-  mainContainer:
-    image:
-      repository: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude
-      tag: latest
-      pullPolicy: IfNotPresent
-    resources:
-      cpu: 250m
-      memory: 256Mi
-  sidecar:
-    image:
-      repository: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude
-      tag: latest
-      pullPolicy: IfNotPresent
-    env:
-      port: "8080"
-      stateDir: /var/lib/agent-wrapper
-    resources:
-      cpu: 250m
-      memory: 256Mi
-  sharedVolumes:
-    workspaceMountPath: /workspace
-    engineStateMountPath: /var/lib/agent-wrapper
-  network:
-    mode: allow-all
-  pool:
-    minIdle: 1
-    maxIdle: 2

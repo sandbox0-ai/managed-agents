@@ -40,6 +40,9 @@ type config struct {
 	RuntimeEnabled         bool
 	RuntimeRegionID        string
 	ClaudeTemplate         string
+	TemplateManifestPath   string
+	TemplateMainImage      string
+	TemplateSidecarImage   string
 	WrapperPort            int
 	WorkspaceMountPath     string
 	EngineStateMountPath   string
@@ -105,6 +108,9 @@ func main() {
 	runtimeCfg := managedagentsruntime.Config{
 		Enabled:                cfg.RuntimeEnabled,
 		ClaudeTemplate:         cfg.ClaudeTemplate,
+		TemplateManifestPath:   cfg.TemplateManifestPath,
+		TemplateMainImage:      cfg.TemplateMainImage,
+		TemplateSidecarImage:   cfg.TemplateSidecarImage,
 		WrapperPort:            cfg.WrapperPort,
 		WorkspaceMountPath:     cfg.WorkspaceMountPath,
 		EngineStateMountPath:   cfg.EngineStateMountPath,
@@ -115,7 +121,10 @@ func main() {
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
 		RegionID:               cfg.RuntimeRegionID,
 	}.WithDefaults(0)
-	runtimeManager := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
+	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
+	if err != nil {
+		logger.Fatal("create runtime manager", zap.Error(err))
+	}
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	handler := managedagents.NewHandler(service, logger)
 
@@ -181,6 +190,9 @@ func loadConfig() (config, error) {
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
 		RuntimeRegionID:        strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_REGION_ID")),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
+		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
+		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
+		TemplateSidecarImage:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE")),
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
 		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),

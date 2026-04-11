@@ -32,8 +32,6 @@ jobs:
       RUNTIME_REGION_ID: ${{ vars.MANAGED_AGENTS_RUNTIME_REGION_ID || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
       CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
-      TEMPLATE_NAMESPACE: ${{ vars.MANAGED_AGENTS_TEMPLATE_NAMESPACE || 'tpl-managed-agent-claude' }}
-      TEMPLATE_CLUSTER_ID: ${{ vars.MANAGED_AGENTS_TEMPLATE_CLUSTER_ID || 'default' }}
       DATABASE_URL: ${{ secrets.MANAGED_AGENTS_DATABASE_URL }}
       ANTHROPIC_SKILLS_API_KEY: ${{ secrets.MANAGED_AGENTS_ANTHROPIC_SKILLS_API_KEY }}
 
@@ -124,10 +122,5 @@ jobs:
             --set-string agentGateway.env.runtimeRegionID="${RUNTIME_REGION_ID}" \
             --set-string agentGateway.env.runtimeEnabled="${RUNTIME_ENABLED}" \
             --set-string agentGateway.env.claudeTemplate="${CLAUDE_TEMPLATE}" \
-            --set-string sandboxTemplate.name="${CLAUDE_TEMPLATE}" \
-            --set-string sandboxTemplate.namespace.name="${TEMPLATE_NAMESPACE}" \
-            --set-string sandboxTemplate.clusterId="${TEMPLATE_CLUSTER_ID}" \
-            --set-string sandboxTemplate.mainContainer.image.repository="${IMAGE_REGISTRY}/agent-wrapper-claude" \
-            --set-string sandboxTemplate.mainContainer.image.tag="${{ steps.image.outputs.tag }}" \
-            --set-string sandboxTemplate.sidecar.image.repository="${IMAGE_REGISTRY}/agent-wrapper-claude" \
-            --set-string sandboxTemplate.sidecar.image.tag="${{ steps.image.outputs.tag }}"
+            --set-string agentGateway.env.templateMainImage="${IMAGE_REGISTRY}/agent-wrapper-claude:${{ steps.image.outputs.tag }}" \
+            --set-string agentGateway.env.templateSidecarImage="${IMAGE_REGISTRY}/agent-wrapper-claude:${{ steps.image.outputs.tag }}"

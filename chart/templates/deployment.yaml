@@ -72,6 +72,12 @@ spec:
               value: {{ .Values.agentGateway.env.anthropicSkillsVersion | quote }}
             - name: MANAGED_AGENT_ANTHROPIC_SKILLS_TIMEOUT
               value: {{ .Values.agentGateway.env.anthropicSkillsTimeout | quote }}
+            - name: MANAGED_AGENT_TEMPLATE_MANIFEST_PATH
+              value: {{ .Values.agentGateway.env.templateManifestPath | quote }}
+            - name: MANAGED_AGENT_TEMPLATE_MAIN_IMAGE
+              value: {{ .Values.agentGateway.env.templateMainImage | quote }}
+            - name: MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE
+              value: {{ .Values.agentGateway.env.templateSidecarImage | quote }}
             {{- if .Values.agentGateway.secretKeys.databaseURL.enabled }}
             - name: {{ .Values.agentGateway.secretKeys.databaseURL.envName }}
               valueFrom:

@@ -23,6 +23,9 @@ import (
 type Config struct {
 	Enabled                bool
 	ClaudeTemplate         string
+	TemplateManifestPath   string
+	TemplateMainImage      string
+	TemplateSidecarImage   string
 	WrapperPort            int
 	WorkspaceMountPath     string
 	EngineStateMountPath   string
@@ -38,6 +41,12 @@ type Config struct {
 func (c Config) WithDefaults(httpPort int) Config {
 	if strings.TrimSpace(c.ClaudeTemplate) == "" {
 		c.ClaudeTemplate = "managed-agent-claude"
+	}
+	if strings.TrimSpace(c.TemplateMainImage) == "" {
+		c.TemplateMainImage = "ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude:latest"
+	}
+	if strings.TrimSpace(c.TemplateSidecarImage) == "" {
+		c.TemplateSidecarImage = c.TemplateMainImage
 	}
 	if c.WrapperPort == 0 {
 		c.WrapperPort = 8080
@@ -65,23 +74,32 @@ func (c Config) WithDefaults(httpPort int) Config {
 
 // SDKRuntimeManager provisions sandboxes and talks to the wrapper over an exposed HTTP endpoint.
 type SDKRuntimeManager struct {
-	repo       *gatewaymanagedagents.Repository
-	cfg        Config
-	logger     *zap.Logger
-	httpClient *http.Client
+	repo            *gatewaymanagedagents.Repository
+	cfg             Config
+	logger          *zap.Logger
+	httpClient      *http.Client
+	templateRequest *apispec.TemplateCreateRequest
 }
 
 // NewSDKRuntimeManager creates a runtime manager backed by sandbox0 sdk-go.
-func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, logger *zap.Logger) *SDKRuntimeManager {
+func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, logger *zap.Logger) (*SDKRuntimeManager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &SDKRuntimeManager{
+	manager := &SDKRuntimeManager{
 		repo:       repo,
 		cfg:        cfg,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: cfg.SandboxRequestTimeout},
 	}
+	if cfg.Enabled {
+		request, err := loadTemplateRequest(cfg)
+		if err != nil {
+			return nil, err
+		}
+		manager.templateRequest = request
+	}
+	return manager, nil
 }
 
 func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanagedagents.Principal, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, engine map[string]any, gatewayBaseURL string) (*gatewaymanagedagents.RuntimeRecord, error) {
@@ -103,6 +121,9 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	client, err := m.newSandboxClient(credential.Token)
 	if err != nil {
 		return nil, err
+	}
+	if err := m.ensureManagedTemplate(ctx, client); err != nil {
+		return nil, fmt.Errorf("ensure managed template: %w", err)
 	}
 	workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 	if err != nil {
@@ -233,6 +254,9 @@ func (m *SDKRuntimeManager) newSandboxClient(token string) (*sandbox0sdk.Client,
 }
 
 func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
+	if m.templateRequest != nil && strings.TrimSpace(m.templateRequest.TemplateID) != "" {
+		return m.templateRequest.TemplateID
+	}
 	return m.cfg.ClaudeTemplate
 }
 
