@@ -1,8 +1,37 @@
 import crypto from 'node:crypto';
 import { postJSON } from '../lib/http.js';
 
+const managedAgentWebhookRetryDelays = [250, 500, 1000, 2000, 4000];
+
 function procdPublishURL(baseURL) {
   return `${String(baseURL ?? '').replace(/\/$/, '')}/webhook/publish`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class WebhookHTTPError extends Error {
+  constructor(callbackURL, status, body) {
+    super(`POST ${callbackURL} failed with ${status}: ${body}`);
+    this.name = 'WebhookHTTPError';
+    this.status = status;
+  }
+}
+
+function isRetriableManagedAgentWebhookError(error) {
+  if (error instanceof WebhookHTTPError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  const name = String(error?.name ?? '').toLowerCase();
+  const message = String(error?.message ?? error ?? '').toLowerCase();
+  return name.includes('timeout')
+    || message.includes('fetch failed')
+    || message.includes('network')
+    || message.includes('timeout')
+    || message.includes('econnreset')
+    || message.includes('econnrefused')
+    || message.includes('enotfound');
 }
 
 export class ProcdWebhookClient {
@@ -50,6 +79,34 @@ export class ProcdWebhookClient {
   }
 
   async sendManagedAgentWebhook(session, payload, callbackURL) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= managedAgentWebhookRetryDelays.length; attempt += 1) {
+      try {
+        return await this.postManagedAgentWebhook(session, payload, callbackURL);
+      } catch (error) {
+        lastError = error;
+        const delayMs = managedAgentWebhookRetryDelays[attempt];
+        if (delayMs == null || !isRetriableManagedAgentWebhookError(error)) {
+          throw error;
+        }
+        console.log(JSON.stringify({
+          level: 'warn',
+          msg: 'wrapper managed-agent webhook publish retrying',
+          session_id: session?.session_id ?? null,
+          sandbox_id: session?.sandbox_id ?? null,
+          event_types: Array.isArray(payload?.events) ? payload.events.map((event) => event?.type ?? null) : [],
+          url: callbackURL,
+          attempt: attempt + 1,
+          delay_ms: delayMs,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        await sleep(delayMs);
+      }
+    }
+    throw lastError;
+  }
+
+  async postManagedAgentWebhook(session, payload, callbackURL) {
     const sandboxID = String(session?.sandbox_id ?? '').trim();
     const controlToken = String(session?.control_token ?? this.controlToken ?? '').trim();
     if (!sandboxID) {
@@ -76,7 +133,7 @@ export class ProcdWebhookClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`POST ${callbackURL} failed with ${response.status}: ${text}`);
+      throw new WebhookHTTPError(callbackURL, response.status, text);
     }
     if (!text) {
       return null;
