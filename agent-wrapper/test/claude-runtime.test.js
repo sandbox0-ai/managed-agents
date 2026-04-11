@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine, runtimeModelForSession } from '../src/adapters/claude.js';
+import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from '../src/adapters/claude.js';
 
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
@@ -137,6 +137,27 @@ test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {
   assert.deepEqual(servers, {
     issues: { type: 'sse', url: 'https://example.com/sse' },
     search: { type: 'http', url: 'https://api.example.com/mcp' },
+  });
+});
+
+test('sessionErrorEventForError classifies MCP auth and connection failures', () => {
+  assert.deepEqual(sessionErrorEventForError('MCP server "docs" authentication failed: 401 unauthorized'), {
+    type: 'session.error',
+    error: {
+      type: 'mcp_authentication_failed_error',
+      message: 'MCP server "docs" authentication failed: 401 unauthorized',
+      retry_status: { type: 'terminal' },
+      mcp_server_name: 'docs',
+    },
+  });
+  assert.deepEqual(sessionErrorEventForError('MCP server search connection failed: ECONNREFUSED'), {
+    type: 'session.error',
+    error: {
+      type: 'mcp_connection_failed_error',
+      message: 'MCP server search connection failed: ECONNREFUSED',
+      retry_status: { type: 'terminal' },
+      mcp_server_name: 'search',
+    },
   });
 });
 

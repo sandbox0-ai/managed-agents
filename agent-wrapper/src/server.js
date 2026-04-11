@@ -4,7 +4,7 @@ import { RuntimeStore } from './runtime/store.js';
 import { ProcdWebhookClient } from './runtime/callbacks.js';
 import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
-import { ClaudeRuntime } from './adapters/claude.js';
+import { ClaudeRuntime, sessionErrorEventForError } from './adapters/claude.js';
 
 function sessionPathname(pathname) {
   const match = pathname.match(/^\/v1\/runtime\/session\/([^/]+)$/);
@@ -70,6 +70,7 @@ export function createServer({
           environment_artifact: body.environment_artifact ?? current?.environment_artifact ?? null,
           resources: body.resources ?? current?.resources ?? [],
           vault_ids: body.vault_ids ?? current?.vault_ids ?? [],
+          bootstrap_events: Array.isArray(body.bootstrap_events) ? body.bootstrap_events : [],
           skill_names: body.skill_names ?? current?.skill_names ?? [],
           engine: body.engine ?? current?.engine ?? {},
           vendor_session_id: body.vendor_session_id ?? current?.vendor_session_id ?? null,
@@ -168,13 +169,7 @@ export function createServer({
               run_id: body.run_id,
               vendor_session_id: latest?.vendor_session_id,
               events: [
-                {
-                  type: 'session.error',
-                  error: {
-                    type: 'unknown_error',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                },
+                sessionErrorEventForError(error),
                 { type: 'session.status_terminated' },
               ],
             }).catch(() => {});

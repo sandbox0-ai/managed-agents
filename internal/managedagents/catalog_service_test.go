@@ -204,6 +204,33 @@ func TestNormalizeAgentToolsResolvesDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateToolReferencesRequiresEveryMCPServerExactlyOnce(t *testing.T) {
+	err := validateToolReferences([]any{
+		map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"},
+		map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"},
+	}, map[string]struct{}{"docs": {}})
+	if err == nil || !strings.Contains(err.Error(), "must not be referenced by more than one") {
+		t.Fatalf("validateToolReferences duplicate error = %v", err)
+	}
+
+	err = validateToolReferences([]any{
+		map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"},
+	}, map[string]struct{}{"docs": {}, "search": {}})
+	if err == nil || !strings.Contains(err.Error(), "must be referenced by exactly one") {
+		t.Fatalf("validateToolReferences missing error = %v", err)
+	}
+}
+
+func TestCanonicalMCPServerURLNormalizesForCredentialMatching(t *testing.T) {
+	got, err := CanonicalMCPServerURL("HTTPS://MCP.Example.com:443/sse/?b=2&a=1#ignored")
+	if err != nil {
+		t.Fatalf("CanonicalMCPServerURL: %v", err)
+	}
+	if got != "https://mcp.example.com/sse?a=1&b=2" {
+		t.Fatalf("canonical URL = %q, want normalized URL", got)
+	}
+}
+
 func TestNormalizeUpdateEnvironmentConfigMergesExistingState(t *testing.T) {
 	existing := map[string]any{
 		"type": "cloud",
@@ -312,6 +339,80 @@ func TestServiceUpdateCredentialRejectsManagedMetadataWithoutKind(t *testing.T) 
 	})
 	if err == nil || !strings.Contains(err.Error(), ManagedAgentCredentialKindKey) {
 		t.Fatalf("UpdateCredential error = %v, want managed kind validation", err)
+	}
+}
+
+func TestServiceCreateCredentialRejectsDuplicateCanonicalMCPServerURL(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	_, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "secret-token",
+			"mcp_server_url": "https://mcp.example.com/sse/",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	_, err = service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "another-secret",
+			"mcp_server_url": "HTTPS://MCP.Example.com:443/sse",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("CreateCredential duplicate error = %v", err)
+	}
+}
+
+func TestServiceArchiveVaultCascadesAndPurgesCredentialSecrets(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	created, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "secret-token",
+			"mcp_server_url": "https://mcp.example.com/sse",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	if _, err := service.ArchiveVault(ctx, principal, vault.ID); err != nil {
+		t.Fatalf("ArchiveVault: %v", err)
+	}
+	active, err := repo.ListActiveCredentialsForVault(ctx, principal.TeamID, vault.ID)
+	if err != nil {
+		t.Fatalf("ListActiveCredentialsForVault: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active credentials = %d, want 0", len(active))
+	}
+	credential, secret, err := repo.GetCredential(ctx, principal.TeamID, vault.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetCredential: %v", err)
+	}
+	if credential.ArchivedAt == nil {
+		t.Fatal("credential archived_at = nil, want archived timestamp")
+	}
+	if len(secret) != 0 {
+		t.Fatalf("credential secret = %#v, want purged", secret)
 	}
 }
 

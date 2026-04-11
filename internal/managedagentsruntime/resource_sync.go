@@ -18,13 +18,22 @@ import (
 )
 
 type managedCredentialBinding struct {
-	key               string
-	sourceName        string
-	domains           []string
-	protocol          apispec.EgressAuthProtocol
-	tlsMode           apispec.EgressTLSMode
-	projectionHeaders []managedProjectedHeader
-	secretValues      map[string]string
+	key                string
+	sourceName         string
+	domains            []string
+	mcpServerName      string
+	targetCanonicalURL string
+	protocol           apispec.EgressAuthProtocol
+	tlsMode            apispec.EgressTLSMode
+	projectionHeaders  []managedProjectedHeader
+	secretValues       map[string]string
+}
+
+type mcpServerTarget struct {
+	name         string
+	canonicalURL string
+	host         string
+	protocol     apispec.EgressAuthProtocol
 }
 
 type managedProjectedHeader struct {
@@ -65,7 +74,8 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	vaultCredentials, err := m.loadActiveVaultCredentials(ctx, record.TeamID, req.VaultIDs)
+	mcpTargets := sessionAgentMCPServerTargets(req.Agent)
+	vaultCredentials, bootstrapEvents, err := m.loadActiveVaultCredentials(ctx, record.TeamID, req.VaultIDs, mcpTargets)
 	if err != nil {
 		return err
 	}
@@ -78,34 +88,44 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	vaultBindings, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, req.Agent, vaultCredentials)
+	vaultBindings, vaultEvents, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, mcpTargets, vaultCredentials)
 	if err != nil {
 		return err
 	}
+	req.BootstrapEvents = append(req.BootstrapEvents, bootstrapEvents...)
+	req.BootstrapEvents = append(req.BootstrapEvents, vaultEvents...)
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
-	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, runtimeNetworkPolicy(environment, req.Engine), bindings)
+	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
 }
 
-func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string) ([]gatewaymanagedagents.StoredCredential, error) {
+func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string, mcpTargets map[string]mcpServerTarget) ([]gatewaymanagedagents.StoredCredential, []map[string]any, error) {
 	if len(vaultIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	credentials := make([]gatewaymanagedagents.StoredCredential, 0)
+	bootstrapEvents := make([]map[string]any, 0)
 	for _, vaultID := range vaultIDs {
 		items, err := m.repo.ListActiveCredentialsForVault(ctx, teamID, vaultID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, credential := range items {
 			credential, err = m.maybeRefreshVaultCredential(ctx, teamID, vaultID, credential, time.Now().UTC())
 			if err != nil {
-				return nil, err
+				if target, ok := credentialMCPServerTarget(credential, mcpTargets); ok && !isManagedLLMCredential(credential) {
+					bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(target.name, err))
+					continue
+				}
+				if !isManagedLLMCredential(credential) {
+					continue
+				}
+				return nil, nil, err
 			}
 			credentials = append(credentials, credential)
 		}
 	}
-	return credentials, nil
+	return credentials, bootstrapEvents, nil
 }
 
 func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID string, resources []map[string]any) error {
@@ -237,35 +257,42 @@ func (m *SDKRuntimeManager) syncManagedLLMCredentialSource(ctx context.Context, 
 	return []managedCredentialBinding{*binding}, nil
 }
 
-func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, agent map[string]any, credentials []gatewaymanagedagents.StoredCredential) ([]managedCredentialBinding, error) {
+func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, mcpTargets map[string]mcpServerTarget, credentials []gatewaymanagedagents.StoredCredential) ([]managedCredentialBinding, []map[string]any, error) {
 	if len(credentials) == 0 {
-		return nil, nil
-	}
-	allowedURLs := sessionAgentMCPServerURLs(agent)
-	if len(allowedURLs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	bindings := make([]managedCredentialBinding, 0)
-	seenTargets := make(map[string]string)
+	bootstrapEvents := make([]map[string]any, 0)
+	seenCanonicalTargets := make(map[string]struct{})
+	seenHostTargets := make(map[string]managedCredentialBinding)
 	for _, credential := range credentials {
-		binding, err := managedBindingFromVaultCredential(sessionID, credential, allowedURLs)
+		binding, err := managedBindingFromVaultCredential(sessionID, credential, mcpTargets)
 		if err != nil {
-			return nil, err
+			if target, ok := credentialMCPServerTarget(credential, mcpTargets); ok {
+				bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(target.name, err))
+				continue
+			}
+			return nil, nil, err
 		}
 		if binding == nil {
 			continue
 		}
-		targetKey := string(binding.protocol) + ":" + strings.Join(binding.domains, ",")
-		if existing, ok := seenTargets[targetKey]; ok && existing != binding.key {
-			return nil, fmt.Errorf("multiple vault credentials target the same MCP host %s", strings.Join(binding.domains, ","))
+		if _, ok := seenCanonicalTargets[binding.targetCanonicalURL]; ok {
+			continue
 		}
-		seenTargets[targetKey] = binding.key
+		seenCanonicalTargets[binding.targetCanonicalURL] = struct{}{}
+		targetKey := string(binding.protocol) + ":" + strings.Join(binding.domains, ",")
+		if existing, ok := seenHostTargets[targetKey]; ok {
+			bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(binding.mcpServerName, fmt.Errorf("multiple MCP credentials target %s; sandbox0 egress credential injection is currently scoped to host and protocol, so %s is using credential %s and %s cannot install a second credential for the same host", strings.Join(binding.domains, ","), existing.mcpServerName, existing.key, binding.mcpServerName)))
+			continue
+		}
+		seenHostTargets[targetKey] = *binding
 		if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		bindings = append(bindings, *binding)
 	}
-	return bindings, nil
+	return bindings, bootstrapEvents, nil
 }
 
 func (m *SDKRuntimeManager) upsertCredentialSource(ctx context.Context, client *sandbox0sdk.Client, binding managedCredentialBinding) error {
@@ -290,37 +317,41 @@ func (m *SDKRuntimeManager) upsertCredentialSource(ctx context.Context, client *
 	return nil
 }
 
-func managedBindingFromVaultCredential(sessionID string, credential gatewaymanagedagents.StoredCredential, allowedURLs map[string]struct{}) (*managedCredentialBinding, error) {
+func managedBindingFromVaultCredential(sessionID string, credential gatewaymanagedagents.StoredCredential, mcpTargets map[string]mcpServerTarget) (*managedCredentialBinding, error) {
 	snapshot := credential.Snapshot
 	secret := credential.Secret
 	credentialID := strings.TrimSpace(snapshot.ID)
 	if credentialID == "" {
 		return nil, errors.New("vault credential is missing id")
 	}
-	if normalizeManagedRuntimeMetadataValue(snapshot.Metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey]) == gatewaymanagedagents.ManagedAgentCredentialKindLLM {
+	if isManagedLLMCredential(credential) {
 		return nil, nil
 	}
-	auth := gatewaymanagedagents.CredentialAuthToMapForRuntime(snapshot.Auth)
-	serverURL := strings.TrimSpace(stringValue(auth["mcp_server_url"]))
-	if serverURL == "" {
-		serverURL = strings.TrimSpace(stringValue(secret["mcp_server_url"]))
-	}
+	serverURL := credentialMCPServerURL(credential)
 	if serverURL == "" {
 		return nil, fmt.Errorf("vault credential %s is missing mcp_server_url", credentialID)
 	}
-	if _, ok := allowedURLs[serverURL]; !ok {
+	canonicalURL, err := gatewaymanagedagents.CanonicalMCPServerURL(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("vault credential %s has invalid mcp_server_url", credentialID)
+	}
+	target, ok := mcpTargets[canonicalURL]
+	if !ok {
 		return nil, nil
 	}
 	parsedURL, err := url.Parse(serverURL)
 	if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
 		return nil, fmt.Errorf("vault credential %s has invalid mcp_server_url", credentialID)
 	}
+	auth := gatewaymanagedagents.CredentialAuthToMapForRuntime(snapshot.Auth)
 	binding := &managedCredentialBinding{
-		key:        credentialID,
-		sourceName: managedCredentialSourceName(sessionID, credentialID),
-		domains:    []string{strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))},
-		protocol:   protocolForURL(parsedURL),
-		tlsMode:    tlsModeForProtocol(protocolForURL(parsedURL)),
+		key:                credentialID,
+		sourceName:         managedCredentialSourceName(sessionID, credentialID),
+		domains:            []string{target.host},
+		mcpServerName:      target.name,
+		targetCanonicalURL: canonicalURL,
+		protocol:           target.protocol,
+		tlsMode:            tlsModeForProtocol(target.protocol),
 		projectionHeaders: []managedProjectedHeader{{
 			name:          "Authorization",
 			valueTemplate: "{{ .authorization }}",
@@ -495,20 +526,80 @@ func githubDomains(resource map[string]any) []string {
 	return []string{strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))}
 }
 
-func sessionAgentMCPServerURLs(agent map[string]any) map[string]struct{} {
-	out := make(map[string]struct{})
+func sessionAgentMCPServerTargets(agent map[string]any) map[string]mcpServerTarget {
+	out := make(map[string]mcpServerTarget)
 	for _, entry := range anySlice(agent["mcp_servers"]) {
 		server := mapValue(entry)
 		if strings.TrimSpace(stringValue(server["type"])) != "url" {
 			continue
 		}
+		name := strings.TrimSpace(stringValue(server["name"]))
 		serverURL := strings.TrimSpace(stringValue(server["url"]))
-		if serverURL == "" {
+		if name == "" || serverURL == "" {
 			continue
 		}
-		out[serverURL] = struct{}{}
+		canonicalURL, err := gatewaymanagedagents.CanonicalMCPServerURL(serverURL)
+		if err != nil {
+			continue
+		}
+		host, err := gatewaymanagedagents.MCPServerURLHost(serverURL)
+		if err != nil {
+			continue
+		}
+		parsedURL, err := url.Parse(canonicalURL)
+		if err != nil {
+			continue
+		}
+		out[canonicalURL] = mcpServerTarget{
+			name:         name,
+			canonicalURL: canonicalURL,
+			host:         host,
+			protocol:     protocolForURL(parsedURL),
+		}
 	}
 	return out
+}
+
+func credentialMCPServerTarget(credential gatewaymanagedagents.StoredCredential, targets map[string]mcpServerTarget) (mcpServerTarget, bool) {
+	serverURL := credentialMCPServerURL(credential)
+	if serverURL == "" {
+		return mcpServerTarget{}, false
+	}
+	canonicalURL, err := gatewaymanagedagents.CanonicalMCPServerURL(serverURL)
+	if err != nil {
+		return mcpServerTarget{}, false
+	}
+	target, ok := targets[canonicalURL]
+	return target, ok
+}
+
+func credentialMCPServerURL(credential gatewaymanagedagents.StoredCredential) string {
+	auth := gatewaymanagedagents.CredentialAuthToMapForRuntime(credential.Snapshot.Auth)
+	serverURL := strings.TrimSpace(stringValue(auth["mcp_server_url"]))
+	if serverURL == "" {
+		serverURL = strings.TrimSpace(stringValue(credential.Secret["mcp_server_url"]))
+	}
+	return serverURL
+}
+
+func isManagedLLMCredential(credential gatewaymanagedagents.StoredCredential) bool {
+	return normalizeManagedRuntimeMetadataValue(credential.Snapshot.Metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey]) == gatewaymanagedagents.ManagedAgentCredentialKindLLM
+}
+
+func mcpAuthenticationFailedEvent(serverName string, err error) map[string]any {
+	message := "MCP authentication failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = err.Error()
+	}
+	return map[string]any{
+		"type": "session.error",
+		"error": map[string]any{
+			"type":            "mcp_authentication_failed_error",
+			"message":         message,
+			"retry_status":    map[string]any{"type": "terminal"},
+			"mcp_server_name": serverName,
+		},
+	}
 }
 
 func protocolForURL(parsedURL *url.URL) apispec.EgressAuthProtocol {

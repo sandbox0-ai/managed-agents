@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 )
 
@@ -474,13 +473,14 @@ func normalizeMCPServer(raw any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := url.ParseRequestURI(serverURL); err != nil {
-		return nil, errors.New("mcp server url must be a valid url")
+	if _, err := CanonicalMCPServerURL(serverURL); err != nil {
+		return nil, errors.New("mcp server url must be a valid http or https url")
 	}
 	return map[string]any{"type": "url", "name": name, "url": serverURL}, nil
 }
 
 func validateToolReferences(tools []any, mcpServerNames map[string]struct{}) error {
+	referenced := make(map[string]struct{}, len(mcpServerNames))
 	for _, raw := range tools {
 		tool := mapValue(raw)
 		if stringValue(tool["type"]) != "mcp_toolset" {
@@ -489,6 +489,15 @@ func validateToolReferences(tools []any, mcpServerNames map[string]struct{}) err
 		name := stringValue(tool["mcp_server_name"])
 		if _, ok := mcpServerNames[name]; !ok {
 			return fmt.Errorf("mcp_toolset references unknown mcp server %q", name)
+		}
+		if _, ok := referenced[name]; ok {
+			return fmt.Errorf("mcp server %q must not be referenced by more than one mcp_toolset", name)
+		}
+		referenced[name] = struct{}{}
+	}
+	for name := range mcpServerNames {
+		if _, ok := referenced[name]; !ok {
+			return fmt.Errorf("mcp server %q must be referenced by exactly one mcp_toolset", name)
 		}
 	}
 	return nil

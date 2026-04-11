@@ -36,7 +36,7 @@ func TestTemplateRequestForEnvironmentKeepsSharedTemplateStable(t *testing.T) {
 
 func TestRuntimeNetworkPolicyAllowsEngineOverride(t *testing.T) {
 	environment := testEnvironment()
-	policy := runtimeNetworkPolicy(environment, map[string]any{"network": map[string]any{"mode": "allow-all"}})
+	policy := runtimeNetworkPolicy(environment, map[string]any{"network": map[string]any{"mode": "allow-all"}}, nil)
 	if policy.Mode != apispec.SandboxNetworkPolicyModeAllowAll {
 		t.Fatalf("policy mode = %q, want allow-all", policy.Mode)
 	}
@@ -44,7 +44,7 @@ func TestRuntimeNetworkPolicyAllowsEngineOverride(t *testing.T) {
 
 func TestEnvironmentNetworkPolicyRequiresAllowPackageManagersFlag(t *testing.T) {
 	environment := testEnvironment()
-	policy := environmentNetworkPolicy(environment)
+	policy := environmentNetworkPolicy(environment, nil)
 	egress, ok := policy.Egress.Get()
 	if !ok {
 		t.Fatal("egress policy not set")
@@ -54,6 +54,24 @@ func TestEnvironmentNetworkPolicyRequiresAllowPackageManagersFlag(t *testing.T) 
 	}
 	if !containsString(egress.AllowedDomains, "api.example.com") {
 		t.Fatalf("allowed domains = %#v, want api.example.com", egress.AllowedDomains)
+	}
+}
+
+func TestEnvironmentNetworkPolicyAllowsMCPServersWhenEnabled(t *testing.T) {
+	environment := testEnvironment()
+	environment.Config.Networking.AllowMCPServers = true
+	agent := map[string]any{
+		"mcp_servers": []any{
+			map[string]any{"type": "url", "name": "docs", "url": "https://MCP.Example.com/sse?b=2&a=1"},
+		},
+	}
+	policy := environmentNetworkPolicy(environment, agent)
+	egress, ok := policy.Egress.Get()
+	if !ok {
+		t.Fatal("egress policy not set")
+	}
+	if !containsString(egress.AllowedDomains, "mcp.example.com") {
+		t.Fatalf("allowed domains = %#v, want mcp.example.com", egress.AllowedDomains)
 	}
 }
 

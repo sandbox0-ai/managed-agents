@@ -3,6 +3,7 @@ package managedagents
 import (
 	"context"
 	"errors"
+	"fmt"
 	"mime"
 	"net/url"
 	"path"
@@ -393,6 +394,18 @@ func (s *Service) ArchiveVault(ctx context.Context, principal Principal, vaultID
 		return nil, err
 	}
 	now := time.Now().UTC()
+	activeCredentials, err := s.repo.ListActiveCredentialsForVault(ctx, principal.TeamID, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	for _, stored := range activeCredentials {
+		credential := stored.Snapshot
+		credential.ArchivedAt = timestampPointerOrNil(&now)
+		credential.UpdatedAt = nowRFC3339(now)
+		if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credential.ID, &credential, map[string]any{}, &now, now); err != nil {
+			return nil, err
+		}
+	}
 	vault.ArchivedAt = timestampPointerOrNil(&now)
 	vault.UpdatedAt = nowRFC3339(now)
 	if err := s.repo.UpdateVault(ctx, principal.TeamID, vaultID, vault, &now, now); err != nil {
@@ -405,7 +418,11 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	if len(req.Auth) == 0 {
 		return nil, errors.New("auth is required")
 	}
-	if _, err := s.repo.GetVault(ctx, principal.TeamID, vaultID); err != nil {
+	vault, err := s.repo.GetVault(ctx, principal.TeamID, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireActiveVault(vault); err != nil {
 		return nil, err
 	}
 	displayName, err := normalizeOptionalText(req.DisplayName, "display_name", 255)
@@ -421,6 +438,16 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	}
 	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
 	if err != nil {
+		return nil, err
+	}
+	activeCredentials, err := s.repo.ListActiveCredentialsForVault(ctx, principal.TeamID, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	if len(activeCredentials) >= 20 {
+		return nil, errors.New("vault supports at most 20 active credentials")
+	}
+	if err := validateUniqueActiveCredentialURL(activeCredentials, stringValue(normalizedAuth.Public["mcp_server_url"])); err != nil {
 		return nil, err
 	}
 	req.DisplayName = displayName
@@ -492,14 +519,14 @@ func (s *Service) DeleteCredential(ctx context.Context, principal Principal, vau
 }
 
 func (s *Service) ArchiveCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (*Credential, error) {
-	credential, secret, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID)
+	credential, _, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	credential.ArchivedAt = timestampPointerOrNil(&now)
 	credential.UpdatedAt = nowRFC3339(now)
-	if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credentialID, credential, secret, &now, now); err != nil {
+	if err := s.repo.UpdateCredential(ctx, principal.TeamID, vaultID, credentialID, credential, map[string]any{}, &now, now); err != nil {
 		return nil, err
 	}
 	return credential, nil
@@ -942,7 +969,11 @@ func (s *Service) validateSessionDependencies(ctx context.Context, principal Pri
 		return nil, nil, err
 	}
 	for _, vaultID := range vaultIDs {
-		if _, err := s.repo.GetVault(ctx, principal.TeamID, vaultID); err != nil {
+		vault, err := s.repo.GetVault(ctx, principal.TeamID, vaultID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := requireActiveVault(vault); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -960,6 +991,40 @@ func (s *Service) validateSessionDependencies(ctx context.Context, principal Pri
 		}
 	}
 	return normalized, secrets, nil
+}
+
+func requireActiveVault(vault *Vault) error {
+	if vault == nil {
+		return ErrVaultNotFound
+	}
+	if vault.ArchivedAt != nil && strings.TrimSpace(*vault.ArchivedAt) != "" {
+		return errors.New("vault is archived")
+	}
+	return nil
+}
+
+func validateUniqueActiveCredentialURL(activeCredentials []StoredCredential, serverURL string) error {
+	canonicalURL, err := CanonicalMCPServerURL(serverURL)
+	if err != nil {
+		return err
+	}
+	for _, existing := range activeCredentials {
+		existingURL := strings.TrimSpace(existing.Snapshot.Auth.MCPServerURL)
+		if existingURL == "" {
+			existingURL = strings.TrimSpace(stringValue(existing.Secret["mcp_server_url"]))
+		}
+		if existingURL == "" {
+			continue
+		}
+		existingCanonicalURL, err := CanonicalMCPServerURL(existingURL)
+		if err != nil {
+			continue
+		}
+		if existingCanonicalURL == canonicalURL {
+			return fmt.Errorf("active credential for mcp_server_url %q already exists", serverURL)
+		}
+	}
+	return nil
 }
 
 func validateAllowedFields(input map[string]any, allowed []string) error {

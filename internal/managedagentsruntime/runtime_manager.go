@@ -165,7 +165,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		}
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath, nil))
 	}
-	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine)))
+	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine, session.Agent)))
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("claim sandbox: %w", err)

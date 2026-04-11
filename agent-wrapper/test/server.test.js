@@ -142,6 +142,38 @@ test('agent-warper persists preload skill names during bootstrap', async () => {
   server.close();
 });
 
+test('agent-warper persists bootstrap diagnostic events during bootstrap', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
+  const server = createServer({
+    stateDir,
+    runtime: new FakeRuntime(),
+    callbackClient: { send: async () => {} },
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  const bootstrapEvents = [{
+    type: 'session.error',
+    error: {
+      type: 'mcp_authentication_failed_error',
+      message: 'bad token',
+      retry_status: { type: 'terminal' },
+      mcp_server_name: 'docs',
+    },
+  }];
+  const response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_bootstrap', vendor: 'claude', bootstrap_events: bootstrapEvents }),
+  });
+  assert.equal(response.status, 200);
+
+  const store = new RuntimeStore(stateDir);
+  assert.deepEqual(store.getSession('sesn_bootstrap')?.bootstrap_events, bootstrapEvents);
+
+  server.close();
+});
+
 test('RuntimeStore falls back to in-memory state when persistence is unavailable', () => {
   const store = new RuntimeStore('/proc/agent-wrapper-state');
   const session = store.upsertSession('sesn_mem', () => ({ session_id: 'sesn_mem', ok: true }));

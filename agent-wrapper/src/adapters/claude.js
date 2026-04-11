@@ -53,15 +53,31 @@ export class ClaudeRuntime {
     if (session.vendor_session_id) {
       options.resume = session.vendor_session_id;
     }
+    let currentSession = session;
+    const bootstrapEvents = Array.isArray(session.bootstrap_events)
+      ? session.bootstrap_events.filter((event) => event && typeof event === 'object')
+      : [];
+    if (bootstrapEvents.length > 0) {
+      await callbackClient.send(currentSession, {
+        session_id: currentSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: currentSession.vendor_session_id,
+        events: bootstrapEvents,
+      });
+      currentSession = sessionStore.persistSession((latest) => ({
+        ...latest,
+        bootstrap_events: [],
+        updated_at: new Date().toISOString(),
+      }));
+    }
 
-    await callbackClient.send(session, {
-      session_id: session.session_id,
+    await callbackClient.send(currentSession, {
+      session_id: currentSession.session_id,
       run_id: run.run_id,
-      vendor_session_id: session.vendor_session_id,
+      vendor_session_id: currentSession.vendor_session_id,
       events: [{ type: 'span.model_request_start', id: modelRequestStartID }],
     });
 
-    let currentSession = session;
     const stream = query({ prompt, options });
     this.activeRuns.set(run.run_id, { stream, sessionID: session.session_id });
     try {
@@ -503,13 +519,7 @@ export class ClaudeRuntime {
         usage_delta: usageDelta,
         events: [
           modelRequestEnd,
-          {
-            type: 'session.error',
-            error: {
-              type: 'unknown_error',
-              message: (message.errors ?? []).join('; ') || message.subtype || 'Claude run failed',
-            },
-          },
+          sessionErrorEventForError((message.errors ?? []).join('; ') || message.subtype || 'Claude run failed'),
           {
             type: 'session.status_terminated',
           },
@@ -519,6 +529,67 @@ export class ClaudeRuntime {
 
     return null;
   }
+}
+
+export function sessionErrorEventForError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return {
+    type: 'session.error',
+    error: sessionErrorDetailForMessage(message),
+  };
+}
+
+function sessionErrorDetailForMessage(message) {
+  const classified = classifyMCPError(message);
+  if (classified) {
+    return classified;
+  }
+  return {
+    type: 'unknown_error',
+    message: message || 'Claude run failed',
+  };
+}
+
+function classifyMCPError(message) {
+  const normalized = String(message ?? '').trim();
+  const lower = normalized.toLowerCase();
+  if (!lower.includes('mcp')) {
+    return null;
+  }
+  const mcpServerName = extractMCPServerName(normalized) || 'unknown';
+  if (/(401|403|unauthori[sz]ed|forbidden|authenticat|oauth|token|credential|permission denied)/i.test(normalized)) {
+    return {
+      type: 'mcp_authentication_failed_error',
+      message: normalized,
+      retry_status: { type: 'terminal' },
+      mcp_server_name: mcpServerName,
+    };
+  }
+  if (/(connect|connection|network|fetch failed|timed out|timeout|unreachable|enotfound|econnrefused|econnreset|socket|dns)/i.test(normalized)) {
+    return {
+      type: 'mcp_connection_failed_error',
+      message: normalized,
+      retry_status: { type: 'terminal' },
+      mcp_server_name: mcpServerName,
+    };
+  }
+  return null;
+}
+
+function extractMCPServerName(message) {
+  const patterns = [
+    /\bmcp__([^_\s]+)__/i,
+    /\bmcp server ["']([^"']+)["']/i,
+    /\bmcp server ([A-Za-z0-9_.-]+)/i,
+    /\bserver ["']([^"']+)["']/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(message);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return '';
 }
 
 function buildPromptInput(events) {

@@ -88,7 +88,9 @@ func TestManagedBindingFromVaultCredentialUsesBearerAuth(t *testing.T) {
 			"token":          "secret-token",
 			"mcp_server_url": "https://mcp.example.com/sse",
 		},
-	}, map[string]struct{}{"https://mcp.example.com/sse": {}})
+	}, sessionAgentMCPServerTargets(map[string]any{"mcp_servers": []any{
+		map[string]any{"type": "url", "name": "docs", "url": "https://MCP.Example.com/sse/"},
+	}}))
 	if err != nil {
 		t.Fatalf("managedBindingFromVaultCredential: %v", err)
 	}
@@ -110,6 +112,36 @@ func TestManagedBindingFromVaultCredentialUsesBearerAuth(t *testing.T) {
 	if binding.sourceName == "" {
 		t.Fatal("binding source name is empty")
 	}
+	if binding.mcpServerName != "docs" {
+		t.Fatalf("binding mcp server name = %q, want docs", binding.mcpServerName)
+	}
+}
+
+func TestManagedBindingFromVaultCredentialMatchesCanonicalMCPURL(t *testing.T) {
+	binding, err := managedBindingFromVaultCredential("sesn_123", gatewaymanagedagents.StoredCredential{
+		Snapshot: gatewaymanagedagents.Credential{
+			ID: "vcrd_123",
+			Auth: gatewaymanagedagents.CredentialAuth{
+				Type:         "static_bearer",
+				MCPServerURL: "https://mcp.example.com/sse?a=1&b=2",
+			},
+		},
+		Secret: map[string]any{
+			"type":  "static_bearer",
+			"token": "secret-token",
+		},
+	}, sessionAgentMCPServerTargets(map[string]any{"mcp_servers": []any{
+		map[string]any{"type": "url", "name": "docs", "url": "HTTPS://MCP.Example.com:443/sse/?b=2&a=1#ignored"},
+	}}))
+	if err != nil {
+		t.Fatalf("managedBindingFromVaultCredential: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected binding")
+	}
+	if binding.targetCanonicalURL != "https://mcp.example.com/sse?a=1&b=2" {
+		t.Fatalf("target canonical URL = %q", binding.targetCanonicalURL)
+	}
 }
 
 func TestManagedBindingFromVaultCredentialSkipsManagedLLMCredential(t *testing.T) {
@@ -128,7 +160,9 @@ func TestManagedBindingFromVaultCredentialSkipsManagedLLMCredential(t *testing.T
 			"type":  "static_bearer",
 			"token": "secret-token",
 		},
-	}, map[string]struct{}{"https://api.anthropic.com": {}})
+	}, sessionAgentMCPServerTargets(map[string]any{"mcp_servers": []any{
+		map[string]any{"type": "url", "name": "llm", "url": "https://api.anthropic.com"},
+	}}))
 	if err != nil {
 		t.Fatalf("managedBindingFromVaultCredential: %v", err)
 	}

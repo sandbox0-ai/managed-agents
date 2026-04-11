@@ -45,20 +45,23 @@ func cloneTemplateRequest(request *apispec.TemplateCreateRequest) (*apispec.Temp
 	return &cloned, nil
 }
 
-func runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any) apispec.SandboxNetworkPolicy {
+func runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any, agent map[string]any) apispec.SandboxNetworkPolicy {
 	if policy, ok := decodeNetworkPolicy(engine); ok {
 		return policy
 	}
-	return environmentNetworkPolicy(environment)
+	return environmentNetworkPolicy(environment, agent)
 }
 
-func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment) apispec.SandboxNetworkPolicy {
+func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment, agent map[string]any) apispec.SandboxNetworkPolicy {
 	if environment == nil || strings.TrimSpace(environment.Config.Networking.Type) == "unrestricted" {
 		return apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
 	}
 	domains := append([]string(nil), environment.Config.Networking.AllowedHosts...)
 	if environment.Config.Networking.AllowPackageManagers {
 		domains = append(domains, domainsForPackages(environment.Config.Packages)...)
+	}
+	if environment.Config.Networking.AllowMCPServers {
+		domains = append(domains, mcpServerDomainsFromAgent(agent)...)
 	}
 	domains = normalizeDomains(domains)
 	policy := apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeBlockAll}
@@ -96,6 +99,22 @@ func domainsForPackages(packages gatewaymanagedagents.EnvironmentPackages) []str
 	appendFor("go", packages.Go)
 	appendFor("npm", packages.NPM)
 	appendFor("pip", packages.Pip)
+	return domains
+}
+
+func mcpServerDomainsFromAgent(agent map[string]any) []string {
+	domains := []string{}
+	for _, raw := range anySlice(agent["mcp_servers"]) {
+		server := mapValue(raw)
+		if strings.TrimSpace(stringValue(server["type"])) != "url" {
+			continue
+		}
+		host, err := gatewaymanagedagents.MCPServerURLHost(stringValue(server["url"]))
+		if err != nil || strings.TrimSpace(host) == "" {
+			continue
+		}
+		domains = append(domains, host)
+	}
 	return domains
 }
 

@@ -247,6 +247,7 @@ type WrapperSessionBootstrapRequest struct {
 	Agent               map[string]any   `json:"agent"`
 	Resources           []map[string]any `json:"resources,omitempty"`
 	VaultIDs            []string         `json:"vault_ids,omitempty"`
+	BootstrapEvents     []map[string]any `json:"bootstrap_events,omitempty"`
 	SkillNames          []string         `json:"skill_names,omitempty"`
 	Engine              map[string]any   `json:"engine,omitempty"`
 }

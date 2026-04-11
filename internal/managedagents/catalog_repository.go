@@ -451,10 +451,15 @@ func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string
 
 func (r *Repository) ListActiveCredentialsForVault(ctx context.Context, teamID, vaultID string) ([]StoredCredential, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT snapshot, secret
-		FROM managed_agent_credentials
-		WHERE team_id = $1 AND vault_id = $2 AND archived_at IS NULL
-		ORDER BY created_at ASC, id ASC
+		SELECT c.snapshot, c.secret
+		FROM managed_agent_credentials c
+		JOIN managed_agent_vaults v
+			ON v.team_id = c.team_id AND v.id = c.vault_id
+		WHERE c.team_id = $1
+			AND c.vault_id = $2
+			AND c.archived_at IS NULL
+			AND v.archived_at IS NULL
+		ORDER BY c.created_at ASC, c.id ASC
 	`, teamID, strings.TrimSpace(vaultID))
 	if err != nil {
 		return nil, fmt.Errorf("list managed-agent credentials for vault: %w", err)
