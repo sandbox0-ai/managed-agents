@@ -77,6 +77,53 @@ test('ClaudeRuntime resolves builtin tool confirmations into deferred resume sta
   assert.equal(persisted.tool_confirmation_resolutions.tool_1.result.behavior, 'allow');
 });
 
+test('ClaudeRuntime resolves live builtin tool confirmation promises', async () => {
+  const runtime = new ClaudeRuntime();
+  let resolveDecision;
+  const decisionPromise = new Promise((resolve) => {
+    resolveDecision = resolve;
+  });
+  runtime.pendingActions.set('sesn_live', new Map([
+    ['tool_3', {
+      id: 'tool_3',
+      kind: 'tool_confirmation',
+      tool_use_id: 'tool_3',
+      input: { command: 'printf ok' },
+      resolve: resolveDecision,
+      reject: () => {},
+    }],
+  ]));
+  let persisted = null;
+
+  const result = runtime.resolveActions(
+    'sesn_live',
+    [{ type: 'user.tool_confirmation', tool_use_id: 'tool_3', result: 'allow' }],
+    {
+      getSession: () => ({
+        session_id: 'sesn_live',
+        pending_actions: [{ id: 'tool_3', kind: 'tool_confirmation', tool_use_id: 'tool_3', input: { command: 'printf ok' } }],
+        tool_confirmation_resolutions: {},
+      }),
+      persistSession: (updater) => {
+        persisted = updater({
+          session_id: 'sesn_live',
+          pending_actions: [{ id: 'tool_3', kind: 'tool_confirmation', tool_use_id: 'tool_3', input: { command: 'printf ok' } }],
+          tool_confirmation_resolutions: {},
+        });
+        return persisted;
+      },
+    },
+  );
+
+  assert.deepEqual(result, { resolved_count: 1, remaining_action_ids: [], resume_required: false });
+  assert.deepEqual(await decisionPromise, {
+    behavior: 'allow',
+    updatedInput: { command: 'printf ok' },
+    toolUseID: 'tool_3',
+  });
+  assert.deepEqual(persisted.pending_actions, []);
+});
+
 test('ClaudeRuntime can resume builtin tool confirmations from vendor session state alone', () => {
   const runtime = new ClaudeRuntime();
   let persisted = null;

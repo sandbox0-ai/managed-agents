@@ -165,8 +165,17 @@ export class ClaudeRuntime {
       }
       if (event.type === 'user.tool_confirmation') {
         const actionID = String(event.tool_use_id ?? '');
-        const action = pendingSnapshots.get(actionID);
+        const pendingAction = pendingPromises?.get(actionID);
+        const action = pendingAction ?? pendingSnapshots.get(actionID);
         if ((!action || action.kind !== 'tool_confirmation') && !hasVendorSession) {
+          continue;
+        }
+        const decision = this.#permissionDecision(event, action?.input);
+        if (pendingAction && pendingAction.kind === 'tool_confirmation') {
+          pendingPromises.delete(actionID);
+          pendingSnapshots.delete(actionID);
+          resolved += 1;
+          pendingAction.resolve(decision);
           continue;
         }
         if (action && action.kind === 'tool_confirmation') {
@@ -175,7 +184,7 @@ export class ClaudeRuntime {
         resolved += 1;
         resumeRequired = true;
         toolConfirmationResolutions[actionID] = {
-          result: this.#permissionDecision(event),
+          result: decision,
         };
         continue;
       }
@@ -241,7 +250,17 @@ export class ClaudeRuntime {
       extraArgs: engine.extra_args,
       env: runtimeEnvForEngine(engine),
       persistSession: true,
-      canUseTool: async (_toolName, input, options) => allowToolUseDecision(input, options.toolUseID),
+      canUseTool: async (toolName, input, options) => this.#handlePermissionRequest(
+        session,
+        run,
+        callbackClient,
+        sessionStore,
+        toolPlan,
+        customTools,
+        toolName,
+        input,
+        options,
+      ),
       hooks: {
         PreToolUse: [{
           hooks: [async (input) => {
@@ -383,6 +402,74 @@ export class ClaudeRuntime {
     return options;
   }
 
+  async #handlePermissionRequest(session, run, callbackClient, sessionStore, toolPlan, customTools, toolName, input, options) {
+    const eventID = firstNonEmptyString(options?.toolUseID, newEventID('toolu'));
+    const hookInput = buildPermissionHookInput(toolName, input, eventID);
+    if (isCustomToolInput(customTools, hookInput)) {
+      return allowToolUseDecision(input, eventID);
+    }
+
+    const currentSession = sessionStore.getSession() ?? session;
+    const resolvedTool = resolveToolPolicy(toolPlan, hookInput);
+    const evaluatedPermission = resolvedTool.enabled
+      ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
+      : 'deny';
+    const askForConfirmation = evaluatedPermission === 'ask';
+    const existingResolution = currentSession?.tool_confirmation_resolutions?.[eventID]?.result;
+    if (existingResolution) {
+      sessionStore.persistSession((latest) => ({
+        ...latest,
+        pending_actions: pendingActionSnapshots(removePendingAction(latest?.pending_actions, eventID)),
+        tool_confirmation_resolutions: omitActionResolution(latest?.tool_confirmation_resolutions, eventID),
+        updated_at: new Date().toISOString(),
+      }));
+      return sdkPermissionDecision(existingResolution, input, eventID);
+    }
+
+    let pending = null;
+    if (askForConfirmation) {
+      pending = this.#registerPendingAction(currentSession, {
+        id: eventID,
+        kind: 'tool_confirmation',
+        tool_use_id: eventID,
+        name: resolvedTool.name,
+        input: recordInput(input),
+      }, sessionStore);
+    }
+
+    if (!this.#wasToolUseEmitted(currentSession.session_id, eventID)) {
+      this.#markToolUseEmitted(currentSession.session_id, eventID);
+      const latestSession = sessionStore.getSession() ?? currentSession;
+      await callbackClient.send(latestSession, {
+        session_id: latestSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: latestSession.vendor_session_id,
+        events: askForConfirmation
+          ? [buildToolUseEvent(hookInput, eventID, evaluatedPermission), {
+            type: 'session.status_idle',
+            stop_reason: {
+              type: 'requires_action',
+              event_ids: [eventID],
+            },
+          }]
+          : [buildToolUseEvent(hookInput, eventID, evaluatedPermission)],
+      });
+    }
+
+    if (!resolvedTool.enabled) {
+      return {
+        behavior: 'deny',
+        message: 'Disabled by managed-agent tool policy',
+        toolUseID: eventID,
+        interrupt: true,
+      };
+    }
+    if (!askForConfirmation) {
+      return allowToolUseDecision(input, eventID);
+    }
+    return pending.promise;
+  }
+
   #registerPendingAction(session, action, sessionStore) {
     const deferred = deferredPromise();
     const pending = this.pendingActions.get(session.session_id) ?? new Map();
@@ -428,9 +515,9 @@ export class ClaudeRuntime {
     return pending.promise;
   }
 
-  #permissionDecision(event) {
+  #permissionDecision(event, input) {
     if (event.result === 'allow') {
-      return { behavior: 'allow', toolUseID: String(event.tool_use_id ?? '') };
+      return allowToolUseDecision(input, event.tool_use_id);
     }
     return {
       behavior: 'deny',
@@ -662,6 +749,27 @@ function buildToolUseEvent(input, eventID, evaluatedPermission) {
     name: normalizeToolName(input.tool_name),
     input: asStruct(input.tool_input),
     evaluated_permission: evaluatedPermission,
+  };
+}
+
+function buildPermissionHookInput(toolName, input, eventID) {
+  return {
+    hook_event_name: 'PermissionRequest',
+    tool_name: String(toolName ?? ''),
+    tool_input: recordInput(input),
+    tool_use_id: eventID,
+  };
+}
+
+function sdkPermissionDecision(decision, input, eventID) {
+  if (decision?.behavior === 'allow') {
+    return allowToolUseDecision(decision.updatedInput ?? input, decision.toolUseID ?? eventID);
+  }
+  return {
+    behavior: 'deny',
+    message: typeof decision?.message === 'string' && decision.message.trim() ? decision.message.trim() : 'Denied by user',
+    toolUseID: String(decision?.toolUseID ?? eventID ?? ''),
+    interrupt: decision?.interrupt !== false,
   };
 }
 
@@ -1190,6 +1298,8 @@ function pendingActionSnapshots(pending) {
       kind: action.kind,
       tool_use_id: action.tool_use_id,
       custom_tool_use_id: action.custom_tool_use_id,
+      name: action.name,
+      input: action.input === undefined ? undefined : recordInput(action.input),
     }));
   }
   if (!pending || pending.size === 0) {
@@ -1218,6 +1328,8 @@ function pendingActionSnapshotMap(pending) {
       kind: String(action.kind ?? ''),
       tool_use_id: String(action.tool_use_id ?? ''),
       custom_tool_use_id: String(action.custom_tool_use_id ?? ''),
+      name: String(action.name ?? ''),
+      input: action.input === undefined ? undefined : recordInput(action.input),
     });
   }
   return map;
