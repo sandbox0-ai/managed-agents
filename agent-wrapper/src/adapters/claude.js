@@ -209,12 +209,12 @@ export class ClaudeRuntime {
 
   #buildOptions(session, run, callbackClient, sessionStore) {
     const engine = session.engine ?? {};
-    const permissionPolicies = buildPermissionPolicies(session.agent?.tools);
+    const toolPlan = buildToolPlan(session.agent?.tools);
     const customTools = buildCustomToolAdapters(
       session.agent?.tools,
       async (tool, args) => this.#invokeCustomTool(session, run, callbackClient, sessionStore, tool, args),
     );
-    return {
+    const options = {
       cwd: session.working_directory,
       model: runtimeModelForSession(session),
       permissionMode: engine.permission_mode ?? 'default',
@@ -224,6 +224,7 @@ export class ClaudeRuntime {
       maxTurns: engine.max_turns,
       skills: querySkillNames(session),
       mcpServers: mergeMcpServers(mcpServersFromAgent(session.agent?.mcp_servers), engine.mcp_servers, customTools.mcpServers),
+      tools: toolPlan.builtinSDKTools,
       settings: engine.settings,
       extraArgs: engine.extra_args,
       env: runtimeEnvForEngine(engine),
@@ -236,13 +237,16 @@ export class ClaudeRuntime {
         PreToolUse: [{
           hooks: [async (input) => {
             const eventID = String(input.tool_use_id ?? '');
-            const normalizedToolName = normalizeToolName(input.tool_name);
-            if (customTools.toolNames.has(normalizedToolName)) {
+            if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
             const currentSession = sessionStore.getSession() ?? session;
-            const askForConfirmation = permissionPolicies.get(normalizedToolName) !== 'always_allow';
-            const toolUseEvent = buildToolUseEvent(input, eventID, askForConfirmation ? 'ask' : 'allow');
+            const resolvedTool = resolveToolPolicy(toolPlan, input);
+            const evaluatedPermission = resolvedTool.enabled
+              ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
+              : 'deny';
+            const askForConfirmation = evaluatedPermission === 'ask';
+            const toolUseEvent = buildToolUseEvent(input, eventID, evaluatedPermission);
             const resolution = currentSession?.tool_confirmation_resolutions?.[eventID]?.result;
             if (resolution) {
               sessionStore.persistSession((latest) => ({
@@ -290,6 +294,16 @@ export class ClaudeRuntime {
                   : [toolUseEvent],
               });
             }
+            if (!resolvedTool.enabled) {
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: 'Disabled by managed-agent tool policy',
+                },
+              };
+            }
             if (!askForConfirmation) {
               return {
                 continue: true,
@@ -312,7 +326,7 @@ export class ClaudeRuntime {
         }],
         PostToolUse: [{
           hooks: [async (input) => {
-            if (customTools.toolNames.has(normalizeToolName(input.tool_name))) {
+            if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
             const currentSession = sessionStore.getSession() ?? session;
@@ -327,7 +341,7 @@ export class ClaudeRuntime {
         }],
         PostToolUseFailure: [{
           hooks: [async (input) => {
-            if (customTools.toolNames.has(normalizeToolName(input.tool_name))) {
+            if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
             const currentSession = sessionStore.getSession() ?? session;
@@ -354,6 +368,10 @@ export class ClaudeRuntime {
         }],
       },
     };
+    if (toolPlan.disallowedTools.length > 0) {
+      options.disallowedTools = toolPlan.disallowedTools;
+    }
+    return options;
   }
 
   #registerPendingAction(session, action, sessionStore) {
@@ -610,7 +628,11 @@ function filteredPromptEvents(events) {
 }
 
 function normalizeToolName(toolName) {
-  return String(toolName ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+  return String(toolName ?? '')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .toLowerCase();
 }
 
 function buildToolUseEvent(input, eventID, evaluatedPermission) {
@@ -654,8 +676,8 @@ function buildToolResultEvent(input, content, isError) {
 }
 
 function mcpToolMetadata(input) {
-  const toolName = normalizeToolName(input?.tool_name);
-  const parsed = parseMcpToolName(toolName);
+  const rawToolName = String(input?.tool_name ?? '').trim();
+  const parsed = parseMcpToolName(rawToolName);
   if (parsed) {
     return parsed;
   }
@@ -669,16 +691,17 @@ function mcpToolMetadata(input) {
     return null;
   }
   return {
-    name: toolName,
+    name: rawToolName,
     serverName,
   };
 }
 
 function parseMcpToolName(toolName) {
-  if (!toolName.startsWith('mcp__')) {
+  const normalized = String(toolName ?? '').trim();
+  if (!normalized.toLowerCase().startsWith('mcp__')) {
     return null;
   }
-  const parts = toolName.split('__');
+  const parts = normalized.split('__');
   if (parts.length < 3) {
     return null;
   }
@@ -766,26 +789,201 @@ function numberValue(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function buildPermissionPolicies(tools) {
-  const policies = new Map();
+const BUILTIN_AGENT_TOOLS = [
+  ['bash', 'Bash'],
+  ['edit', 'Edit'],
+  ['read', 'Read'],
+  ['write', 'Write'],
+  ['glob', 'Glob'],
+  ['grep', 'Grep'],
+  ['web_fetch', 'WebFetch'],
+  ['web_search', 'WebSearch'],
+];
+
+const BUILTIN_AGENT_TOOL_BY_CONTRACT_NAME = new Map(BUILTIN_AGENT_TOOLS);
+const BUILTIN_AGENT_TOOL_CONTRACT_NAMES = new Set(BUILTIN_AGENT_TOOL_BY_CONTRACT_NAME.keys());
+
+export function buildToolPlan(tools) {
+  const builtinPolicies = new Map();
+  const mcpDefaults = new Map();
+  const mcpPolicies = new Map();
+  const disallowedTools = [];
+  let hasAgentToolset = false;
+
   for (const tool of tools ?? []) {
-    if (!tool || typeof tool !== 'object' || tool.type !== 'agent_toolset_20260401') {
+    if (!tool || typeof tool !== 'object') {
       continue;
     }
-    const defaultPolicy = tool.default_config?.permission_policy?.type === 'always_allow' ? 'always_allow' : 'always_ask';
-    for (const name of ['bash', 'edit', 'read', 'write', 'glob', 'grep', 'web_fetch', 'web_search']) {
-      policies.set(name, defaultPolicy);
+
+    if (tool.type === 'agent_toolset_20260401') {
+      hasAgentToolset = true;
+      const defaultConfig = defaultToolConfig(tool.default_config, 'always_allow');
+      for (const [contractName, sdkName] of BUILTIN_AGENT_TOOLS) {
+        builtinPolicies.set(contractName, {
+          enabled: defaultConfig.enabled,
+          policy: defaultConfig.policy,
+          sdkName,
+        });
+      }
+      for (const config of tool.configs ?? []) {
+        const name = normalizeToolName(config?.name);
+        if (!BUILTIN_AGENT_TOOL_CONTRACT_NAMES.has(name)) {
+          continue;
+        }
+        const current = builtinPolicies.get(name) ?? {
+          enabled: defaultConfig.enabled,
+          policy: defaultConfig.policy,
+          sdkName: BUILTIN_AGENT_TOOL_BY_CONTRACT_NAME.get(name),
+        };
+        builtinPolicies.set(name, {
+          enabled: booleanValue(config?.enabled, current.enabled),
+          policy: permissionPolicyType(config?.permission_policy, current.policy),
+          sdkName: current.sdkName,
+        });
+      }
+      continue;
     }
-    for (const config of tool.configs ?? []) {
-      const name = normalizeToolName(config?.name);
-      if (!name) {
+
+    if (tool.type === 'mcp_toolset') {
+      const serverName = String(tool.mcp_server_name ?? '').trim();
+      if (!serverName) {
         continue;
       }
-      const policy = config?.permission_policy?.type === 'always_allow' ? 'always_allow' : defaultPolicy;
-      policies.set(name, policy);
+      const defaultConfig = defaultToolConfig(tool.default_config, 'always_ask');
+      mcpDefaults.set(normalizeToolName(serverName), {
+        serverName,
+        enabled: defaultConfig.enabled,
+        policy: defaultConfig.policy,
+      });
+      for (const config of tool.configs ?? []) {
+        const name = String(config?.name ?? '').trim();
+        const normalizedName = normalizeToolName(name);
+        if (!normalizedName) {
+          continue;
+        }
+        const resolved = {
+          serverName,
+          name,
+          enabled: booleanValue(config?.enabled, defaultConfig.enabled),
+          policy: permissionPolicyType(config?.permission_policy, defaultConfig.policy),
+        };
+        mcpPolicies.set(mcpPolicyKey(serverName, name), resolved);
+        if (!resolved.enabled) {
+          disallowedTools.push(mcpSDKToolName(serverName, name));
+        }
+      }
     }
   }
-  return policies;
+
+  return {
+    builtinSDKTools: hasAgentToolset
+      ? Array.from(builtinPolicies.values())
+        .filter((entry) => entry.enabled)
+        .map((entry) => entry.sdkName)
+      : [],
+    disallowedTools: compactStrings(disallowedTools),
+    builtinPolicies,
+    mcpDefaults,
+    mcpPolicies,
+  };
+}
+
+export function resolveToolPolicy(plan, input) {
+  const mcp = mcpToolMetadata(input);
+  if (mcp) {
+    const specific = plan?.mcpPolicies?.get(mcpPolicyKey(mcp.serverName, mcp.name));
+    if (specific) {
+      return {
+        kind: 'mcp',
+        name: mcp.name,
+        serverName: specific.serverName,
+        enabled: specific.enabled,
+        policy: specific.policy,
+      };
+    }
+    const defaults = plan?.mcpDefaults?.get(normalizeToolName(mcp.serverName));
+    if (defaults) {
+      return {
+        kind: 'mcp',
+        name: mcp.name,
+        serverName: defaults.serverName,
+        enabled: defaults.enabled,
+        policy: defaults.policy,
+      };
+    }
+    console.log(JSON.stringify({
+      level: 'warn',
+      msg: 'claude mcp tool policy missing',
+      mcp_server_name: mcp.serverName,
+      tool_name: mcp.name,
+    }));
+    return { kind: 'mcp', name: mcp.name, serverName: mcp.serverName, enabled: false, policy: 'always_ask' };
+  }
+
+  const name = normalizeToolName(input?.tool_name);
+  const builtin = plan?.builtinPolicies?.get(name);
+  if (builtin) {
+    return {
+      kind: 'builtin',
+      name,
+      enabled: builtin.enabled,
+      policy: builtin.policy,
+    };
+  }
+  return { kind: 'builtin', name, enabled: false, policy: 'always_ask' };
+}
+
+function defaultToolConfig(config, fallbackPolicy) {
+  return {
+    enabled: booleanValue(config?.enabled, true),
+    policy: permissionPolicyType(config?.permission_policy, fallbackPolicy),
+  };
+}
+
+function permissionPolicyType(policy, fallback) {
+  const policyType = String(policy?.type ?? '').trim();
+  return policyType === 'always_allow' || policyType === 'always_ask' ? policyType : fallback;
+}
+
+function booleanValue(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function mcpPolicyKey(serverName, toolName) {
+  return `${normalizeToolName(serverName)}\u0000${normalizeToolName(toolName)}`;
+}
+
+function mcpSDKToolName(serverName, toolName) {
+  const normalizedServerName = normalizeToolName(serverName);
+  const normalizedToolName = normalizeToolName(toolName);
+  if (!normalizedServerName || !normalizedToolName) {
+    return '';
+  }
+  return `mcp__${normalizedServerName}__${normalizedToolName}`;
+}
+
+function compactStrings(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = String(value ?? '').trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function isCustomToolInput(customTools, input) {
+  const rawName = String(input?.tool_name ?? '').trim();
+  if (customTools.toolNames.has(normalizeToolName(rawName))) {
+    return true;
+  }
+  const mcp = mcpToolMetadata(input);
+  return normalizeToolName(mcp?.serverName) === normalizeToolName('sandbox0_custom_tools')
+    && customTools.toolNames.has(normalizeToolName(mcp?.name));
 }
 
 function buildCustomToolAdapters(tools, onInvoke) {

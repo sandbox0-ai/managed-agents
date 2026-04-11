@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeRuntime, mcpServersFromAgent, querySkillNames, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from '../src/adapters/claude.js';
+import {
+  buildToolPlan,
+  ClaudeRuntime,
+  mcpServersFromAgent,
+  querySkillNames,
+  resolveToolPolicy,
+  runtimeEnvForEngine,
+  runtimeModelForSession,
+  sessionErrorEventForError,
+} from '../src/adapters/claude.js';
 
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
@@ -138,6 +147,104 @@ test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {
     issues: { type: 'sse', url: 'https://example.com/sse' },
     search: { type: 'http', url: 'https://api.example.com/mcp' },
   });
+});
+
+test('buildToolPlan exposes built-in SDK tools from agent toolset defaults', () => {
+  const plan = buildToolPlan([
+    { type: 'agent_toolset_20260401' },
+  ]);
+
+  assert.deepEqual(plan.builtinSDKTools, ['Bash', 'Edit', 'Read', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'Bash' }), {
+    kind: 'builtin',
+    name: 'bash',
+    enabled: true,
+    policy: 'always_allow',
+  });
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'WebFetch' }), {
+    kind: 'builtin',
+    name: 'web_fetch',
+    enabled: true,
+    policy: 'always_allow',
+  });
+});
+
+test('buildToolPlan disables built-ins when agent toolset is omitted', () => {
+  const plan = buildToolPlan([
+    { type: 'custom', name: 'lookup', description: 'Lookup', input_schema: { type: 'object' } },
+  ]);
+
+  assert.deepEqual(plan.builtinSDKTools, []);
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'Read' }), {
+    kind: 'builtin',
+    name: 'read',
+    enabled: false,
+    policy: 'always_ask',
+  });
+});
+
+test('buildToolPlan applies built-in enabled and permission overrides', () => {
+  const plan = buildToolPlan([
+    {
+      type: 'agent_toolset_20260401',
+      default_config: { permission_policy: { type: 'always_ask' } },
+      configs: [
+        { name: 'bash', enabled: false },
+        { name: 'read', permission_policy: { type: 'always_allow' } },
+      ],
+    },
+  ]);
+
+  assert.equal(plan.builtinSDKTools.includes('Bash'), false);
+  assert.equal(plan.builtinSDKTools.includes('Read'), true);
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'Bash' }), {
+    kind: 'builtin',
+    name: 'bash',
+    enabled: false,
+    policy: 'always_ask',
+  });
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'Read' }), {
+    kind: 'builtin',
+    name: 'read',
+    enabled: true,
+    policy: 'always_allow',
+  });
+});
+
+test('buildToolPlan applies MCP defaults, overrides, and disabled tool visibility', () => {
+  const plan = buildToolPlan([
+    {
+      type: 'mcp_toolset',
+      mcp_server_name: 'docs',
+      configs: [
+        { name: 'fetch', permission_policy: { type: 'always_allow' } },
+        { name: 'search', enabled: false },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'mcp__docs__list' }), {
+    kind: 'mcp',
+    name: 'list',
+    serverName: 'docs',
+    enabled: true,
+    policy: 'always_ask',
+  });
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'mcp__docs__fetch' }), {
+    kind: 'mcp',
+    name: 'fetch',
+    serverName: 'docs',
+    enabled: true,
+    policy: 'always_allow',
+  });
+  assert.deepEqual(resolveToolPolicy(plan, { tool_name: 'mcp__docs__search' }), {
+    kind: 'mcp',
+    name: 'search',
+    serverName: 'docs',
+    enabled: false,
+    policy: 'always_ask',
+  });
+  assert.deepEqual(plan.disallowedTools, ['mcp__docs__search']);
 });
 
 test('sessionErrorEventForError classifies MCP auth and connection failures', () => {

@@ -196,7 +196,7 @@ func normalizeAgentToolset(tool map[string]any) (map[string]any, error) {
 	if err := validateAllowedFields(tool, []string{"type", "default_config", "configs"}); err != nil {
 		return nil, err
 	}
-	defaultConfig, err := normalizeToolsetDefaultConfig(mapValue(tool["default_config"]))
+	defaultConfig, err := normalizeToolsetDefaultConfig(mapValue(tool["default_config"]), "always_allow")
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func normalizeMCPToolset(tool map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defaultConfig, err := normalizeToolsetDefaultConfig(mapValue(tool["default_config"]))
+	defaultConfig, err := normalizeToolsetDefaultConfig(mapValue(tool["default_config"]), "always_ask")
 	if err != nil {
 		return nil, err
 	}
@@ -289,17 +289,17 @@ func normalizeCustomToolInputSchema(raw any) (map[string]any, error) {
 	return out, nil
 }
 
-func normalizeToolsetDefaultConfig(input map[string]any) (map[string]any, error) {
+func normalizeToolsetDefaultConfig(input map[string]any, defaultPermissionPolicy string) (map[string]any, error) {
 	if len(input) == 0 {
 		return map[string]any{
 			"enabled":           true,
-			"permission_policy": map[string]any{"type": "always_ask"},
+			"permission_policy": map[string]any{"type": defaultPermissionPolicy},
 		}, nil
 	}
 	if err := validateAllowedFields(input, []string{"enabled", "permission_policy"}); err != nil {
 		return nil, err
 	}
-	defaultConfig := map[string]any{"enabled": true, "permission_policy": map[string]any{"type": "always_ask"}}
+	defaultConfig := map[string]any{"enabled": true, "permission_policy": map[string]any{"type": defaultPermissionPolicy}}
 	if enabled, ok := input["enabled"]; ok && enabled != nil {
 		enabledValue, ok := enabled.(bool)
 		if !ok {

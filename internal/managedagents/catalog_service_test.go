@@ -188,10 +188,15 @@ func TestNormalizeAgentToolsResolvesDefaults(t *testing.T) {
 		t.Fatalf("default_config.enabled = %v, want true", defaultConfig["enabled"])
 	}
 	permissionPolicy := mapValue(defaultConfig["permission_policy"])
-	if got := stringValue(permissionPolicy["type"]); got != "always_ask" {
-		t.Fatalf("default_config.permission_policy.type = %q, want always_ask", got)
+	if got := stringValue(permissionPolicy["type"]); got != "always_allow" {
+		t.Fatalf("default_config.permission_policy.type = %q, want always_allow", got)
 	}
 	mcpToolset := mapValue(tools[1])
+	mcpDefaultConfig := mapValue(mcpToolset["default_config"])
+	mcpPermissionPolicy := mapValue(mcpDefaultConfig["permission_policy"])
+	if got := stringValue(mcpPermissionPolicy["type"]); got != "always_ask" {
+		t.Fatalf("mcp default_config.permission_policy.type = %q, want always_ask", got)
+	}
 	configs, ok := mcpToolset["configs"].([]any)
 	if !ok || len(configs) != 1 {
 		t.Fatalf("configs = %#v, want 1 entry", mcpToolset["configs"])
