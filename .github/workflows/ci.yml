@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout managed-agents
+        uses: actions/checkout@v4
+        with:
+          path: managed-agents
+
+      - name: Checkout sdk-go sibling repo
+        uses: actions/checkout@v4
+        with:
+          repository: sandbox0-ai/sdk-go
+          path: sdk-go
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: managed-agents/go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: managed-agents/agent-wrapper/package-lock.json
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Run Go tests
+        working-directory: managed-agents
+        run: go test ./...
+
+      - name: Install wrapper dependencies
+        working-directory: managed-agents/agent-wrapper
+        run: npm ci
+
+      - name: Run wrapper tests
+        working-directory: managed-agents/agent-wrapper
+        run: npm test -- --test-reporter=spec
+
+      - name: Lint Helm chart
+        working-directory: managed-agents
+        run: helm lint ./chart
+
+      - name: Render Helm chart
+        working-directory: managed-agents
+        run: |
+          helm template managed-agents ./chart \
+            --set-string agentGateway.env.sandbox0BaseURL=http://sandbox0.example.internal \
+            --set-string agentGateway.secretKeys.databaseURL.secretName=managed-agents-runtime

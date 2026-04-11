@@ -383,6 +383,141 @@ func TestCreateSessionRejectsEmptyVaultID(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &updateSessionRuntimeManager{}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	credential := RequestCredential{Token: "token_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	vaultA := buildVaultObject("vlt_a", CreateVaultRequest{DisplayName: "Vault A"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vaultA, nil, now); err != nil {
+		t.Fatalf("CreateVault A: %v", err)
+	}
+	vaultB := buildVaultObject("vlt_b", CreateVaultRequest{DisplayName: "Vault B"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vaultB, nil, now); err != nil {
+		t.Fatalf("CreateVault B: %v", err)
+	}
+
+	session, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: "env_123",
+		VaultIDs:      []string{"vlt_a"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
+		SessionID:           session.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_123",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "ctl_123",
+		RuntimeGeneration:   1,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	updated, err := service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
+		VaultIDs: StringSliceField{Set: true, Values: []string{"vlt_b"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+	if len(updated.VaultIDs) != 1 || updated.VaultIDs[0] != "vlt_b" {
+		t.Fatalf("updated vault_ids = %#v, want [vlt_b]", updated.VaultIDs)
+	}
+	stored, _, err := repo.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if len(stored.VaultIDs) != 1 || stored.VaultIDs[0] != "vlt_b" {
+		t.Fatalf("stored vault_ids = %#v, want [vlt_b]", stored.VaultIDs)
+	}
+	if len(runtime.bootstrapReqs) != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", len(runtime.bootstrapReqs))
+	}
+	if len(runtime.bootstrapReqs[0].VaultIDs) != 1 || runtime.bootstrapReqs[0].VaultIDs[0] != "vlt_b" {
+		t.Fatalf("bootstrap vault_ids = %#v, want [vlt_b]", runtime.bootstrapReqs[0].VaultIDs)
+	}
+}
+
+func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &updateSessionRuntimeManager{}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	credential := RequestCredential{Token: "token_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	vaultA := buildVaultObject("vlt_a", CreateVaultRequest{DisplayName: "Vault A"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vaultA, nil, now); err != nil {
+		t.Fatalf("CreateVault A: %v", err)
+	}
+	vaultB := buildVaultObject("vlt_b", CreateVaultRequest{DisplayName: "Vault B"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vaultB, nil, now); err != nil {
+		t.Fatalf("CreateVault B: %v", err)
+	}
+
+	session, err := service.CreateSession(ctx, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: "env_123",
+		VaultIDs:      []string{"vlt_a"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "srun_123"
+	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
+		SessionID:           session.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_123",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "ctl_123",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	_, err = service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
+		VaultIDs: StringSliceField{Set: true, Values: []string{"vlt_b"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "vault_ids cannot be updated while a run is active") {
+		t.Fatalf("UpdateSession error = %v, want active-run rejection", err)
+	}
+	if len(runtime.bootstrapReqs) != 0 {
+		t.Fatalf("bootstrap calls = %d, want 0", len(runtime.bootstrapReqs))
+	}
+}
+
 func TestListAgentVersionsSupportsCursorPagination(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
@@ -475,6 +610,39 @@ func (noopRuntimeManager) DeleteWrapperSession(context.Context, RequestCredentia
 }
 
 func (noopRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
+	return nil
+}
+
+type updateSessionRuntimeManager struct {
+	bootstrapReqs []*WrapperSessionBootstrapRequest
+}
+
+func (m *updateSessionRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
+	return nil, nil
+}
+
+func (m *updateSessionRuntimeManager) BootstrapSession(_ context.Context, _ RequestCredential, _ *RuntimeRecord, req *WrapperSessionBootstrapRequest) error {
+	m.bootstrapReqs = append(m.bootstrapReqs, req)
+	return nil
+}
+
+func (m *updateSessionRuntimeManager) StartRun(context.Context, RequestCredential, *RuntimeRecord, *WrapperRunRequest) error {
+	return nil
+}
+
+func (m *updateSessionRuntimeManager) ResolveActions(context.Context, RequestCredential, *RuntimeRecord, *WrapperResolveActionsRequest) (*WrapperResolveActionsResponse, error) {
+	return nil, nil
+}
+
+func (m *updateSessionRuntimeManager) InterruptRun(context.Context, RequestCredential, *RuntimeRecord, string) error {
+	return nil
+}
+
+func (m *updateSessionRuntimeManager) DeleteWrapperSession(context.Context, RequestCredential, *RuntimeRecord, string) error {
+	return nil
+}
+
+func (m *updateSessionRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
 	return nil
 }
 

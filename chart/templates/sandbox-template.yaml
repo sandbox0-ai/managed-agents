@@ -1,0 +1,52 @@
+{{- if .Values.sandboxTemplate.enabled }}
+apiVersion: sandbox0.ai/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{ .Values.sandboxTemplate.name }}
+  namespace: {{ .Values.sandboxTemplate.namespace.name }}
+  labels:
+    {{- toYaml .Values.sandboxTemplate.labels | nindent 4 }}
+spec:
+  clusterId: {{ .Values.sandboxTemplate.clusterId | quote }}
+  displayName: {{ .Values.sandboxTemplate.displayName | quote }}
+  description: {{ .Values.sandboxTemplate.description | quote }}
+  mainContainer:
+    image: {{ printf "%s:%s" .Values.sandboxTemplate.mainContainer.image.repository .Values.sandboxTemplate.mainContainer.image.tag | quote }}
+    imagePullPolicy: {{ .Values.sandboxTemplate.mainContainer.image.pullPolicy | quote }}
+    resources:
+      cpu: {{ .Values.sandboxTemplate.mainContainer.resources.cpu | quote }}
+      memory: {{ .Values.sandboxTemplate.mainContainer.resources.memory | quote }}
+  sidecars:
+    - name: agent-wrapper
+      image: {{ printf "%s:%s" .Values.sandboxTemplate.sidecar.image.repository .Values.sandboxTemplate.sidecar.image.tag | quote }}
+      imagePullPolicy: {{ .Values.sandboxTemplate.sidecar.image.pullPolicy | quote }}
+      env:
+        - name: PORT
+          value: {{ .Values.sandboxTemplate.sidecar.env.port | quote }}
+        - name: AGENT_WRAPPER_STATE_DIR
+          value: {{ .Values.sandboxTemplate.sidecar.env.stateDir | quote }}
+      resources:
+        cpu: {{ .Values.sandboxTemplate.sidecar.resources.cpu | quote }}
+        memory: {{ .Values.sandboxTemplate.sidecar.resources.memory | quote }}
+      mounts:
+        - name: workspace
+          mountPath: {{ .Values.sandboxTemplate.sharedVolumes.workspaceMountPath | quote }}
+        - name: engine-state
+          mountPath: {{ .Values.sandboxTemplate.sharedVolumes.engineStateMountPath | quote }}
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 2
+        periodSeconds: 2
+  sharedVolumes:
+    - name: workspace
+      mountPath: {{ .Values.sandboxTemplate.sharedVolumes.workspaceMountPath | quote }}
+    - name: engine-state
+      mountPath: {{ .Values.sandboxTemplate.sharedVolumes.engineStateMountPath | quote }}
+  network:
+    mode: {{ .Values.sandboxTemplate.network.mode | quote }}
+  pool:
+    minIdle: {{ .Values.sandboxTemplate.pool.minIdle }}
+    maxIdle: {{ .Values.sandboxTemplate.pool.maxIdle }}
+{{- end }}

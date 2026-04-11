@@ -137,7 +137,7 @@ func (s *Service) GetSession(ctx context.Context, principal Principal, sessionID
 	return record.toAPI(time.Now().UTC()), nil
 }
 
-func (s *Service) UpdateSession(ctx context.Context, principal Principal, sessionID string, params UpdateSessionParams) (*Session, error) {
+func (s *Service) UpdateSession(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params UpdateSessionParams) (*Session, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -164,7 +164,26 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, sessio
 		record.Metadata = metadata
 	}
 	if params.VaultIDs.Set {
-		return nil, errors.New("vault_ids is not yet supported")
+		vaultIDs, err := normalizeStringSlice(params.VaultIDs.Values, "vault_ids", 128)
+		if err != nil {
+			return nil, err
+		}
+		resources, _, err := s.validateSessionDependencies(ctx, principal, record.EnvironmentID, vaultIDs, cloneMapSlice(record.Resources))
+		if err != nil {
+			return nil, err
+		}
+		record.Resources = resources
+		record.VaultIDs = append([]string(nil), vaultIDs...)
+		if runtime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
+			if runtime.ActiveRunID != nil {
+				return nil, errors.New("vault_ids cannot be updated while a run is active")
+			}
+			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
+			return nil, runtimeErr
+		}
 	}
 	record.UpdatedAt = time.Now().UTC()
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {

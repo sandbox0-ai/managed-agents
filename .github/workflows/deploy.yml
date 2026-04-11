@@ -1,0 +1,133 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - Images
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional image tag to deploy. Defaults to the triggering commit short SHA.
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      KUBECONFIG: /home/runner/.kube/config
+      HELM_RELEASE: ${{ vars.MANAGED_AGENTS_HELM_RELEASE || 'managed-agents' }}
+      KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'managed-agents' }}
+      IMAGE_REGISTRY: ${{ vars.MANAGED_AGENTS_IMAGE_REGISTRY || 'ghcr.io/sandbox0-ai/managed-agents' }}
+      SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL }}
+      RUNTIME_REGION_ID: ${{ vars.MANAGED_AGENTS_RUNTIME_REGION_ID || '' }}
+      RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
+      CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
+      TEMPLATE_NAMESPACE: ${{ vars.MANAGED_AGENTS_TEMPLATE_NAMESPACE || 'tpl-managed-agent-claude' }}
+      TEMPLATE_CLUSTER_ID: ${{ vars.MANAGED_AGENTS_TEMPLATE_CLUSTER_ID || 'default' }}
+      DATABASE_URL: ${{ secrets.MANAGED_AGENTS_DATABASE_URL }}
+      ANTHROPIC_SKILLS_API_KEY: ${{ secrets.MANAGED_AGENTS_ANTHROPIC_SKILLS_API_KEY }}
+
+    steps:
+      - name: Checkout managed-agents
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref_name }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ secrets.DO_KUBE_CONFIG }}" ]]; then
+            echo "DO_KUBE_CONFIG secret is required."
+            exit 1
+          fi
+
+          mkdir -p "$(dirname "${KUBECONFIG}")"
+          printf '%s' "${{ secrets.DO_KUBE_CONFIG }}" > "${KUBECONFIG}"
+          chmod 600 "${KUBECONFIG}"
+
+      - name: Resolve image tag
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ github.event.inputs.image_tag || '' }}" ]]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="$(git rev-parse --short=7 HEAD)"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate required settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DATABASE_URL}" ]]; then
+            echo "MANAGED_AGENTS_DATABASE_URL secret is required."
+            exit 1
+          fi
+
+          if [[ -z "${SANDBOX0_BASE_URL}" ]]; then
+            echo "MANAGED_AGENTS_SANDBOX0_BASE_URL variable is required."
+            exit 1
+          fi
+
+      - name: Ensure namespace exists
+        shell: bash
+        run: kubectl create namespace "${KUBE_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply runtime secret
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl -n "${KUBE_NAMESPACE}" create secret generic managed-agents-runtime \
+            --from-literal=MANAGED_AGENT_DATABASE_URL="${DATABASE_URL}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          if [[ -n "${ANTHROPIC_SKILLS_API_KEY}" ]]; then
+            kubectl -n "${KUBE_NAMESPACE}" create secret generic managed-agents-runtime \
+              --from-literal=MANAGED_AGENT_DATABASE_URL="${DATABASE_URL}" \
+              --from-literal=MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY="${ANTHROPIC_SKILLS_API_KEY}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          fi
+
+      - name: Deploy chart
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          helm upgrade --install "${HELM_RELEASE}" ./chart \
+            --namespace "${KUBE_NAMESPACE}" \
+            --set-string agentGateway.image.repository="${IMAGE_REGISTRY}/agent-gateway" \
+            --set-string agentGateway.image.tag="${{ steps.image.outputs.tag }}" \
+            --set-string agentGateway.env.sandbox0BaseURL="${SANDBOX0_BASE_URL}" \
+            --set-string agentGateway.env.runtimeRegionID="${RUNTIME_REGION_ID}" \
+            --set-string agentGateway.env.runtimeEnabled="${RUNTIME_ENABLED}" \
+            --set-string agentGateway.env.claudeTemplate="${CLAUDE_TEMPLATE}" \
+            --set-string sandboxTemplate.name="${CLAUDE_TEMPLATE}" \
+            --set-string sandboxTemplate.namespace.name="${TEMPLATE_NAMESPACE}" \
+            --set-string sandboxTemplate.clusterId="${TEMPLATE_CLUSTER_ID}" \
+            --set-string sandboxTemplate.mainContainer.image.repository="${IMAGE_REGISTRY}/agent-wrapper-claude" \
+            --set-string sandboxTemplate.mainContainer.image.tag="${{ steps.image.outputs.tag }}" \
+            --set-string sandboxTemplate.sidecar.image.repository="${IMAGE_REGISTRY}/agent-wrapper-claude" \
+            --set-string sandboxTemplate.sidecar.image.tag="${{ steps.image.outputs.tag }}"

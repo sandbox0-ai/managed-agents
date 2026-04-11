@@ -1,0 +1,114 @@
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+agentGateway:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/sandbox0-ai/managed-agents/agent-gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: managed-agents.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  env:
+    httpAddr: :8080
+    logLevel: info
+    databaseSchema: managed_agent
+    databaseMaxConns: 10
+    databaseMinConns: 1
+    sandbox0BaseURL: ""
+    sandbox0Timeout: 60s
+    runtimeEnabled: true
+    runtimeRegionID: ""
+    runtimeCallbackBaseURL: ""
+    claudeTemplate: managed-agent-claude
+    wrapperPort: 8080
+    workspaceMountPath: /workspace
+    engineStateMountPath: /var/lib/agent-wrapper
+    sandboxTTLSeconds: 3600
+    sandboxHardTTLSeconds: 21600
+    anthropicSkillsBaseURL: ""
+    anthropicSkillsVersion: ""
+    anthropicSkillsTimeout: 15s
+  extraEnv: []
+  envFromSecrets: []
+  envFromConfigMaps: []
+  secretKeys:
+    databaseURL:
+      enabled: true
+      envName: MANAGED_AGENT_DATABASE_URL
+      secretName: managed-agents-runtime
+      key: MANAGED_AGENT_DATABASE_URL
+    anthropicSkillsAPIKey:
+      enabled: false
+      envName: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY
+      secretName: managed-agents-runtime
+      key: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY
+
+sandboxTemplate:
+  enabled: true
+  namespace:
+    create: true
+    name: tpl-managed-agent-claude
+    labels: {}
+    annotations: {}
+  name: managed-agent-claude
+  clusterId: default
+  displayName: Claude Managed Agent
+  description: Sandbox template for the Claude managed-agent wrapper sidecar.
+  labels:
+    sandbox0.ai/template-logical-id: managed-agent-claude
+    sandbox0.ai/template-scope: public
+  mainContainer:
+    image:
+      repository: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude
+      tag: latest
+      pullPolicy: IfNotPresent
+    resources:
+      cpu: 250m
+      memory: 256Mi
+  sidecar:
+    image:
+      repository: ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude
+      tag: latest
+      pullPolicy: IfNotPresent
+    env:
+      port: "8080"
+      stateDir: /var/lib/agent-wrapper
+    resources:
+      cpu: 250m
+      memory: 256Mi
+  sharedVolumes:
+    workspaceMountPath: /workspace
+    engineStateMountPath: /var/lib/agent-wrapper
+  network:
+    mode: allow-all
+  pool:
+    minIdle: 1
+    maxIdle: 2

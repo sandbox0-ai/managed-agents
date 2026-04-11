@@ -1,0 +1,125 @@
+{{- if .Values.agentGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "agent-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "agent-gateway") | nindent 4 }}
+spec:
+  replicas: {{ .Values.agentGateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "managed-agents.componentSelectorLabels" (list . "agent-gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "managed-agents.componentSelectorLabels" (list . "agent-gateway") | nindent 8 }}
+        {{- with .Values.agentGateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.agentGateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent-gateway
+          image: "{{ .Values.agentGateway.image.repository }}:{{ .Values.agentGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.agentGateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agentGateway.service.targetPort }}
+          env:
+            - name: MANAGED_AGENT_HTTP_ADDR
+              value: {{ .Values.agentGateway.env.httpAddr | quote }}
+            - name: MANAGED_AGENT_LOG_LEVEL
+              value: {{ .Values.agentGateway.env.logLevel | quote }}
+            - name: MANAGED_AGENT_DATABASE_SCHEMA
+              value: {{ .Values.agentGateway.env.databaseSchema | quote }}
+            - name: MANAGED_AGENT_DATABASE_MAX_CONNS
+              value: {{ .Values.agentGateway.env.databaseMaxConns | quote }}
+            - name: MANAGED_AGENT_DATABASE_MIN_CONNS
+              value: {{ .Values.agentGateway.env.databaseMinConns | quote }}
+            - name: MANAGED_AGENT_SANDBOX0_BASE_URL
+              value: {{ .Values.agentGateway.env.sandbox0BaseURL | quote }}
+            - name: MANAGED_AGENT_SANDBOX0_TIMEOUT
+              value: {{ .Values.agentGateway.env.sandbox0Timeout | quote }}
+            - name: MANAGED_AGENT_RUNTIME_ENABLED
+              value: {{ .Values.agentGateway.env.runtimeEnabled | quote }}
+            - name: MANAGED_AGENT_RUNTIME_REGION_ID
+              value: {{ .Values.agentGateway.env.runtimeRegionID | quote }}
+            - name: MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL
+              value: {{ include "managed-agents.callbackBaseURL" . | quote }}
+            - name: MANAGED_AGENT_CLAUDE_TEMPLATE
+              value: {{ .Values.agentGateway.env.claudeTemplate | quote }}
+            - name: MANAGED_AGENT_WRAPPER_PORT
+              value: {{ .Values.agentGateway.env.wrapperPort | quote }}
+            - name: MANAGED_AGENT_WORKSPACE_MOUNT_PATH
+              value: {{ .Values.agentGateway.env.workspaceMountPath | quote }}
+            - name: MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH
+              value: {{ .Values.agentGateway.env.engineStateMountPath | quote }}
+            - name: MANAGED_AGENT_SANDBOX_TTL_SECONDS
+              value: {{ .Values.agentGateway.env.sandboxTTLSeconds | quote }}
+            - name: MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS
+              value: {{ .Values.agentGateway.env.sandboxHardTTLSeconds | quote }}
+            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL
+              value: {{ .Values.agentGateway.env.anthropicSkillsBaseURL | quote }}
+            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_API_VERSION
+              value: {{ .Values.agentGateway.env.anthropicSkillsVersion | quote }}
+            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_TIMEOUT
+              value: {{ .Values.agentGateway.env.anthropicSkillsTimeout | quote }}
+            {{- if .Values.agentGateway.secretKeys.databaseURL.enabled }}
+            - name: {{ .Values.agentGateway.secretKeys.databaseURL.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentGateway.secretKeys.databaseURL.secretName }}
+                  key: {{ .Values.agentGateway.secretKeys.databaseURL.key }}
+            {{- end }}
+            {{- if .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.enabled }}
+            - name: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.secretName }}
+                  key: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.key }}
+            {{- end }}
+            {{- with .Values.agentGateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.agentGateway.envFromSecrets .Values.agentGateway.envFromConfigMaps }}
+          envFrom:
+            {{- range .Values.agentGateway.envFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+            {{- range .Values.agentGateway.envFromConfigMaps }}
+            - configMapRef:
+                name: {{ . }}
+            {{- end }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.agentGateway.resources | nindent 12 }}
+      {{- with .Values.agentGateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentGateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agentGateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

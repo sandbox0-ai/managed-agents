@@ -1,0 +1,16 @@
+{{- if and .Values.agentGateway.enabled .Values.agentGateway.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "agent-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "agent-gateway") | nindent 4 }}
+spec:
+  type: {{ .Values.agentGateway.service.type }}
+  selector:
+    {{- include "managed-agents.componentSelectorLabels" (list . "agent-gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.agentGateway.service.port }}
+      targetPort: http
+{{- end }}

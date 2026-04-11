@@ -121,7 +121,7 @@ func (h *Handler) GetSession(c *gin.Context) {
 }
 
 func (h *Handler) UpdateSession(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -135,7 +135,7 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	session, err := h.service.UpdateSession(c.Request.Context(), principal, c.Param("session_id"), req)
+	session, err := h.service.UpdateSession(c.Request.Context(), principal, credential, c.Param("session_id"), req)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return

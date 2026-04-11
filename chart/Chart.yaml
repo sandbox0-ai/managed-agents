@@ -1,0 +1,6 @@
+apiVersion: v2
+name: managed-agents
+description: Helm chart for the managed-agents gateway and sandbox template resources
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

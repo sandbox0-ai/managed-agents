@@ -1,0 +1,35 @@
+{{- if and .Values.agentGateway.enabled .Values.agentGateway.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "agent-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "agent-gateway") | nindent 4 }}
+  {{- with .Values.agentGateway.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.agentGateway.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    {{- range .Values.agentGateway.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "managed-agents.componentFullname" (list $ "agent-gateway") }}
+                port:
+                  number: {{ $.Values.agentGateway.service.port }}
+          {{- end }}
+    {{- end }}
+  {{- with .Values.agentGateway.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
