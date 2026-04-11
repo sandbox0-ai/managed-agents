@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  allowToolUseDecision,
   buildToolPlan,
   ClaudeRuntime,
   mcpServersFromAgent,
@@ -135,6 +136,18 @@ test('runtimeModelForSession prefers explicit engine model', () => {
     engine: { model: 'claude-sonnet-4-6' },
     agent: { model: { id: 'GLM-5.1' } },
   }), 'claude-sonnet-4-6');
+});
+
+test('allowToolUseDecision returns SDK-compatible allow result', () => {
+  assert.deepEqual(allowToolUseDecision({ command: 'printf ok' }, 'toolu_123'), {
+    behavior: 'allow',
+    updatedInput: { command: 'printf ok' },
+    toolUseID: 'toolu_123',
+  });
+  assert.deepEqual(allowToolUseDecision(undefined, ''), {
+    behavior: 'allow',
+    updatedInput: {},
+  });
 });
 
 test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {

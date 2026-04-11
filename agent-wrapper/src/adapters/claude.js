@@ -39,6 +39,18 @@ export function querySkillNames(session) {
   return names.length > 0 ? names : undefined;
 }
 
+export function allowToolUseDecision(input, toolUseID) {
+  const decision = {
+    behavior: 'allow',
+    updatedInput: recordInput(input),
+  };
+  const normalizedToolUseID = String(toolUseID ?? '').trim();
+  if (normalizedToolUseID !== '') {
+    decision.toolUseID = normalizedToolUseID;
+  }
+  return decision;
+}
+
 export class ClaudeRuntime {
   constructor() {
     this.activeRuns = new Map();
@@ -229,10 +241,7 @@ export class ClaudeRuntime {
       extraArgs: engine.extra_args,
       env: runtimeEnvForEngine(engine),
       persistSession: true,
-      canUseTool: async (_toolName, _input, options) => ({
-        behavior: 'allow',
-        toolUseID: String(options.toolUseID ?? ''),
-      }),
+      canUseTool: async (_toolName, input, options) => allowToolUseDecision(input, options.toolUseID),
       hooks: {
         PreToolUse: [{
           hooks: [async (input) => {
@@ -1242,6 +1251,13 @@ function omitActionResolution(resolutions, actionID) {
 
 function newCustomToolUseID() {
   return `ctu_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function recordInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value;
 }
 
 function newEventID(prefix) {
