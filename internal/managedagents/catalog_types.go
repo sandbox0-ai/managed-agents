@@ -154,16 +154,19 @@ func (f *OptionalValueField) UnmarshalJSON(data []byte) error {
 }
 
 type managedFileRecord struct {
-	ID        string
-	TeamID    string
-	Filename  string
-	MimeType  string
-	SizeBytes int64
-	ScopeType string
-	ScopeID   string
-	Content   []byte
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID                string
+	TeamID            string
+	Filename          string
+	MimeType          string
+	SizeBytes         int64
+	ScopeType         string
+	ScopeID           string
+	FileStoreVolumeID string
+	FileStorePath     string
+	SHA256            string
+	Content           []byte
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type Agent struct {

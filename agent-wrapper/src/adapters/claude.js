@@ -1,6 +1,6 @@
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { inputEventsToPrompt } from '../lib/prompt.js';
+import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
 
 async function* emptyPromptStream() {}
 
@@ -593,7 +593,12 @@ function extractMCPServerName(message) {
 }
 
 function buildPromptInput(events) {
-  const prompt = inputEventsToPrompt(filteredPromptEvents(events));
+  const filteredEvents = filteredPromptEvents(events);
+  const structuredPrompt = inputEventsToSDKMessages(filteredEvents);
+  if (structuredPrompt) {
+    return structuredPrompt;
+  }
+  const prompt = inputEventsToPrompt(filteredEvents);
   if (prompt) {
     return prompt;
   }

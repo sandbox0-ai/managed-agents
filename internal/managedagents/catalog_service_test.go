@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -413,6 +414,84 @@ func TestServiceArchiveVaultCascadesAndPurgesCredentialSecrets(t *testing.T) {
 	}
 	if len(secret) != 0 {
 		t.Fatalf("credential secret = %#v, want purged", secret)
+	}
+}
+
+func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestFileStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+
+	metadata, err := service.UploadFile(ctx, principal, credential, "report.pdf", "application/pdf", strings.NewReader("%PDF-1.7"))
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	record, err := repo.GetFile(ctx, principal.TeamID, metadata.ID)
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if len(record.Content) != 0 {
+		t.Fatalf("postgres content bytes = %d, want 0", len(record.Content))
+	}
+	if record.FileStoreVolumeID == "" || record.FileStorePath == "" {
+		t.Fatalf("file-store location missing: %#v", record)
+	}
+	file, err := service.GetFileContent(ctx, principal, credential, metadata.ID)
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if string(file.Content) != "%PDF-1.7" {
+		t.Fatalf("file content = %q", string(file.Content))
+	}
+}
+
+func TestResolveFileBackedInputEventsValidatesMIMEAndInlinesBase64(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestFileStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	metadata, err := service.UploadFile(ctx, principal, credential, "image.png", "image/png", strings.NewReader("png-bytes"))
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	events := []map[string]any{{
+		"type": "user.message",
+		"content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "file", "file_id": metadata.ID}},
+		},
+	}}
+	if err := validateInputEvents(events); err != nil {
+		t.Fatalf("validateInputEvents: %v", err)
+	}
+	runtimeEvents, err := service.resolveFileBackedInputEvents(ctx, principal, credential, events)
+	if err != nil {
+		t.Fatalf("resolveFileBackedInputEvents: %v", err)
+	}
+	source := mapValue(mapValue(anySlice(runtimeEvents[0]["content"])[0])["source"])
+	if got := stringValue(source["type"]); got != "base64" {
+		t.Fatalf("source.type = %q, want base64", got)
+	}
+	if got := stringValue(source["media_type"]); got != "image/png" {
+		t.Fatalf("source.media_type = %q, want image/png", got)
+	}
+	if got := stringValue(source["data"]); got == "" || got == metadata.ID {
+		t.Fatalf("source.data = %q, want base64 content", got)
+	}
+
+	badEvents := []map[string]any{{
+		"type": "user.message",
+		"content": []any{
+			map[string]any{"type": "document", "source": map[string]any{"type": "file", "file_id": metadata.ID}},
+		},
+	}}
+	_, err = service.resolveFileBackedInputEvents(ctx, principal, credential, badEvents)
+	if err == nil || !strings.Contains(err.Error(), "not supported for document") {
+		t.Fatalf("resolveFileBackedInputEvents error = %v, want MIME rejection", err)
 	}
 }
 
@@ -1107,6 +1186,43 @@ func (m *updateSessionRuntimeManager) DeleteWrapperSession(context.Context, Requ
 }
 
 func (m *updateSessionRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
+	return nil
+}
+
+type testFileStore struct {
+	content map[string][]byte
+}
+
+func newTestFileStore() *testFileStore {
+	return &testFileStore{content: map[string][]byte{}}
+}
+
+func (s *testFileStore) PutFile(_ context.Context, _ RequestCredential, req FileStorePutRequest) (FileStoreObject, error) {
+	data, err := io.ReadAll(req.Content)
+	if err != nil {
+		return FileStoreObject{}, err
+	}
+	s.content[req.FileID] = append([]byte(nil), data...)
+	return FileStoreObject{
+		VolumeID:  "vol_" + req.FileID,
+		Path:      "/files/" + req.FileID,
+		SizeBytes: int64(len(data)),
+		SHA256:    "test-sha",
+	}, nil
+}
+
+func (s *testFileStore) ReadFile(_ context.Context, _ RequestCredential, req FileStoreReadRequest) ([]byte, error) {
+	if data, ok := s.content[req.FileID]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	if len(req.FallbackContent) > 0 {
+		return append([]byte(nil), req.FallbackContent...), nil
+	}
+	return nil, ErrFileNotFound
+}
+
+func (s *testFileStore) DeleteFile(_ context.Context, _ RequestCredential, req FileStoreDeleteRequest) error {
+	delete(s.content, req.FileID)
 	return nil
 }
 

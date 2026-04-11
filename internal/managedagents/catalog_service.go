@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/url"
 	"path"
@@ -532,7 +533,10 @@ func (s *Service) ArchiveCredential(ctx context.Context, principal Principal, va
 	return credential, nil
 }
 
-func (s *Service) UploadFile(ctx context.Context, principal Principal, filename, mimeType string, content []byte) (FileMetadata, error) {
+func (s *Service) UploadFile(ctx context.Context, principal Principal, credential RequestCredential, filename, mimeType string, content io.Reader) (FileMetadata, error) {
+	if s.fileStore == nil {
+		return FileMetadata{}, errors.New("file store is not configured")
+	}
 	trimmedName := strings.TrimSpace(filename)
 	if trimmedName == "" {
 		return FileMetadata{}, errors.New("filename is required")
@@ -545,17 +549,31 @@ func (s *Service) UploadFile(ctx context.Context, principal Principal, filename,
 		resolvedMimeType = "application/octet-stream"
 	}
 	now := time.Now().UTC()
+	fileID := NewID("file")
+	stored, err := s.fileStore.PutFile(ctx, credential, FileStorePutRequest{
+		TeamID:   principal.TeamID,
+		FileID:   fileID,
+		Filename: trimmedName,
+		MimeType: resolvedMimeType,
+		Content:  content,
+	})
+	if err != nil {
+		return FileMetadata{}, err
+	}
 	record := &managedFileRecord{
-		ID:        NewID("file"),
-		TeamID:    principal.TeamID,
-		Filename:  trimmedName,
-		MimeType:  resolvedMimeType,
-		SizeBytes: int64(len(content)),
-		Content:   append([]byte(nil), content...),
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                fileID,
+		TeamID:            principal.TeamID,
+		Filename:          trimmedName,
+		MimeType:          resolvedMimeType,
+		SizeBytes:         stored.SizeBytes,
+		FileStoreVolumeID: stored.VolumeID,
+		FileStorePath:     stored.Path,
+		SHA256:            stored.SHA256,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := s.repo.CreateFile(ctx, record); err != nil {
+		_ = s.fileStore.DeleteFile(ctx, credential, FileStoreDeleteRequest{TeamID: principal.TeamID, FileID: fileID, VolumeID: stored.VolumeID, Path: stored.Path})
 		return FileMetadata{}, err
 	}
 	return buildFileObject(record), nil
@@ -583,15 +601,60 @@ func (s *Service) GetFileMetadata(ctx context.Context, principal Principal, file
 	return buildFileObject(record), nil
 }
 
-func (s *Service) GetFileContent(ctx context.Context, principal Principal, fileID string) (*managedFileRecord, error) {
-	return s.repo.GetFile(ctx, principal.TeamID, fileID)
+func (s *Service) GetFileContent(ctx context.Context, principal Principal, credential RequestCredential, fileID string) (*managedFileRecord, error) {
+	record, err := s.repo.GetFile(ctx, principal.TeamID, fileID)
+	if err != nil {
+		return nil, err
+	}
+	content, err := s.readFileContent(ctx, credential, record)
+	if err != nil {
+		return nil, err
+	}
+	record.Content = content
+	return record, nil
 }
 
-func (s *Service) DeleteFile(ctx context.Context, principal Principal, fileID string) (map[string]any, error) {
+func (s *Service) DeleteFile(ctx context.Context, principal Principal, credential RequestCredential, fileID string) (map[string]any, error) {
+	record, err := s.repo.GetFile(ctx, principal.TeamID, fileID)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.repo.DeleteFile(ctx, principal.TeamID, fileID); err != nil {
 		return nil, err
 	}
+	if s.fileStore != nil {
+		if err := s.fileStore.DeleteFile(ctx, credential, FileStoreDeleteRequest{
+			TeamID:   principal.TeamID,
+			FileID:   record.ID,
+			VolumeID: record.FileStoreVolumeID,
+			Path:     record.FileStorePath,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return deletedObject("file_deleted", fileID), nil
+}
+
+func (s *Service) readFileContent(ctx context.Context, credential RequestCredential, record *managedFileRecord) ([]byte, error) {
+	if record == nil {
+		return nil, ErrFileNotFound
+	}
+	if strings.TrimSpace(record.FileStoreVolumeID) == "" || strings.TrimSpace(record.FileStorePath) == "" {
+		if len(record.Content) == 0 {
+			return nil, ErrFileNotFound
+		}
+		return append([]byte(nil), record.Content...), nil
+	}
+	if s.fileStore == nil {
+		return nil, errors.New("file store is not configured")
+	}
+	return s.fileStore.ReadFile(ctx, credential, FileStoreReadRequest{
+		TeamID:          record.TeamID,
+		FileID:          record.ID,
+		VolumeID:        record.FileStoreVolumeID,
+		Path:            record.FileStorePath,
+		FallbackContent: record.Content,
+	})
 }
 
 func (s *Service) ArchiveSession(ctx context.Context, principal Principal, sessionID string) (*Session, error) {

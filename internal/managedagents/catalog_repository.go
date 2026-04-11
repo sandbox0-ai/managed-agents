@@ -562,10 +562,12 @@ func (r *Repository) CreateFile(ctx context.Context, record *managedFileRecord) 
 	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO managed_agent_files (
-			id, team_id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, content, snapshot, created_at, updated_at
+			id, team_id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id,
+			file_store_volume_id, file_store_path, sha256, content, snapshot, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9::jsonb, $10, $11)
-	`, record.ID, record.TeamID, record.Filename, record.MimeType, record.SizeBytes, nullableString(record.ScopeType), nullableString(record.ScopeID), record.Content, string(payloadJSON), record.CreatedAt, record.UpdatedAt)
+		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
+	`, record.ID, record.TeamID, record.Filename, record.MimeType, record.SizeBytes, nullableString(record.ScopeType), nullableString(record.ScopeID),
+		nullableString(record.FileStoreVolumeID), nullableString(record.FileStorePath), nullableString(record.SHA256), nullableBytes(record.Content), string(payloadJSON), record.CreatedAt, record.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent file: %w", err)
 	}
@@ -629,11 +631,14 @@ func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileList
 func (r *Repository) GetFile(ctx context.Context, teamID, fileID string) (*managedFileRecord, error) {
 	var record managedFileRecord
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, team_id, filename, mime_type, size_bytes, COALESCE(scope_type, ''), COALESCE(scope_id, ''), content, created_at, updated_at
+		SELECT id, team_id, filename, mime_type, size_bytes, COALESCE(scope_type, ''), COALESCE(scope_id, ''),
+			COALESCE(file_store_volume_id, ''), COALESCE(file_store_path, ''), COALESCE(sha256, ''),
+			COALESCE(content, ''::bytea), created_at, updated_at
 		FROM managed_agent_files
 		WHERE team_id = $1 AND id = $2
 	`, teamID, strings.TrimSpace(fileID)).Scan(
-		&record.ID, &record.TeamID, &record.Filename, &record.MimeType, &record.SizeBytes, &record.ScopeType, &record.ScopeID, &record.Content, &record.CreatedAt, &record.UpdatedAt,
+		&record.ID, &record.TeamID, &record.Filename, &record.MimeType, &record.SizeBytes, &record.ScopeType, &record.ScopeID,
+		&record.FileStoreVolumeID, &record.FileStorePath, &record.SHA256, &record.Content, &record.CreatedAt, &record.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {

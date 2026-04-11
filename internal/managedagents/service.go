@@ -2,8 +2,10 @@ package managedagents
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ type Service struct {
 	runtime         RuntimeManager
 	logger          *zap.Logger
 	anthropicSkills AnthropicSkillCatalog
+	fileStore       FileStore
 }
 
 type ServiceOption func(*Service)
@@ -36,6 +39,14 @@ func WithAnthropicSkillCatalog(catalog AnthropicSkillCatalog) ServiceOption {
 	return func(s *Service) {
 		if catalog != nil {
 			s.anthropicSkills = catalog
+		}
+	}
+}
+
+func WithFileStore(store FileStore) ServiceOption {
+	return func(s *Service) {
+		if store != nil {
+			s.fileStore = store
 		}
 	}
 }
@@ -258,6 +269,10 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	if err := validateInputEvents(stampedEvents); err != nil {
 		return nil, err
 	}
+	runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, stampedEvents)
+	if err != nil {
+		return nil, err
+	}
 	var runtime *RuntimeRecord
 	if existingRuntime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
 		runtime = existingRuntime
@@ -289,7 +304,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 			return nil, err
 		}
-		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(stampedEvents)})
+		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(runtimeInputEvents)})
 		if err != nil {
 			return nil, err
 		}
@@ -319,7 +334,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 			if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 				return nil, err
 			}
-			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(stampedEvents)}); err != nil {
+			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
 				failureEvents := []map[string]any{
 					stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 					stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -362,7 +377,7 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 		return nil, err
 	}
-	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(stampedEvents)}); err != nil {
+	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
 		failureEvents := []map[string]any{
 			stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 			stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -591,6 +606,80 @@ func validateInputEvents(events []map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) resolveFileBackedInputEvents(ctx context.Context, principal Principal, credential RequestCredential, events []map[string]any) ([]map[string]any, error) {
+	runtimeEvents := cloneDeepMapSlice(events)
+	for _, event := range runtimeEvents {
+		if stringValue(event["type"]) != "user.message" {
+			continue
+		}
+		for _, rawBlock := range anySlice(event["content"]) {
+			block := mapValue(rawBlock)
+			blockType := stringValue(block["type"])
+			if blockType != "image" && blockType != "document" {
+				continue
+			}
+			source := mapValue(block["source"])
+			if stringValue(source["type"]) != "file" {
+				continue
+			}
+			fileID := strings.TrimSpace(stringValue(source["file_id"]))
+			record, err := s.repo.GetFile(ctx, principal.TeamID, fileID)
+			if err != nil {
+				return nil, err
+			}
+			if blockType == "image" && !isSupportedImageMimeType(record.MimeType) {
+				return nil, fmt.Errorf("file %s has MIME type %q, which is not supported for image content", fileID, record.MimeType)
+			}
+			if blockType == "document" && !isSupportedDocumentMimeType(record.MimeType) {
+				return nil, fmt.Errorf("file %s has MIME type %q, which is not supported for document content", fileID, record.MimeType)
+			}
+			content, err := s.readFileContent(ctx, credential, record)
+			if err != nil {
+				return nil, err
+			}
+			source["type"] = "base64"
+			source["media_type"] = record.MimeType
+			source["data"] = base64.StdEncoding.EncodeToString(content)
+			delete(source, "file_id")
+			block["source"] = source
+		}
+	}
+	return runtimeEvents, nil
+}
+
+func isSupportedImageMimeType(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedDocumentMimeType(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "application/pdf", "text/plain", "text/markdown", "text/csv", "application/json":
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneDeepMapSlice(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return cloneMapSlice(items)
+	}
+	var out []map[string]any
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return cloneMapSlice(items)
+	}
+	return out
 }
 
 func validateUserContentBlocks(blocks []any) error {

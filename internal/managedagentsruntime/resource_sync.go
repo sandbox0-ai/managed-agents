@@ -145,13 +145,20 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 		if err != nil {
 			return fmt.Errorf("resolve file resource %s: %w", fileID, err)
 		}
+		content := record.Content
+		if strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "" {
+			content, err = client.ReadVolumeFile(ctx, record.FileStoreVolumeID, record.FileStorePath)
+			if err != nil {
+				return fmt.Errorf("read file-store resource %s: %w", fileID, err)
+			}
+		}
 		parent := path.Dir(mountPath)
 		if parent != "." && parent != "/" {
 			if _, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true); err != nil {
 				return fmt.Errorf("mkdir resource path %s: %w", parent, err)
 			}
 		}
-		if _, err := client.WriteVolumeFile(ctx, workspaceVolumeID, mountPath, record.Content); err != nil {
+		if _, err := client.WriteVolumeFile(ctx, workspaceVolumeID, mountPath, content); err != nil {
 			return fmt.Errorf("write file resource %s to %s: %w", fileID, mountPath, err)
 		}
 	}

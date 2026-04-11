@@ -2,7 +2,6 @@ package managedagents
 
 import (
 	"errors"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -588,7 +587,7 @@ func (h *Handler) ArchiveCredential(c *gin.Context) {
 }
 
 func (h *Handler) UploadFile(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -603,12 +602,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 	defer file.Close()
-	content, err := io.ReadAll(file)
-	if err != nil {
-		h.writeServiceError(c, err)
-		return
-	}
-	metadata, err := h.service.UploadFile(c.Request.Context(), principal, fileHeader.Filename, fileHeader.Header.Get("Content-Type"), content)
+	metadata, err := h.service.UploadFile(c.Request.Context(), principal, credential, fileHeader.Filename, fileHeader.Header.Get("Content-Type"), file)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
@@ -704,11 +698,11 @@ func (h *Handler) GetFileMetadata(c *gin.Context) {
 }
 
 func (h *Handler) DownloadFile(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
-	file, err := h.service.GetFileContent(c.Request.Context(), principal, c.Param("file_id"))
+	file, err := h.service.GetFileContent(c.Request.Context(), principal, credential, c.Param("file_id"))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
@@ -720,11 +714,11 @@ func (h *Handler) DownloadFile(c *gin.Context) {
 }
 
 func (h *Handler) DeleteFile(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
-	response, err := h.service.DeleteFile(c.Request.Context(), principal, c.Param("file_id"))
+	response, err := h.service.DeleteFile(c.Request.Context(), principal, credential, c.Param("file_id"))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
