@@ -333,6 +333,9 @@ func (s *Service) CreateVault(ctx context.Context, principal Principal, req Crea
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedVaultMetadata(metadata); err != nil {
+		return nil, err
+	}
 	req.DisplayName = displayName
 	req.Metadata = metadata
 	now := time.Now().UTC()
@@ -370,6 +373,9 @@ func (s *Service) UpdateVault(ctx context.Context, principal Principal, vaultID 
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(vault.Metadata, req.Metadata, 16, 64, 512)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedVaultMetadata(metadata); err != nil {
 			return nil, err
 		}
 		vault.Metadata = metadata
@@ -434,9 +440,6 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateManagedCredentialMetadata(metadata); err != nil {
-		return nil, err
-	}
 	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
 	if err != nil {
 		return nil, err
@@ -489,9 +492,6 @@ func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vau
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(credential.Metadata, req.Metadata, 16, 64, 512)
 		if err != nil {
-			return nil, err
-		}
-		if err := ValidateManagedCredentialMetadata(metadata); err != nil {
 			return nil, err
 		}
 		credential.Metadata = metadata
@@ -1067,6 +1067,9 @@ func requireActiveVault(vault *Vault) error {
 }
 
 func validateUniqueActiveCredentialURL(activeCredentials []StoredCredential, serverURL string) error {
+	if strings.TrimSpace(serverURL) == "" {
+		return nil
+	}
 	canonicalURL, err := CanonicalMCPServerURL(serverURL)
 	if err != nil {
 		return err

@@ -1,0 +1,27 @@
+package managedagents
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestValidateManagedVaultMetadataAcceptsLLMVault(t *testing.T) {
+	err := ValidateManagedVaultMetadata(map[string]string{
+		ManagedAgentsVaultRoleKey:       ManagedAgentsVaultRoleLLM,
+		ManagedAgentsVaultEngineKey:     ManagedAgentsEngineClaude,
+		ManagedAgentsVaultLLMBaseURLKey: "https://api.anthropic.com",
+	})
+	if err != nil {
+		t.Fatalf("ValidateManagedVaultMetadata: %v", err)
+	}
+}
+
+func TestValidateManagedVaultMetadataRejectsUnknownReservedKey(t *testing.T) {
+	key := ManagedAgentsMetadataPrefix + "provider"
+	err := ValidateManagedVaultMetadata(map[string]string{
+		key: "anthropic",
+	})
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("ValidateManagedVaultMetadata error = %v, want unknown reserved key rejection", err)
+	}
+}

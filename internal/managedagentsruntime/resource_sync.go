@@ -29,6 +29,11 @@ type managedCredentialBinding struct {
 	secretValues       map[string]string
 }
 
+type managedVaultCredentials struct {
+	vault       gatewaymanagedagents.Vault
+	credentials []gatewaymanagedagents.StoredCredential
+}
+
 type mcpServerTarget struct {
 	name         string
 	canonicalURL string
@@ -88,7 +93,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	vaultBindings, vaultEvents, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, mcpTargets, vaultCredentials)
+	vaultBindings, vaultEvents, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, mcpTargets, flattenVaultCredentials(vaultCredentials))
 	if err != nil {
 		return err
 	}
@@ -99,19 +104,27 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
 }
 
-func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string, mcpTargets map[string]mcpServerTarget) ([]gatewaymanagedagents.StoredCredential, []map[string]any, error) {
+func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string, mcpTargets map[string]mcpServerTarget) ([]managedVaultCredentials, []map[string]any, error) {
 	if len(vaultIDs) == 0 {
 		return nil, nil, nil
 	}
-	credentials := make([]gatewaymanagedagents.StoredCredential, 0)
+	vaults := make([]managedVaultCredentials, 0, len(vaultIDs))
 	bootstrapEvents := make([]map[string]any, 0)
 	for _, vaultID := range vaultIDs {
+		vault, err := m.repo.GetVault(ctx, teamID, vaultID)
+		if err != nil {
+			return nil, nil, err
+		}
+		vaultCopy := *vault
 		items, err := m.repo.ListActiveCredentialsForVault(ctx, teamID, vaultID)
 		if err != nil {
 			return nil, nil, err
 		}
+		group := managedVaultCredentials{vault: vaultCopy, credentials: make([]gatewaymanagedagents.StoredCredential, 0, len(items))}
 		for _, credential := range items {
+			credential.Vault = &vaultCopy
 			credential, err = m.maybeRefreshVaultCredential(ctx, teamID, vaultID, credential, time.Now().UTC())
+			credential.Vault = &vaultCopy
 			if err != nil {
 				if target, ok := credentialMCPServerTarget(credential, mcpTargets); ok && !isManagedLLMCredential(credential) {
 					bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(target.name, err))
@@ -122,10 +135,19 @@ func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, team
 				}
 				return nil, nil, err
 			}
-			credentials = append(credentials, credential)
+			group.credentials = append(group.credentials, credential)
 		}
+		vaults = append(vaults, group)
 	}
-	return credentials, bootstrapEvents, nil
+	return vaults, bootstrapEvents, nil
+}
+
+func flattenVaultCredentials(vaults []managedVaultCredentials) []gatewaymanagedagents.StoredCredential {
+	credentials := make([]gatewaymanagedagents.StoredCredential, 0)
+	for i := range vaults {
+		credentials = append(credentials, vaults[i].credentials...)
+	}
+	return credentials
 }
 
 func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID string, resources []map[string]any) error {
@@ -590,7 +612,10 @@ func credentialMCPServerURL(credential gatewaymanagedagents.StoredCredential) st
 }
 
 func isManagedLLMCredential(credential gatewaymanagedagents.StoredCredential) bool {
-	return normalizeManagedRuntimeMetadataValue(credential.Snapshot.Metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey]) == gatewaymanagedagents.ManagedAgentCredentialKindLLM
+	if credential.Vault == nil {
+		return false
+	}
+	return gatewaymanagedagents.ManagedVaultConfigFromMetadata(credential.Vault.Metadata).Role == gatewaymanagedagents.ManagedAgentsVaultRoleLLM
 }
 
 func mcpAuthenticationFailedEvent(serverName string, err error) map[string]any {

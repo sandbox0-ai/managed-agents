@@ -291,29 +291,23 @@ func nowRFC3339(t time.Time) string {
 
 func normalizeModelConfig(input any, vendorHint string) (string, map[string]any) {
 	vendor := strings.TrimSpace(vendorHint)
+	if vendor == "" {
+		vendor = "claude"
+	}
 	switch value := input.(type) {
 	case string:
-		if vendor == "" {
-			vendor = inferVendorFromModel(value)
-		}
 		return vendor, map[string]any{"id": value, "speed": "standard"}
 	case map[string]any:
 		model := cloneMap(value)
-		if vendor == "" {
-			vendor = inferVendorFromModel(stringValue(model["id"]))
-		}
 		if strings.TrimSpace(stringValue(model["id"])) == "" {
-			model["id"] = defaultModelForVendor(vendor)
+			model["id"] = defaultClaudeModel
 		}
 		if _, ok := model["speed"]; !ok {
 			model["speed"] = "standard"
 		}
 		return vendor, model
 	default:
-		if vendor == "" {
-			vendor = "claude"
-		}
-		return vendor, map[string]any{"id": defaultModelForVendor(vendor), "speed": "standard"}
+		return vendor, map[string]any{"id": defaultClaudeModel, "speed": "standard"}
 	}
 }
 

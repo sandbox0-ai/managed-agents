@@ -452,13 +452,8 @@ func (h *Handler) CreateCredential(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req contract.BetaManagedAgentsCreateCredentialRequestBody
-	if err := decodeContractJSONBody(c, "BetaManagedAgentsCreateCredentialRequestBody", &req); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
-		return
-	}
-	params, err := createCredentialRequestFromContract(req)
-	if err != nil {
+	var params CreateCredentialRequest
+	if err := decodeJSONBody(c, &params); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}

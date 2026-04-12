@@ -72,6 +72,31 @@ func TestNormalizeCreateCredentialAuthStaticBearer(t *testing.T) {
 	}
 }
 
+func TestNormalizeCreateCredentialAuthStaticBearerAllowsUnboundSecret(t *testing.T) {
+	normalized, err := normalizeCreateCredentialAuth(map[string]any{
+		"type":  "static_bearer",
+		"token": "bearer-secret",
+	})
+	if err != nil {
+		t.Fatalf("normalizeCreateCredentialAuth: %v", err)
+	}
+	if got := stringValue(normalized.Public["type"]); got != "static_bearer" {
+		t.Fatalf("public auth type = %q, want static_bearer", got)
+	}
+	if _, ok := normalized.Public["mcp_server_url"]; ok {
+		t.Fatal("public auth must not set mcp_server_url when the credential is unbound")
+	}
+	if _, ok := normalized.Secret["mcp_server_url"]; ok {
+		t.Fatal("secret auth must not set mcp_server_url when the credential is unbound")
+	}
+	if got := stringValue(normalized.Secret["token"]); got != "bearer-secret" {
+		t.Fatalf("secret token = %q, want bearer-secret", got)
+	}
+	if _, ok := normalized.Public["token"]; ok {
+		t.Fatal("public auth must not expose token")
+	}
+}
+
 func TestNormalizeUpdateCredentialAuthMcpOAuth(t *testing.T) {
 	normalized, err := normalizeUpdateCredentialAuth(
 		map[string]any{
@@ -288,33 +313,25 @@ func TestNormalizeUpdateEnvironmentConfigMergesExistingState(t *testing.T) {
 	}
 }
 
-func TestServiceCreateCredentialRejectsInvalidManagedLLMMetadata(t *testing.T) {
+func TestServiceCreateVaultRejectsInvalidManagedLLMMetadata(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	ctx := context.Background()
 	principal := Principal{TeamID: "team_123"}
-	now := time.Now().UTC()
-	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
-	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
-		t.Fatalf("CreateVault: %v", err)
-	}
-	_, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
-		Auth: map[string]any{
-			"type":           "static_bearer",
-			"token":          "secret-token",
-			"mcp_server_url": "https://api.anthropic.com",
-		},
+
+	_, err := service.CreateVault(ctx, principal, CreateVaultRequest{
+		DisplayName: "llm runtime",
 		Metadata: map[string]string{
-			ManagedAgentCredentialKindKey:     ManagedAgentCredentialKindLLM,
-			ManagedAgentCredentialProviderKey: "openai",
+			ManagedAgentsVaultRoleKey:   ManagedAgentsVaultRoleLLM,
+			ManagedAgentsVaultEngineKey: "unsupported-engine",
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), ManagedAgentCredentialProviderKey) {
-		t.Fatalf("CreateCredential error = %v, want provider validation", err)
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentsVaultEngineKey) {
+		t.Fatalf("CreateVault error = %v, want engine validation", err)
 	}
 }
 
-func TestServiceUpdateCredentialRejectsManagedMetadataWithoutKind(t *testing.T) {
+func TestServiceUpdateVaultRejectsManagedMetadataWithoutRole(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	ctx := context.Background()
@@ -324,27 +341,17 @@ func TestServiceUpdateCredentialRejectsManagedMetadataWithoutKind(t *testing.T) 
 	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
 		t.Fatalf("CreateVault: %v", err)
 	}
-	created, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
-		Auth: map[string]any{
-			"type":           "static_bearer",
-			"token":          "secret-token",
-			"mcp_server_url": "https://api.anthropic.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateCredential: %v", err)
-	}
 	baseURL := "https://api.anthropic.com"
-	_, err = service.UpdateCredential(ctx, principal, vault.ID, created.ID, UpdateCredentialRequest{
+	_, err := service.UpdateVault(ctx, principal, vault.ID, UpdateVaultRequest{
 		Metadata: MetadataPatchField{
 			Set: true,
 			Values: map[string]*string{
-				ManagedAgentCredentialBaseURLKey: &baseURL,
+				ManagedAgentsVaultLLMBaseURLKey: &baseURL,
 			},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), ManagedAgentCredentialKindKey) {
-		t.Fatalf("UpdateCredential error = %v, want managed kind validation", err)
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentsVaultRoleKey) {
+		t.Fatalf("UpdateVault error = %v, want managed role validation", err)
 	}
 }
 

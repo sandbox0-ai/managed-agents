@@ -116,6 +116,48 @@ func TestCreateSessionRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestCreateCredentialAcceptsUnboundStaticBearer(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	MountRoutes(router, stubAuthenticator{handler: requireAuthorizationAndSetPrincipal(nil)}, NewHandler(service, nil))
+
+	now := time.Now().UTC()
+	vault := buildVaultObject("vlt_123", CreateVaultRequest{DisplayName: "llm runtime"}, now, nil)
+	if err := repo.CreateVault(t.Context(), "team_123", vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/vlt_123/credentials", bytes.NewBufferString(`{
+		"auth":{"type":"static_bearer","token":"secret-token"}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer token_123")
+	req.Header.Set("Anthropic-Beta", managedAgentsBetaHeader)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response Credential
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if response.Auth.MCPServerURL != "" {
+		t.Fatalf("response mcp_server_url = %q, want empty", response.Auth.MCPServerURL)
+	}
+	_, secret, err := repo.GetCredential(t.Context(), "team_123", "vlt_123", response.ID)
+	if err != nil {
+		t.Fatalf("GetCredential: %v", err)
+	}
+	if _, ok := secret["mcp_server_url"]; ok {
+		t.Fatalf("secret mcp_server_url = %#v, want omitted", secret["mcp_server_url"])
+	}
+}
+
 func TestListSkillsRejectsInvalidLimitQuery(t *testing.T) {
 	router := newContractTestRouter(t, requireAuthorizationAndSetPrincipal(nil))
 

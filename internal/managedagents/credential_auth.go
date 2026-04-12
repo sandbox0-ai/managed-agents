@@ -10,6 +10,7 @@ import (
 
 // StoredCredential carries the public snapshot plus the secret payload.
 type StoredCredential struct {
+	Vault    *Vault
 	Snapshot Credential
 	Secret   map[string]any
 }
@@ -30,20 +31,24 @@ func normalizeCreateCredentialAuth(auth map[string]any) (*normalizedCredentialAu
 		if err != nil {
 			return nil, err
 		}
-		serverURL, err := requiredURLString(copyAuth, "mcp_server_url")
+		serverURL, ok, err := optionalURLString(copyAuth, "mcp_server_url")
 		if err != nil {
 			return nil, err
 		}
+		public := map[string]any{
+			"type": "static_bearer",
+		}
+		secret := map[string]any{
+			"type":  "static_bearer",
+			"token": token,
+		}
+		if ok {
+			public["mcp_server_url"] = serverURL
+			secret["mcp_server_url"] = serverURL
+		}
 		return &normalizedCredentialAuth{
-			Public: map[string]any{
-				"type":           "static_bearer",
-				"mcp_server_url": serverURL,
-			},
-			Secret: map[string]any{
-				"type":           "static_bearer",
-				"token":          token,
-				"mcp_server_url": serverURL,
-			},
+			Public: public,
+			Secret: secret,
 		}, nil
 	case "mcp_oauth":
 		if err := validateAllowedFields(copyAuth, []string{"type", "mcp_server_url", "access_token", "expires_at", "refresh"}); err != nil {
@@ -360,6 +365,22 @@ func requiredURLString(input map[string]any, field string) (string, error) {
 		return "", fmt.Errorf("%s must be a valid url", field)
 	}
 	return value, nil
+}
+
+func optionalURLString(input map[string]any, field string) (string, bool, error) {
+	value, ok := input[field]
+	if !ok || value == nil {
+		return "", false, nil
+	}
+	trimmed := strings.TrimSpace(stringValue(value))
+	if trimmed == "" {
+		return "", false, fmt.Errorf("%s must be a valid url", field)
+	}
+	parsed, parseErr := url.Parse(trimmed)
+	if parseErr != nil || strings.TrimSpace(parsed.Scheme) == "" || strings.TrimSpace(parsed.Hostname()) == "" {
+		return "", false, fmt.Errorf("%s must be a valid url", field)
+	}
+	return trimmed, true, nil
 }
 
 func optionalTimestampValue(input map[string]any, field string) (any, bool, error) {

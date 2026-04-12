@@ -546,11 +546,11 @@ func (r *SessionRecord) toAPI(now time.Time) *Session {
 
 func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[string]any) {
 	vendor := strings.TrimSpace(explicitVendor)
+	if vendor == "" {
+		vendor = "claude"
+	}
 	switch value := agent.(type) {
 	case string:
-		if vendor == "" {
-			vendor = inferVendorFromAgentID(value)
-		}
 		return vendor, map[string]any{
 			"type":        "agent",
 			"id":          value,
@@ -558,7 +558,7 @@ func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[strin
 			"name":        value,
 			"description": nil,
 			"model": map[string]any{
-				"id":    defaultModelForVendor(vendor),
+				"id":    defaultClaudeModel,
 				"speed": "standard",
 			},
 			"system":      nil,
@@ -568,13 +568,6 @@ func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[strin
 		}
 	case map[string]any:
 		copyValue := cloneMap(value)
-		if vendor == "" {
-			if model, ok := copyValue["model"].(string); ok {
-				vendor = inferVendorFromModel(model)
-			} else if model, ok := copyValue["model"].(map[string]any); ok {
-				vendor = inferVendorFromModel(stringValue(model["id"]))
-			}
-		}
 		copyValue["type"] = "agent"
 		if _, ok := copyValue["version"]; !ok {
 			copyValue["version"] = 1
@@ -601,13 +594,10 @@ func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[strin
 			copyValue["model"] = map[string]any{"id": model, "speed": "standard"}
 		}
 		if _, ok := copyValue["model"]; !ok {
-			copyValue["model"] = map[string]any{"id": defaultModelForVendor(vendor), "speed": "standard"}
+			copyValue["model"] = map[string]any{"id": defaultClaudeModel, "speed": "standard"}
 		}
 		return vendor, copyValue
 	default:
-		if vendor == "" {
-			vendor = "claude"
-		}
 		return vendor, map[string]any{
 			"type":        "agent",
 			"id":          NewID("agent"),
@@ -615,7 +605,7 @@ func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[strin
 			"name":        "sandbox0 managed agent",
 			"description": nil,
 			"model": map[string]any{
-				"id":    defaultModelForVendor(vendor),
+				"id":    defaultClaudeModel,
 				"speed": "standard",
 			},
 			"system":      nil,
@@ -626,28 +616,7 @@ func normalizeAgentSnapshot(agent any, explicitVendor string) (string, map[strin
 	}
 }
 
-func inferVendorFromAgentID(id string) string {
-	trimmed := strings.ToLower(strings.TrimSpace(id))
-	if strings.Contains(trimmed, "codex") || strings.HasPrefix(trimmed, "oai_") {
-		return "codex"
-	}
-	return "claude"
-}
-
-func inferVendorFromModel(model string) string {
-	trimmed := strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(trimmed, "gpt") || strings.Contains(trimmed, "codex") || strings.Contains(trimmed, "o4") {
-		return "codex"
-	}
-	return "claude"
-}
-
-func defaultModelForVendor(vendor string) string {
-	if strings.EqualFold(strings.TrimSpace(vendor), "codex") {
-		return "gpt-5-codex"
-	}
-	return "claude-sonnet-4-20250514"
-}
+const defaultClaudeModel = "claude-sonnet-4-20250514"
 
 func ensureResourceIDs(resources []map[string]any) []map[string]any {
 	for i := range resources {

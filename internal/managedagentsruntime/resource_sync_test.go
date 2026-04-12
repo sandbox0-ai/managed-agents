@@ -144,23 +144,44 @@ func TestManagedBindingFromVaultCredentialMatchesCanonicalMCPURL(t *testing.T) {
 	}
 }
 
-func TestManagedBindingFromVaultCredentialSkipsManagedLLMCredential(t *testing.T) {
-	binding, err := managedBindingFromVaultCredential("sesn_123", gatewaymanagedagents.StoredCredential{
+func testLLMStaticBearerCredential(id, token string) gatewaymanagedagents.StoredCredential {
+	return gatewaymanagedagents.StoredCredential{
 		Snapshot: gatewaymanagedagents.Credential{
-			ID: "vcrd_123",
-			Metadata: map[string]string{
-				gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM,
-			},
-			Auth: gatewaymanagedagents.CredentialAuth{
-				Type:         "static_bearer",
-				MCPServerURL: "https://api.anthropic.com",
-			},
+			ID:   id,
+			Auth: gatewaymanagedagents.CredentialAuth{Type: "static_bearer"},
 		},
 		Secret: map[string]any{
 			"type":  "static_bearer",
-			"token": "secret-token",
+			"token": token,
 		},
-	}, sessionAgentMCPServerTargets(map[string]any{"mcp_servers": []any{
+	}
+}
+
+func testLLMVaultCredentials(credentials ...gatewaymanagedagents.StoredCredential) []managedVaultCredentials {
+	return testLLMVaultCredentialsWithBaseURL("https://api.anthropic.com", credentials...)
+}
+
+func testLLMVaultCredentialsWithBaseURL(baseURL string, credentials ...gatewaymanagedagents.StoredCredential) []managedVaultCredentials {
+	metadata := map[string]string{
+		gatewaymanagedagents.ManagedAgentsVaultRoleKey:   gatewaymanagedagents.ManagedAgentsVaultRoleLLM,
+		gatewaymanagedagents.ManagedAgentsVaultEngineKey: gatewaymanagedagents.ManagedAgentsEngineClaude,
+	}
+	if baseURL != "" {
+		metadata[gatewaymanagedagents.ManagedAgentsVaultLLMBaseURLKey] = baseURL
+	}
+	vault := gatewaymanagedagents.Vault{
+		ID:       "vlt_llm",
+		Metadata: metadata,
+	}
+	for i := range credentials {
+		credentials[i].Vault = &vault
+	}
+	return []managedVaultCredentials{{vault: vault, credentials: credentials}}
+}
+
+func TestManagedBindingFromVaultCredentialSkipsManagedLLMCredential(t *testing.T) {
+	vaults := testLLMVaultCredentials(testLLMStaticBearerCredential("vcrd_123", "secret-token"))
+	binding, err := managedBindingFromVaultCredential("sesn_123", vaults[0].credentials[0], sessionAgentMCPServerTargets(map[string]any{"mcp_servers": []any{
 		map[string]any{"type": "url", "name": "llm", "url": "https://api.anthropic.com"},
 	}}))
 	if err != nil {
@@ -172,24 +193,9 @@ func TestManagedBindingFromVaultCredentialSkipsManagedLLMCredential(t *testing.T
 }
 
 func TestApplyManagedLLMEnvInjectsAnthropicCredential(t *testing.T) {
-	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, []gatewaymanagedagents.StoredCredential{{
-		Snapshot: gatewaymanagedagents.Credential{
-			ID: "vcrd_123",
-			Metadata: map[string]string{
-				gatewaymanagedagents.ManagedAgentCredentialKindKey:     gatewaymanagedagents.ManagedAgentCredentialKindLLM,
-				gatewaymanagedagents.ManagedAgentCredentialVendorKey:   gatewaymanagedagents.ManagedAgentCredentialVendorClaude,
-				gatewaymanagedagents.ManagedAgentCredentialProviderKey: gatewaymanagedagents.ManagedAgentCredentialProviderAnthropic,
-			},
-			Auth: gatewaymanagedagents.CredentialAuth{
-				Type:         "static_bearer",
-				MCPServerURL: "https://api.anthropic.com",
-			},
-		},
-		Secret: map[string]any{
-			"type":  "static_bearer",
-			"token": "secret-token",
-		},
-	}})
+	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentials(
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
 	if err != nil {
 		t.Fatalf("applyManagedLLMEnv: %v", err)
 	}
@@ -210,6 +216,9 @@ func TestApplyManagedLLMEnvInjectsAnthropicCredential(t *testing.T) {
 	if got, ok := extraArgs["bare"]; !ok || got != nil {
 		t.Fatalf("extra_args.bare = %#v, want explicit null flag", got)
 	}
+	if credential.VaultID != "vlt_llm" {
+		t.Fatalf("credential vault id = %q, want vlt_llm", credential.VaultID)
+	}
 	if credential.Token != "secret-token" {
 		t.Fatalf("credential token = %q, want secret-token", credential.Token)
 	}
@@ -219,16 +228,7 @@ func TestApplyManagedLLMEnvOverwritesExplicitEngineCredentialWithFakeKey(t *test
 	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{"env": map[string]any{
 		"ANTHROPIC_API_KEY":  "existing-token",
 		"ANTHROPIC_BASE_URL": "https://api.anthropic.com/",
-	}}, []gatewaymanagedagents.StoredCredential{{
-		Snapshot: gatewaymanagedagents.Credential{
-			ID: "vcrd_123",
-			Metadata: map[string]string{
-				gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM,
-			},
-			Auth: gatewaymanagedagents.CredentialAuth{Type: "static_bearer", MCPServerURL: "https://api.anthropic.com"},
-		},
-		Secret: map[string]any{"type": "static_bearer", "token": "secret-token"},
-	}})
+	}}, testLLMVaultCredentials(testLLMStaticBearerCredential("vcrd_123", "secret-token")))
 	if err != nil {
 		t.Fatalf("applyManagedLLMEnv: %v", err)
 	}
@@ -256,14 +256,7 @@ func TestApplyManagedLLMEnvPreservesExistingExtraArgs(t *testing.T) {
 		"extra_args": map[string]any{
 			"debug-file": "/tmp/debug.log",
 		},
-	}, []gatewaymanagedagents.StoredCredential{{
-		Snapshot: gatewaymanagedagents.Credential{
-			ID:       "vcrd_123",
-			Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-			Auth:     gatewaymanagedagents.CredentialAuth{Type: "static_bearer", MCPServerURL: "https://api.anthropic.com"},
-		},
-		Secret: map[string]any{"type": "static_bearer", "token": "secret-token"},
-	}})
+	}, testLLMVaultCredentials(testLLMStaticBearerCredential("vcrd_123", "secret-token")))
 	if err != nil {
 		t.Fatalf("applyManagedLLMEnv: %v", err)
 	}
@@ -279,79 +272,49 @@ func TestApplyManagedLLMEnvPreservesExistingExtraArgs(t *testing.T) {
 func TestApplyManagedLLMEnvRejectsConflictingBaseURL(t *testing.T) {
 	_, _, err := applyManagedLLMEnv("claude", map[string]any{"env": map[string]any{
 		"ANTHROPIC_BASE_URL": "https://proxy.example.com",
-	}}, []gatewaymanagedagents.StoredCredential{{
-		Snapshot: gatewaymanagedagents.Credential{
-			ID:       "vcrd_123",
-			Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-			Auth:     gatewaymanagedagents.CredentialAuth{Type: "static_bearer", MCPServerURL: "https://api.anthropic.com"},
-		},
-		Secret: map[string]any{"type": "static_bearer", "token": "secret-token"},
-	}})
+	}}, testLLMVaultCredentials(testLLMStaticBearerCredential("vcrd_123", "secret-token")))
 	if err == nil || !strings.Contains(err.Error(), "conflicts with engine ANTHROPIC_BASE_URL") {
 		t.Fatalf("applyManagedLLMEnv error = %v, want base URL conflict", err)
 	}
 }
 
-func TestApplyManagedLLMEnvRejectsMultipleMatchingCredentials(t *testing.T) {
-	_, _, err := applyManagedLLMEnv("claude", map[string]any{}, []gatewaymanagedagents.StoredCredential{
-		{
-			Snapshot: gatewaymanagedagents.Credential{
-				ID:       "vcrd_123",
-				Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-				Auth:     gatewaymanagedagents.CredentialAuth{Type: "static_bearer", MCPServerURL: "https://api.anthropic.com"},
-			},
-			Secret: map[string]any{"type": "static_bearer", "token": "secret-token-1"},
-		},
-		{
-			Snapshot: gatewaymanagedagents.Credential{
-				ID:       "vcrd_456",
-				Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-				Auth:     gatewaymanagedagents.CredentialAuth{Type: "static_bearer", MCPServerURL: "https://api.anthropic.com"},
-			},
-			Secret: map[string]any{"type": "static_bearer", "token": "secret-token-2"},
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "multiple vault credentials") {
+func TestApplyManagedLLMEnvRejectsMultipleCredentialsInLLMVault(t *testing.T) {
+	_, _, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentials(
+		testLLMStaticBearerCredential("vcrd_123", "secret-token-1"),
+		testLLMStaticBearerCredential("vcrd_456", "secret-token-2"),
+	))
+	if err == nil || !strings.Contains(err.Error(), "exactly one active credential") {
 		t.Fatalf("applyManagedLLMEnv error = %v, want multiple credential rejection", err)
 	}
 }
 
-func TestApplyManagedLLMEnvUsesOAuthAccessToken(t *testing.T) {
-	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, []gatewaymanagedagents.StoredCredential{{
+func TestApplyManagedLLMEnvRejectsBoundLLMCredential(t *testing.T) {
+	credential := testLLMStaticBearerCredential("vcrd_123", "secret-token")
+	credential.Snapshot.Auth.MCPServerURL = "https://api.anthropic.com"
+	credential.Secret["mcp_server_url"] = "https://api.anthropic.com"
+	_, _, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentials(credential))
+	if err == nil || !strings.Contains(err.Error(), "must not set mcp_server_url") {
+		t.Fatalf("applyManagedLLMEnv error = %v, want bound credential rejection", err)
+	}
+}
+
+func TestApplyManagedLLMEnvRejectsOAuthCredential(t *testing.T) {
+	_, _, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentials(gatewaymanagedagents.StoredCredential{
 		Snapshot: gatewaymanagedagents.Credential{
-			ID:       "vcrd_123",
-			Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-			Auth:     gatewaymanagedagents.CredentialAuth{Type: "mcp_oauth", MCPServerURL: "https://api.anthropic.com"},
+			ID:   "vcrd_123",
+			Auth: gatewaymanagedagents.CredentialAuth{Type: "mcp_oauth", MCPServerURL: "https://api.anthropic.com"},
 		},
 		Secret: map[string]any{"type": "mcp_oauth", "access_token": "oauth-token"},
-	}})
-	if err != nil {
-		t.Fatalf("applyManagedLLMEnv: %v", err)
-	}
-	if credential == nil {
-		t.Fatal("expected managed llm credential")
-	}
-	env := mapValue(engine["env"])
-	if got := stringValue(env["ANTHROPIC_API_KEY"]); got != managedAnthropicFakeAPIKey {
-		t.Fatalf("ANTHROPIC_API_KEY = %q, want fake key", got)
-	}
-	if got := stringValue(env["ANTHROPIC_AUTH_TOKEN"]); got != managedAnthropicFakeAuthToken {
-		t.Fatalf("ANTHROPIC_AUTH_TOKEN = %q, want fake token", got)
-	}
-	if credential.Token != "oauth-token" {
-		t.Fatalf("credential token = %q, want oauth-token", credential.Token)
+	}))
+	if err == nil || !strings.Contains(err.Error(), "must use static_bearer") {
+		t.Fatalf("applyManagedLLMEnv error = %v, want oauth rejection", err)
 	}
 }
 
 func TestApplyManagedLLMEnvDefaultsAnthropicBaseURL(t *testing.T) {
-	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, []gatewaymanagedagents.StoredCredential{{
-		Snapshot: gatewaymanagedagents.Credential{
-			ID:       "vcrd_123",
-			Metadata: map[string]string{gatewaymanagedagents.ManagedAgentCredentialKindKey: gatewaymanagedagents.ManagedAgentCredentialKindLLM},
-			Auth:     gatewaymanagedagents.CredentialAuth{Type: "static_bearer"},
-		},
-		Secret: map[string]any{"type": "static_bearer", "token": "secret-token"},
-	}})
+	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentialsWithBaseURL("",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
 	if err != nil {
 		t.Fatalf("applyManagedLLMEnv: %v", err)
 	}

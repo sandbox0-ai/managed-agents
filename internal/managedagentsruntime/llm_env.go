@@ -9,6 +9,7 @@ import (
 )
 
 type managedLLMCredential struct {
+	VaultID      string
 	CredentialID string
 	Token        string
 	BaseURL      string
@@ -20,12 +21,12 @@ const (
 	managedAnthropicFakeAuthToken  = "managed-agent-sandbox0-fake-token"
 )
 
-func applyManagedLLMEnv(vendor string, engine map[string]any, credentials []gatewaymanagedagents.StoredCredential) (map[string]any, *managedLLMCredential, error) {
+func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVaultCredentials) (map[string]any, *managedLLMCredential, error) {
 	out := cloneMap(engine)
-	if normalizeManagedRuntimeMetadataValue(vendor) != gatewaymanagedagents.ManagedAgentCredentialVendorClaude {
+	if normalizeManagedRuntimeMetadataValue(vendor) != gatewaymanagedagents.ManagedAgentsEngineClaude {
 		return out, nil, nil
 	}
-	credential, err := selectManagedLLMCredential(vendor, credentials)
+	credential, err := selectManagedLLMCredential(vendor, vaults)
 	if err != nil || credential == nil {
 		return out, credential, err
 	}
@@ -57,61 +58,65 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, credentials []gate
 	return out, &credentialCopy, nil
 }
 
-func selectManagedLLMCredential(vendor string, credentials []gatewaymanagedagents.StoredCredential) (*managedLLMCredential, error) {
-	var selected *managedLLMCredential
-	for _, credential := range credentials {
-		candidate, err := managedLLMCredentialFromVault(vendor, credential)
-		if err != nil {
-			return nil, err
-		}
-		if candidate == nil {
+func selectManagedLLMCredential(vendor string, vaults []managedVaultCredentials) (*managedLLMCredential, error) {
+	var selected *managedVaultCredentials
+	var selectedConfig gatewaymanagedagents.ManagedVaultConfig
+	for i := range vaults {
+		config := gatewaymanagedagents.ManagedVaultConfigFromMetadata(vaults[i].vault.Metadata)
+		if config.Role != gatewaymanagedagents.ManagedAgentsVaultRoleLLM {
 			continue
 		}
 		if selected != nil {
-			return nil, fmt.Errorf("multiple vault credentials are tagged as managed-agent llm credentials for vendor %s", strings.TrimSpace(vendor))
+			return nil, errorsForMultipleLLMVaults(selected.vault.ID, vaults[i].vault.ID)
 		}
-		selected = candidate
+		selected = &vaults[i]
+		selectedConfig = config
 	}
-	return selected, nil
+	if selected == nil {
+		return nil, nil
+	}
+	return managedLLMCredentialFromVault(vendor, *selected, selectedConfig)
 }
 
-func managedLLMCredentialFromVault(vendor string, credential gatewaymanagedagents.StoredCredential) (*managedLLMCredential, error) {
-	metadata := credential.Snapshot.Metadata
-	kind := normalizeManagedRuntimeMetadataValue(metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey])
-	if kind == "" {
-		return nil, nil
-	}
-	if kind != gatewaymanagedagents.ManagedAgentCredentialKindLLM {
-		return nil, fmt.Errorf("vault credential %s has unsupported %s %q", credential.Snapshot.ID, gatewaymanagedagents.ManagedAgentCredentialKindKey, metadata[gatewaymanagedagents.ManagedAgentCredentialKindKey])
-	}
+func errorsForMultipleLLMVaults(firstID, secondID string) error {
+	return fmt.Errorf("session can attach exactly one %s=%q vault, got %s and %s", gatewaymanagedagents.ManagedAgentsVaultRoleKey, gatewaymanagedagents.ManagedAgentsVaultRoleLLM, strings.TrimSpace(firstID), strings.TrimSpace(secondID))
+}
+
+func managedLLMCredentialFromVault(vendor string, vault managedVaultCredentials, config gatewaymanagedagents.ManagedVaultConfig) (*managedLLMCredential, error) {
 	resolvedVendor := normalizeManagedRuntimeMetadataValue(vendor)
-	metadataVendor := normalizeManagedRuntimeMetadataValue(metadata[gatewaymanagedagents.ManagedAgentCredentialVendorKey])
-	if metadataVendor != "" && metadataVendor != resolvedVendor {
-		return nil, nil
+	if config.Engine == "" {
+		return nil, fmt.Errorf("llm vault %s is missing %s", vault.vault.ID, gatewaymanagedagents.ManagedAgentsVaultEngineKey)
 	}
-	provider := normalizeManagedRuntimeMetadataValue(metadata[gatewaymanagedagents.ManagedAgentCredentialProviderKey])
-	if resolvedVendor == gatewaymanagedagents.ManagedAgentCredentialVendorClaude && provider != "" && provider != gatewaymanagedagents.ManagedAgentCredentialProviderAnthropic && provider != gatewaymanagedagents.ManagedAgentCredentialProviderClaude {
-		return nil, fmt.Errorf("vault credential %s has unsupported %s %q for vendor %s", credential.Snapshot.ID, gatewaymanagedagents.ManagedAgentCredentialProviderKey, metadata[gatewaymanagedagents.ManagedAgentCredentialProviderKey], vendor)
+	if config.Engine != resolvedVendor {
+		return nil, fmt.Errorf("llm vault %s uses engine %q but session vendor is %q", vault.vault.ID, config.Engine, vendor)
+	}
+	if len(vault.credentials) == 0 {
+		return nil, fmt.Errorf("llm vault %s has no active credentials", vault.vault.ID)
+	}
+	if len(vault.credentials) > 1 {
+		return nil, fmt.Errorf("llm vault %s must contain exactly one active credential", vault.vault.ID)
+	}
+	credential := vault.credentials[0]
+	if strings.TrimSpace(credential.Snapshot.Auth.Type) != "static_bearer" {
+		return nil, fmt.Errorf("llm vault credential %s must use static_bearer auth", credential.Snapshot.ID)
+	}
+	if credentialMCPServerURL(credential) != "" {
+		return nil, fmt.Errorf("llm vault credential %s must not set mcp_server_url", credential.Snapshot.ID)
 	}
 	token, err := managedLLMTokenFromCredential(credential)
 	if err != nil {
 		return nil, err
 	}
-	baseURL := strings.TrimSpace(metadata[gatewaymanagedagents.ManagedAgentCredentialBaseURLKey])
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(credential.Snapshot.Auth.MCPServerURL)
-	}
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(stringValue(credential.Secret["mcp_server_url"]))
-	}
+	baseURL := strings.TrimSpace(config.LLMBaseURL)
 	if baseURL != "" {
 		canonicalBaseURL, err := canonicalManagedRuntimeURL(baseURL)
 		if err != nil {
-			return nil, fmt.Errorf("vault credential %s has invalid managed-agent llm base URL", credential.Snapshot.ID)
+			return nil, fmt.Errorf("llm vault %s has invalid %s", vault.vault.ID, gatewaymanagedagents.ManagedAgentsVaultLLMBaseURLKey)
 		}
 		baseURL = canonicalBaseURL
 	}
 	return &managedLLMCredential{
+		VaultID:      vault.vault.ID,
 		CredentialID: credential.Snapshot.ID,
 		Token:        token,
 		BaseURL:      baseURL,
@@ -123,29 +128,18 @@ func normalizeManagedRuntimeMetadataValue(value string) string {
 }
 
 func managedLLMTokenFromCredential(credential gatewaymanagedagents.StoredCredential) (string, error) {
-	switch strings.TrimSpace(credential.Snapshot.Auth.Type) {
-	case "static_bearer":
-		token := strings.TrimSpace(stringValue(credential.Secret["token"]))
-		if token == "" {
-			return "", fmt.Errorf("vault credential %s is missing token", credential.Snapshot.ID)
-		}
-		return token, nil
-	case "mcp_oauth":
-		accessToken := strings.TrimSpace(stringValue(credential.Secret["access_token"]))
-		if accessToken == "" {
-			return "", fmt.Errorf("vault credential %s is missing access_token", credential.Snapshot.ID)
-		}
-		return accessToken, nil
-	default:
-		return "", fmt.Errorf("vault credential %s has unsupported auth type %q for managed-agent llm projection", credential.Snapshot.ID, credential.Snapshot.Auth.Type)
+	token := strings.TrimSpace(stringValue(credential.Secret["token"]))
+	if token == "" {
+		return "", fmt.Errorf("vault credential %s is missing token", credential.Snapshot.ID)
 	}
+	return token, nil
 }
 
 func resolvedManagedLLMBaseURL(vendor string, credential *managedLLMCredential) string {
 	if credential != nil && strings.TrimSpace(credential.BaseURL) != "" {
 		return strings.TrimSpace(credential.BaseURL)
 	}
-	if normalizeManagedRuntimeMetadataValue(vendor) == gatewaymanagedagents.ManagedAgentCredentialVendorClaude {
+	if normalizeManagedRuntimeMetadataValue(vendor) == gatewaymanagedagents.ManagedAgentsEngineClaude {
 		return managedAnthropicDefaultBaseURL
 	}
 	return ""
