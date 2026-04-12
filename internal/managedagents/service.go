@@ -27,10 +27,11 @@ type RuntimeManager interface {
 }
 
 const (
-	runtimeWebhookLeaseDuration = 2 * time.Minute
-	runtimeWebhookPollInterval  = 100 * time.Millisecond
-	runtimeWebhookMaxAttempts   = 5
-	failedCreateCleanupTimeout  = 2 * time.Minute
+	runtimeWebhookLeaseDuration   = 2 * time.Minute
+	runtimeWebhookPollInterval    = 100 * time.Millisecond
+	runtimeWebhookMaxAttempts     = 5
+	failedCreateCleanupTimeout    = 2 * time.Minute
+	runtimePauseBestEffortTimeout = 30 * time.Second
 )
 
 // Service coordinates session truth and runtime orchestration.
@@ -148,7 +149,7 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
 				return err
 			}
-			s.pauseRuntimeBestEffort(ctx, credential, runtime, "create")
+			s.pauseRuntimeAsyncBestEffort(credential, runtime, "create")
 		}
 		created = record.toAPI(now)
 		return nil
@@ -819,6 +820,18 @@ func (s *Service) pauseRuntimeBestEffort(ctx context.Context, credential Request
 	if err := s.runtime.PauseRuntime(ctx, credential, runtime); err != nil {
 		s.logger.Warn("failed to pause managed-agent runtime", zap.Error(err), zap.String("session_id", runtime.SessionID), zap.String("reason", reason))
 	}
+}
+
+func (s *Service) pauseRuntimeAsyncBestEffort(credential RequestCredential, runtime *RuntimeRecord, reason string) {
+	if runtime == nil {
+		return
+	}
+	runtimeCopy := *runtime
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), runtimePauseBestEffortTimeout)
+		defer cancel()
+		s.pauseRuntimeBestEffort(ctx, credential, &runtimeCopy, reason)
+	}()
 }
 
 type backgroundRuntimePauser interface {
