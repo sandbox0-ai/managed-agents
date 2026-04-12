@@ -39,7 +39,6 @@ type Config struct {
 	SandboxBaseURL         string
 	SandboxAdminAPIKey     string
 	RuntimeCallbackBaseURL string
-	RegionID               string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -119,7 +118,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	} else if !errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
 		return nil, err
 	}
-	regionID, err := m.repo.ResolveRuntimeRegionID(ctx, session.TeamID, m.cfg.RegionID)
+	regionID, err := m.repo.ResolveRuntimeRegionID(ctx, session.TeamID)
 	if err != nil {
 		return nil, err
 	}

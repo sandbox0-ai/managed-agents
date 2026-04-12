@@ -1,3 +1,3 @@
 1. Create the runtime secret referenced by `agentGateway.secretKeys.databaseURL.secretName` before install.
-2. Set `agentGateway.env.sandbox0BaseURL` to the in-cluster or externally reachable sandbox0 API base URL.
+2. Override `agentGateway.env.sandbox0BaseURL` only for self-hosted or local Sandbox0 deployments.
 3. Configure `agentGateway.env.templateMainImage`; agent-gateway will ensure the sandbox0 warm-process template via SDK at runtime.

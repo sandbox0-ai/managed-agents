@@ -546,12 +546,9 @@ func (r *Repository) DeleteRuntime(ctx context.Context, sessionID string) error 
 	return nil
 }
 
-func (r *Repository) ResolveRuntimeRegionID(ctx context.Context, teamID string, configuredRegionID string) (string, error) {
+func (r *Repository) ResolveRuntimeRegionID(ctx context.Context, teamID string) (string, error) {
 	_ = ctx
 	_ = teamID
-	if regionID := strings.TrimSpace(configuredRegionID); regionID != "" {
-		return regionID, nil
-	}
 	return "default", nil
 }
 

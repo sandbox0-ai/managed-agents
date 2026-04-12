@@ -31,12 +31,10 @@ type config struct {
 	DatabaseMaxConns       int32
 	DatabaseMinConns       int32
 	Sandbox0BaseURL        string
-	Sandbox0AuthBaseURL    string
 	Sandbox0AdminAPIKey    string
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
 	RuntimeEnabled         bool
-	RuntimeRegionID        string
 	ClaudeTemplate         string
 	TemplateManifestPath   string
 	TemplateMainImage      string
@@ -46,6 +44,8 @@ type config struct {
 	SandboxTTLSeconds      int
 	SandboxHardTTLSeconds  int
 }
+
+const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
 
 func main() {
 	cfg, err := loadConfig()
@@ -80,7 +80,7 @@ func main() {
 	}
 
 	authenticator, err := httpauth.NewSandbox0Authenticator(httpauth.Sandbox0AuthenticatorConfig{
-		BaseURL: cfg.Sandbox0AuthBaseURL,
+		BaseURL: cfg.Sandbox0BaseURL,
 		Timeout: cfg.Sandbox0Timeout,
 		Logger:  logger,
 	})
@@ -104,7 +104,6 @@ func main() {
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
 		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
-		RegionID:               cfg.RuntimeRegionID,
 	}.WithDefaults(0)
 	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
 	if err != nil {
@@ -139,7 +138,6 @@ func main() {
 		logger.Info("starting agent-gateway",
 			zap.String("addr", cfg.HTTPAddr),
 			zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL),
-			zap.String("sandbox0_auth_base_url", cfg.Sandbox0AuthBaseURL),
 		)
 		errCh <- server.ListenAndServe()
 	}()
@@ -171,13 +169,11 @@ func loadConfig() (config, error) {
 		DatabaseSchema:         envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
 		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
 		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
-		Sandbox0BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
-		Sandbox0AuthBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL")), "/"),
+		Sandbox0BaseURL:        strings.TrimRight(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL), "/"),
 		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
-		RuntimeRegionID:        strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_REGION_ID")),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
 		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
 		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
@@ -189,12 +185,6 @@ func loadConfig() (config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")
-	}
-	if cfg.Sandbox0BaseURL == "" {
-		return config{}, fmt.Errorf("MANAGED_AGENT_SANDBOX0_BASE_URL is required")
-	}
-	if cfg.Sandbox0AuthBaseURL == "" {
-		cfg.Sandbox0AuthBaseURL = cfg.Sandbox0BaseURL
 	}
 	return cfg, nil
 }

@@ -42,11 +42,9 @@ agentGateway:
     databaseSchema: managed_agent
     databaseMaxConns: 10
     databaseMinConns: 1
-    sandbox0BaseURL: ""
-    sandbox0AuthBaseURL: ""
+    sandbox0BaseURL: https://api.sandbox0.ai
     sandbox0Timeout: 60s
     runtimeEnabled: true
-    runtimeRegionID: ""
     runtimeCallbackBaseURL: ""
     claudeTemplate: managed-agent-claude
     wrapperPort: 8080
