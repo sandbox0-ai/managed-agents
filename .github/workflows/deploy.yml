@@ -146,4 +146,4 @@ jobs:
       - name: Smoke health endpoint
         if: ${{ vars.MANAGED_AGENTS_INGRESS_HOST != '' }}
         shell: bash
-        run: curl -fsS "https://${INGRESS_HOST}/healthz"
+        run: curl --retry 12 --retry-all-errors --retry-delay 5 -fsS "https://${INGRESS_HOST}/healthz"
