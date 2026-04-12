@@ -36,6 +36,7 @@ agentGateway:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  hostAliases: []
   env:
     httpAddr: :8080
     logLevel: info
