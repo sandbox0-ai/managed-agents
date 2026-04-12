@@ -175,7 +175,7 @@ func loadConfig() (config, error) {
 		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		RuntimeProxyBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_PROXY_BASE_URL")), "/"),
-		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
+		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
 		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
