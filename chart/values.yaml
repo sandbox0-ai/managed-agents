@@ -53,7 +53,7 @@ agentGateway:
     workspaceMountPath: /workspace
     engineStateMountPath: /var/lib/agent-wrapper
     sandboxTTLSeconds: 3600
-    sandboxHardTTLSeconds: 21600
+    sandboxHardTTLSeconds: 0
     templateManifestPath: ""
     templateMainImage: sandbox0ai/managed-agents:wrapper-latest
   extraEnv: []
@@ -65,3 +65,8 @@ agentGateway:
       envName: MANAGED_AGENT_DATABASE_URL
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_DATABASE_URL
+    sandbox0AdminAPIKey:
+      enabled: false
+      envName: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY
+      secretName: managed-agents-runtime
+      key: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY

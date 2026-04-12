@@ -32,6 +32,7 @@ type config struct {
 	DatabaseMinConns       int32
 	Sandbox0BaseURL        string
 	Sandbox0AuthBaseURL    string
+	Sandbox0AdminAPIKey    string
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
 	RuntimeEnabled         bool
@@ -101,6 +102,7 @@ func main() {
 		SandboxHardTTLSeconds:  cfg.SandboxHardTTLSeconds,
 		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
+		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
 		RegionID:               cfg.RuntimeRegionID,
 	}.WithDefaults(0)
@@ -170,6 +172,7 @@ func loadConfig() (config, error) {
 		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
 		Sandbox0BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
 		Sandbox0AuthBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL")), "/"),
+		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
@@ -180,8 +183,8 @@ func loadConfig() (config, error) {
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
 		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
-		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", 3600),
-		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", 21600),
+		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
+		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", managedagentsruntime.DefaultSandboxHardTTLSeconds),
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")

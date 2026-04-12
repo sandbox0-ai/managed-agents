@@ -27,6 +27,8 @@ var (
 	ErrSkillVersionNotFound        = errors.New("managed-agent skill version not found")
 	ErrResourceNotFound            = errors.New("managed-agent session resource not found")
 	ErrEventNotFound               = errors.New("managed-agent event not found")
+	ErrSessionRunning              = errors.New("managed-agent session is running")
+	ErrSessionArchived             = errors.New("managed-agent session is archived")
 )
 
 // Repository persists managed-agent session state.
@@ -458,6 +460,17 @@ func (r *Repository) DeleteSessionResourceSecret(ctx context.Context, sessionID,
 	`, strings.TrimSpace(sessionID), strings.TrimSpace(resourceID))
 	if err != nil {
 		return fmt.Errorf("delete session resource secret: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteSessionResourceSecrets(ctx context.Context, sessionID string) error {
+	_, err := r.pool.Exec(ctx, `
+		DELETE FROM managed_agent_session_resource_secrets
+		WHERE session_id = $1
+	`, strings.TrimSpace(sessionID))
+	if err != nil {
+		return fmt.Errorf("delete session resource secrets: %w", err)
 	}
 	return nil
 }

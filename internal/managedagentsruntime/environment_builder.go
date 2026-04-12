@@ -18,12 +18,12 @@ type environmentBuildResources struct {
 	managerVolumeIDs    map[string]string
 }
 
-func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
 	if err != nil {
 		return nil, err
 	}
-	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest)
+	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest, templateClient)
 }
 
 func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifact, error) {
@@ -68,7 +68,7 @@ func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context,
 	return artifact, nil
 }
 
-func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	if artifact == nil {
 		return nil, gatewaymanagedagents.ErrEnvironmentArtifactNotFound
 	}
@@ -85,7 +85,7 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 				return nil, err
 			}
 			if acquired {
-				return m.buildEnvironmentArtifact(ctx, credential, artifact, environment, templateRequest)
+				return m.buildEnvironmentArtifact(ctx, credential, artifact, environment, templateRequest, templateClient)
 			}
 		case gatewaymanagedagents.EnvironmentArtifactStatusBuilding:
 			if time.Now().UTC().After(deadline) {
@@ -103,7 +103,7 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 	}
 }
 
-func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	client, err := m.newSandboxClient(credential.Token, artifact.TeamID)
 	if err != nil {
 		return nil, err
@@ -116,7 +116,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 		if attempt > 1 {
 			logs.WriteString("\n\nretrying environment artifact build\n")
 		}
-		assets, buildLog, buildErr := m.buildEnvironmentArtifactAttempt(ctx, client, environment, templateRequest)
+		assets, buildLog, buildErr := m.buildEnvironmentArtifactAttempt(ctx, client, environment, templateRequest, templateClient)
 		logs.WriteString(buildLog)
 		if buildErr == nil {
 			artifact.Status = gatewaymanagedagents.EnvironmentArtifactStatusReady
@@ -143,13 +143,13 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 	return nil, lastErr
 }
 
-func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
+func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
 	resources, err := m.createEnvironmentBuildResources(ctx, client)
 	if err != nil {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
 	}
 
-	if err := m.ensureManagedTemplate(ctx, client, templateRequest); err != nil {
+	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
 		m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", fmt.Errorf("ensure managed template: %w", err)
 	}

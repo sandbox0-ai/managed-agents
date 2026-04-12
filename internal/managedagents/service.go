@@ -20,6 +20,8 @@ type RuntimeManager interface {
 	StartRun(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, req *WrapperRunRequest) error
 	ResolveActions(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, req *WrapperResolveActionsRequest) (*WrapperResolveActionsResponse, error)
 	InterruptRun(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, runID string) error
+	PauseRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
+	ResumeRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
 	DeleteWrapperSession(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, sessionID string) error
 	DestroyRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
 }
@@ -56,7 +58,7 @@ func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger, op
 	return service
 }
 
-func (s *Service) CreateSession(ctx context.Context, principal Principal, params CreateSessionParams) (*Session, error) {
+func (s *Service) CreateSession(ctx context.Context, principal Principal, credential RequestCredential, params CreateSessionParams, gatewayBaseURL string) (*Session, error) {
 	if strings.TrimSpace(principal.TeamID) == "" {
 		return nil, errors.New("team id is required")
 	}
@@ -124,7 +126,36 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, params
 			return nil, err
 		}
 	}
+	runtime, err := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
+	if err != nil {
+		s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
+		return nil, err
+	}
+	if runtime != nil {
+		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+			s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
+			return nil, err
+		}
+		s.pauseRuntimeBestEffort(ctx, credential, runtime, "create")
+	}
 	return record.toAPI(now), nil
+}
+
+func (s *Service) cleanupFailedCreateRuntime(ctx context.Context, credential RequestCredential, sessionID string, runtime *RuntimeRecord) {
+	if runtime != nil {
+		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
+			s.logger.Warn("failed to destroy runtime after create failure", zap.Error(err), zap.String("session_id", sessionID))
+		}
+		if err := s.repo.DeleteRuntime(ctx, sessionID); err != nil {
+			s.logger.Warn("failed to delete runtime record after create failure", zap.Error(err), zap.String("session_id", sessionID))
+		}
+	}
+	if err := s.repo.DeleteSessionResourceSecrets(ctx, sessionID); err != nil {
+		s.logger.Warn("failed to delete session resource secrets after create failure", zap.Error(err), zap.String("session_id", sessionID))
+	}
+	if err := s.repo.MarkSessionDeleted(ctx, sessionID, time.Now().UTC()); err != nil {
+		s.logger.Warn("failed to mark session deleted after create failure", zap.Error(err), zap.String("session_id", sessionID))
+	}
 }
 
 func (s *Service) ListSessions(ctx context.Context, principal Principal, opts SessionListOptions) ([]*Session, *string, error) {
@@ -192,6 +223,9 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, creden
 			if runtime.ActiveRunID != nil {
 				return nil, errors.New("vault_ids cannot be updated while a run is active")
 			}
+			if err := s.runtime.ResumeRuntime(ctx, credential, runtime); err != nil {
+				return nil, err
+			}
 			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 				return nil, err
 			}
@@ -214,7 +248,22 @@ func (s *Service) DeleteSession(ctx context.Context, principal Principal, creden
 	if err := ensureSessionAccess(record, principal); err != nil {
 		return nil, err
 	}
-	if runtime, err := s.repo.GetRuntime(ctx, sessionID); err == nil {
+	var runtime *RuntimeRecord
+	if existingRuntime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
+		runtime = existingRuntime
+	} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
+		return nil, runtimeErr
+	}
+	if record.Status == "running" || (runtime != nil && runtime.ActiveRunID != nil) {
+		return nil, fmt.Errorf("%w: send user.interrupt before deleting session %s", ErrSessionRunning, sessionID)
+	}
+	if err := s.repo.DeleteSessionResourceSecrets(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	if runtime != nil {
+		if err := s.runtime.ResumeRuntime(ctx, credential, runtime); err != nil {
+			s.logger.Warn("failed to resume runtime before delete", zap.Error(err), zap.String("session_id", sessionID))
+		}
 		if err := s.runtime.DeleteWrapperSession(ctx, credential, runtime, sessionID); err != nil {
 			s.logger.Warn("failed to delete wrapper session", zap.Error(err), zap.String("session_id", sessionID))
 		}
@@ -254,6 +303,9 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	if err := ensureSessionAccess(record, principal); err != nil {
 		return nil, err
 	}
+	if record.ArchivedAt != nil {
+		return nil, fmt.Errorf("%w: archived sessions cannot accept new events", ErrSessionArchived)
+	}
 	processedAt := time.Now().UTC()
 	inputEventMaps := inputEventsToMaps(params.Events)
 	stampedEvents := stampEvents(inputEventMaps, processedAt)
@@ -281,7 +333,24 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		if err := s.runtime.InterruptRun(ctx, credential, runtime, *runtime.ActiveRunID); err != nil {
 			return nil, err
 		}
+		idleEvent := stampEvent(map[string]any{
+			"type":        "session.status_idle",
+			"stop_reason": map[string]any{"type": "end_turn"},
+		}, processedAt)
+		runtime.ActiveRunID = nil
+		runtime.UpdatedAt = processedAt
+		if err := s.repo.UpsertRuntime(ctx, runtime); err != nil {
+			return nil, err
+		}
+		if err := s.repo.AppendEvents(ctx, sessionID, []map[string]any{idleEvent}); err != nil {
+			return nil, err
+		}
+		record = applySessionBatch(record, processedAt, Usage{}, []map[string]any{idleEvent})
+		if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
+			return nil, err
+		}
 		if containsOnlyInterruptEvents(stampedEvents) {
+			s.pauseRuntimeBestEffort(ctx, credential, runtime, "interrupt")
 			return stampedEvents, nil
 		}
 	}
@@ -290,6 +359,9 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 			return nil, errors.New("no pending action to resolve")
 		}
 		if err := ensureResolvesRequiredActions(requiredActionIDs, stampedEvents); err != nil {
+			return nil, err
+		}
+		if err := s.runtime.ResumeRuntime(ctx, credential, runtime); err != nil {
 			return nil, err
 		}
 		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
@@ -344,11 +416,20 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 			return nil, err
 		}
+		if stringValue(nextEvent["type"]) == "session.status_idle" {
+			s.pauseRuntimeBestEffort(ctx, credential, runtime, "requires_action")
+		}
 		return stampedEvents, nil
 	}
+	hadRuntime := runtime != nil
 	runtime, err = s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
 	if err != nil {
 		return nil, err
+	}
+	if hadRuntime {
+		if err := s.runtime.ResumeRuntime(ctx, credential, runtime); err != nil {
+			return nil, err
+		}
 	}
 	bootstrapReq := bootstrapRequestFor(record, engine, runtime)
 	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapReq); err != nil {
@@ -425,9 +506,11 @@ func (s *Service) applyRuntimePayload(ctx context.Context, runtime *RuntimeRecor
 	if strings.TrimSpace(payload.VendorSessionID) != "" {
 		runtime.VendorSessionID = strings.TrimSpace(payload.VendorSessionID)
 	}
+	shouldPause := false
 	for _, event := range stampedEvents {
 		switch stringValue(event["type"]) {
 		case "session.status_idle":
+			shouldPause = true
 			if stopReasonType(event) != "requires_action" {
 				runtime.ActiveRunID = nil
 			}
@@ -440,7 +523,37 @@ func (s *Service) applyRuntimePayload(ctx context.Context, runtime *RuntimeRecor
 		return err
 	}
 	record = applySessionBatch(record, processedAt, payload.UsageDelta, stampedEvents)
-	return s.repo.UpdateSession(ctx, record, engine)
+	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
+		return err
+	}
+	if shouldPause {
+		s.pauseRuntimeInBackgroundBestEffort(ctx, runtime, "runtime_idle")
+	}
+	return nil
+}
+
+func (s *Service) pauseRuntimeBestEffort(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, reason string) {
+	if runtime == nil {
+		return
+	}
+	if err := s.runtime.PauseRuntime(ctx, credential, runtime); err != nil {
+		s.logger.Warn("failed to pause managed-agent runtime", zap.Error(err), zap.String("session_id", runtime.SessionID), zap.String("reason", reason))
+	}
+}
+
+type backgroundRuntimePauser interface {
+	CanPauseRuntimeInBackground() bool
+	PauseRuntimeInBackground(ctx context.Context, runtime *RuntimeRecord) error
+}
+
+func (s *Service) pauseRuntimeInBackgroundBestEffort(ctx context.Context, runtime *RuntimeRecord, reason string) {
+	pauser, ok := s.runtime.(backgroundRuntimePauser)
+	if !ok || !pauser.CanPauseRuntimeInBackground() || runtime == nil {
+		return
+	}
+	if err := pauser.PauseRuntimeInBackground(ctx, runtime); err != nil {
+		s.logger.Warn("failed to pause managed-agent runtime in background", zap.Error(err), zap.String("session_id", runtime.SessionID), zap.String("reason", reason))
+	}
 }
 
 func ensureSessionAccess(record *SessionRecord, principal Principal) error {

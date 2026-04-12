@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -36,7 +37,7 @@ func NewHandler(service *Service, logger *zap.Logger) *Handler {
 }
 
 func (h *Handler) CreateSession(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -50,7 +51,7 @@ func (h *Handler) CreateSession(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	session, err := h.service.CreateSession(c.Request.Context(), principal, params)
+	session, err := h.service.CreateSession(c.Request.Context(), principal, credential, params, requestBaseURL(c))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
@@ -273,6 +274,9 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 				_, _ = c.Writer.Write(body)
 				_, _ = c.Writer.WriteString("\n\n")
 				flusher.Flush()
+				if stringValue(event["type"]) == "session.deleted" {
+					return
+				}
 			}
 		}
 		if time.Now().After(deadline) {
@@ -318,6 +322,8 @@ func (h *Handler) writeServiceError(c *gin.Context, err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, ErrSessionRunning) || errors.Is(err, ErrSessionArchived):
+		writeError(c, http.StatusConflict, "invalid_request_error", err.Error())
 	case strings.Contains(err.Error(), "forbidden"):
 		writeError(c, http.StatusForbidden, "permission_error", err.Error())
 	case strings.Contains(err.Error(), "not found"):

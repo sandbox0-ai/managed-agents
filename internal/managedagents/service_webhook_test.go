@@ -12,7 +12,8 @@ import (
 
 func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	repo := newTestRepository(t)
-	service := NewService(repo, &recordingRuntimeManager{}, nil)
+	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	service := NewService(repo, runtimeManager, nil)
 	now := time.Date(2026, 4, 10, 6, 0, 0, 0, time.UTC)
 	record := &SessionRecord{
 		ID:               "sesn_webhook_123",
@@ -91,6 +92,77 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	}
 	if updatedSession.Status != "idle" {
 		t.Fatalf("session status = %q, want idle", updatedSession.Status)
+	}
+	if len(runtimeManager.backgroundPauseReqs) != 1 {
+		t.Fatalf("background pause calls = %d, want 1", len(runtimeManager.backgroundPauseReqs))
+	}
+}
+
+func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	service := NewService(repo, runtimeManager, nil)
+	now := time.Date(2026, 4, 10, 6, 30, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_webhook_requires_action_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_requires_action_123"
+	runtime := &RuntimeRecord{
+		SessionID:           record.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_requires_action_123",
+		WrapperURL:          "https://wrapper.example.test",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "secret_456",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	payloadJSON, _ := json.Marshal(RuntimeCallbackPayload{
+		SessionID: record.ID,
+		RunID:     activeRunID,
+		Events: []SessionEvent{{
+			Type:       "session.status_idle",
+			StopReason: &SessionStopReason{Type: "requires_action", EventIDs: []string{"tool_1"}},
+		}},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"event_id":   "evt_hook_requires_action_123",
+		"event_type": "agent.event",
+		"sandbox_id": runtime.SandboxID,
+		"payload":    json.RawMessage(payloadJSON),
+	})
+
+	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
+		t.Fatalf("HandleSandboxWebhook: %v", err)
+	}
+	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.ActiveRunID == nil || *updatedRuntime.ActiveRunID != activeRunID {
+		t.Fatalf("active_run_id = %v, want %q", updatedRuntime.ActiveRunID, activeRunID)
+	}
+	if len(runtimeManager.backgroundPauseReqs) != 1 {
+		t.Fatalf("background pause calls = %d, want 1", len(runtimeManager.backgroundPauseReqs))
 	}
 }
 

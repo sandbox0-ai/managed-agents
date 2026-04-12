@@ -2,16 +2,22 @@ package managedagents
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
 
 type recordingRuntimeManager struct {
-	resolveResponse *WrapperResolveActionsResponse
-	bootstrapReqs   []*WrapperSessionBootstrapRequest
-	startRunReqs    []*WrapperRunRequest
-	resolveReqs     []*WrapperResolveActionsRequest
+	resolveResponse        *WrapperResolveActionsResponse
+	bootstrapReqs          []*WrapperSessionBootstrapRequest
+	startRunReqs           []*WrapperRunRequest
+	resolveReqs            []*WrapperResolveActionsRequest
+	interruptRunIDs        []string
+	pauseReqs              []*RuntimeRecord
+	resumeReqs             []*RuntimeRecord
+	backgroundPauseEnabled bool
+	backgroundPauseReqs    []*RuntimeRecord
 }
 
 func (m *recordingRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
@@ -36,7 +42,18 @@ func (m *recordingRuntimeManager) ResolveActions(_ context.Context, _ RequestCre
 	return m.resolveResponse, nil
 }
 
-func (m *recordingRuntimeManager) InterruptRun(context.Context, RequestCredential, *RuntimeRecord, string) error {
+func (m *recordingRuntimeManager) InterruptRun(_ context.Context, _ RequestCredential, _ *RuntimeRecord, runID string) error {
+	m.interruptRunIDs = append(m.interruptRunIDs, runID)
+	return nil
+}
+
+func (m *recordingRuntimeManager) PauseRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
+	m.pauseReqs = append(m.pauseReqs, runtime)
+	return nil
+}
+
+func (m *recordingRuntimeManager) ResumeRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
+	m.resumeReqs = append(m.resumeReqs, runtime)
 	return nil
 }
 
@@ -46,6 +63,167 @@ func (m *recordingRuntimeManager) DeleteWrapperSession(context.Context, RequestC
 
 func (m *recordingRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
 	return nil
+}
+
+func (m *recordingRuntimeManager) CanPauseRuntimeInBackground() bool {
+	return m.backgroundPauseEnabled
+}
+
+func (m *recordingRuntimeManager) PauseRuntimeInBackground(_ context.Context, runtime *RuntimeRecord) error {
+	m.backgroundPauseReqs = append(m.backgroundPauseReqs, runtime)
+	return nil
+}
+
+func TestSendEventsInterruptClearsActiveRunAndMarksIdle(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{}
+	service := NewService(repo, runtimeManager, nil)
+	now := time.Date(2026, 4, 10, 4, 30, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_interrupt_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_active_123"
+	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
+		SessionID:           record.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_123",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "ctl_123",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	events, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.interrupt"}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(events) != 1 || stringValue(events[0]["type"]) != "user.interrupt" {
+		t.Fatalf("returned events = %#v, want one user.interrupt", events)
+	}
+	if len(runtimeManager.interruptRunIDs) != 1 || runtimeManager.interruptRunIDs[0] != activeRunID {
+		t.Fatalf("interruptRunIDs = %#v, want %q", runtimeManager.interruptRunIDs, activeRunID)
+	}
+	if len(runtimeManager.pauseReqs) != 1 {
+		t.Fatalf("pause calls = %d, want 1", len(runtimeManager.pauseReqs))
+	}
+	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.ActiveRunID != nil {
+		t.Fatalf("active run id = %v, want nil", *updatedRuntime.ActiveRunID)
+	}
+	updatedSession, _, err := repo.GetSession(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if updatedSession.Status != "idle" {
+		t.Fatalf("session status = %q, want idle", updatedSession.Status)
+	}
+	storedEvents, _, err := repo.ListEvents(context.Background(), record.ID, EventListOptions{Order: "asc"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(storedEvents) != 2 || stringValue(storedEvents[1]["type"]) != "session.status_idle" {
+		t.Fatalf("stored events = %#v, want interrupt then status_idle", storedEvents)
+	}
+}
+
+func TestSendEventsRejectsArchivedSession(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, &recordingRuntimeManager{}, nil)
+	now := time.Date(2026, 4, 10, 5, 0, 0, 0, time.UTC)
+	archivedAt := now.Add(time.Minute)
+	record := &SessionRecord{
+		ID:               "sesn_archived_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "idle",
+		ArchivedAt:       &archivedAt,
+		CreatedAt:        now,
+		UpdatedAt:        archivedAt,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	_, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.message", Content: []UserContentBlock{{Type: "text", Text: "hello"}}}}}, "http://gateway.test")
+	if !errors.Is(err, ErrSessionArchived) {
+		t.Fatalf("SendEvents error = %v, want ErrSessionArchived", err)
+	}
+}
+
+func TestDeleteSessionRejectsRunningSession(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, &recordingRuntimeManager{}, nil)
+	now := time.Date(2026, 4, 10, 5, 30, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_running_delete_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_active_123"
+	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
+		SessionID:           record.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_123",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "ctl_123",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	_, err := service.DeleteSession(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID)
+	if !errors.Is(err, ErrSessionRunning) {
+		t.Fatalf("DeleteSession error = %v, want ErrSessionRunning", err)
+	}
+	if _, _, err := repo.GetSession(context.Background(), record.ID); err != nil {
+		t.Fatalf("session should still exist: %v", err)
+	}
 }
 
 func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
@@ -115,6 +293,9 @@ func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
 	}
 	if len(runtime.resolveReqs) != 1 {
 		t.Fatalf("resolve calls = %d, want 1", len(runtime.resolveReqs))
+	}
+	if len(runtime.resumeReqs) != 1 {
+		t.Fatalf("resume calls = %d, want 1", len(runtime.resumeReqs))
 	}
 	if len(runtime.bootstrapReqs) != 1 {
 		t.Fatalf("bootstrap calls = %d, want 1", len(runtime.bootstrapReqs))

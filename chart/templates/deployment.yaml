@@ -79,6 +79,13 @@ spec:
                   name: {{ .Values.agentGateway.secretKeys.databaseURL.secretName }}
                   key: {{ .Values.agentGateway.secretKeys.databaseURL.key }}
             {{- end }}
+            {{- if .Values.agentGateway.secretKeys.sandbox0AdminAPIKey.enabled }}
+            - name: {{ .Values.agentGateway.secretKeys.sandbox0AdminAPIKey.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentGateway.secretKeys.sandbox0AdminAPIKey.secretName }}
+                  key: {{ .Values.agentGateway.secretKeys.sandbox0AdminAPIKey.key }}
+            {{- end }}
             {{- with .Values.agentGateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

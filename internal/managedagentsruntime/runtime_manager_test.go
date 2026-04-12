@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	gatewaymanagedagents "github.com/sandbox0-ai/managed-agent/internal/managedagents"
 )
 
 func TestConfigWithDefaults(t *testing.T) {
@@ -24,6 +26,27 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 	if cfg.TemplateMainImage == "" {
 		t.Fatal("TemplateMainImage should not be empty")
+	}
+	if cfg.SandboxTTLSeconds != DefaultSandboxTTLSeconds {
+		t.Fatalf("SandboxTTLSeconds = %d, want %d", cfg.SandboxTTLSeconds, DefaultSandboxTTLSeconds)
+	}
+	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
+		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
+	}
+}
+
+func TestConfigWithDefaultsLeavesHardTTLConfigurable(t *testing.T) {
+	cfg := (Config{SandboxTTLSeconds: 90000, SandboxHardTTLSeconds: 90000}).WithDefaults(0)
+	if cfg.SandboxHardTTLSeconds != 90000 {
+		t.Fatalf("SandboxHardTTLSeconds = %d, want 90000", cfg.SandboxHardTTLSeconds)
+	}
+	if cfg.SandboxTTLSeconds != 90000 {
+		t.Fatalf("SandboxTTLSeconds = %d, want 90000", cfg.SandboxTTLSeconds)
+	}
+
+	cfg = (Config{SandboxTTLSeconds: 90000, SandboxHardTTLSeconds: 60}).WithDefaults(0)
+	if cfg.SandboxTTLSeconds != 60 {
+		t.Fatalf("SandboxTTLSeconds = %d, want 60", cfg.SandboxTTLSeconds)
 	}
 }
 
@@ -140,4 +163,61 @@ func TestNewSandboxClientAddsTeamHeader(t *testing.T) {
 	if _, err := client.ListVolume(context.Background()); err != nil {
 		t.Fatalf("ListVolume returned error: %v", err)
 	}
+}
+
+func TestTemplateClientUsesAdminKeyWithoutTeamHeader(t *testing.T) {
+	seen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = true
+		if r.URL.Path != "/api/v1/templates/managed-agent-claude" {
+			t.Fatalf("path = %q, want template lookup", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_123" {
+			t.Fatalf("Authorization = %q, want admin token", got)
+		}
+		if got := r.Header.Get("X-Team-ID"); got != "" {
+			t.Fatalf("X-Team-ID = %q, want no team header for public template", got)
+		}
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second, SandboxAdminAPIKey: " admin_123 "}}
+	client, err := mgr.templateClient(context.Background(), gatewayCredential("user_123"), "team_123")
+	if err != nil {
+		t.Fatalf("templateClient returned error: %v", err)
+	}
+	_, _ = client.GetTemplate(context.Background(), "managed-agent-claude")
+	if !seen {
+		t.Fatal("expected template client to issue a request")
+	}
+}
+
+func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
+	seen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = true
+		if got := r.Header.Get("Authorization"); got != "Bearer user_123" {
+			t.Fatalf("Authorization = %q, want user token", got)
+		}
+		if got := r.Header.Get("X-Team-ID"); got != "team_123" {
+			t.Fatalf("X-Team-ID = %q, want team header", got)
+		}
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.templateClient(context.Background(), gatewayCredential("user_123"), "team_123")
+	if err != nil {
+		t.Fatalf("templateClient returned error: %v", err)
+	}
+	_, _ = client.GetTemplate(context.Background(), "managed-agent-claude")
+	if !seen {
+		t.Fatal("expected template client to issue a request")
+	}
+}
+
+func gatewayCredential(token string) gatewaymanagedagents.RequestCredential {
+	return gatewaymanagedagents.RequestCredential{Token: token}
 }
