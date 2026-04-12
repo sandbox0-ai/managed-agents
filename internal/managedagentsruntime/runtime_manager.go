@@ -43,7 +43,7 @@ func (c Config) WithDefaults(httpPort int) Config {
 		c.ClaudeTemplate = "managed-agent-claude"
 	}
 	if strings.TrimSpace(c.TemplateMainImage) == "" {
-		c.TemplateMainImage = "ghcr.io/sandbox0-ai/managed-agents/agent-wrapper-claude:latest"
+		c.TemplateMainImage = "sandbox0ai/managed-agents:wrapper-latest"
 	}
 	if strings.TrimSpace(c.TemplateSidecarImage) == "" {
 		c.TemplateSidecarImage = c.TemplateMainImage

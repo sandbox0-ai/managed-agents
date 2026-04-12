@@ -26,12 +26,16 @@ jobs:
     env:
       KUBECONFIG: /home/runner/.kube/config
       HELM_RELEASE: ${{ vars.MANAGED_AGENTS_HELM_RELEASE || 'managed-agents' }}
-      KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'managed-agents' }}
-      IMAGE_REGISTRY: ${{ vars.MANAGED_AGENTS_IMAGE_REGISTRY || 'ghcr.io/sandbox0-ai/managed-agents' }}
+      KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'sandbox0-cloud' }}
+      IMAGE_REPOSITORY: ${{ vars.MANAGED_AGENTS_IMAGE_REPOSITORY || 'sandbox0ai/managed-agents' }}
       SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL }}
       RUNTIME_REGION_ID: ${{ vars.MANAGED_AGENTS_RUNTIME_REGION_ID || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
       CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
+      INGRESS_ENABLED: ${{ vars.MANAGED_AGENTS_INGRESS_ENABLED || 'false' }}
+      INGRESS_CLASS_NAME: ${{ vars.MANAGED_AGENTS_INGRESS_CLASS_NAME || 'nginx' }}
+      INGRESS_HOST: ${{ vars.MANAGED_AGENTS_INGRESS_HOST || '' }}
+      INGRESS_TLS_SECRET_NAME: ${{ vars.MANAGED_AGENTS_INGRESS_TLS_SECRET_NAME || '' }}
       DATABASE_URL: ${{ secrets.MANAGED_AGENTS_DATABASE_URL }}
       ANTHROPIC_SKILLS_API_KEY: ${{ secrets.MANAGED_AGENTS_ANTHROPIC_SKILLS_API_KEY }}
 
@@ -73,6 +77,8 @@ jobs:
           fi
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "gateway_tag=gateway-${TAG#gateway-}" >> "$GITHUB_OUTPUT"
+          echo "wrapper_tag=wrapper-${TAG#wrapper-}" >> "$GITHUB_OUTPUT"
 
       - name: Validate required settings
         shell: bash
@@ -86,6 +92,11 @@ jobs:
 
           if [[ -z "${SANDBOX0_BASE_URL}" ]]; then
             echo "MANAGED_AGENTS_SANDBOX0_BASE_URL variable is required."
+            exit 1
+          fi
+
+          if [[ "${INGRESS_ENABLED}" == "true" && -z "${INGRESS_HOST}" ]]; then
+            echo "MANAGED_AGENTS_INGRESS_HOST variable is required when ingress is enabled."
             exit 1
           fi
 
@@ -114,13 +125,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          helm upgrade --install "${HELM_RELEASE}" ./chart \
-            --namespace "${KUBE_NAMESPACE}" \
-            --set-string agentGateway.image.repository="${IMAGE_REGISTRY}/agent-gateway" \
-            --set-string agentGateway.image.tag="${{ steps.image.outputs.tag }}" \
-            --set-string agentGateway.env.sandbox0BaseURL="${SANDBOX0_BASE_URL}" \
-            --set-string agentGateway.env.runtimeRegionID="${RUNTIME_REGION_ID}" \
-            --set-string agentGateway.env.runtimeEnabled="${RUNTIME_ENABLED}" \
-            --set-string agentGateway.env.claudeTemplate="${CLAUDE_TEMPLATE}" \
-            --set-string agentGateway.env.templateMainImage="${IMAGE_REGISTRY}/agent-wrapper-claude:${{ steps.image.outputs.tag }}" \
-            --set-string agentGateway.env.templateSidecarImage="${IMAGE_REGISTRY}/agent-wrapper-claude:${{ steps.image.outputs.tag }}"
+          make helm-upgrade \
+            HELM_RELEASE="${HELM_RELEASE}" \
+            KUBE_NAMESPACE="${KUBE_NAMESPACE}" \
+            IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" \
+            GATEWAY_TAG="${{ steps.image.outputs.gateway_tag }}" \
+            WRAPPER_TAG="${{ steps.image.outputs.wrapper_tag }}" \
+            SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL}" \
+            RUNTIME_REGION_ID="${RUNTIME_REGION_ID}" \
+            INGRESS_ENABLED="${INGRESS_ENABLED}" \
+            INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME}" \
+            INGRESS_HOST="${INGRESS_HOST}" \
+            INGRESS_TLS_SECRET_NAME="${INGRESS_TLS_SECRET_NAME}" \
+            HELM_EXTRA_ARGS="--set-string agentGateway.env.runtimeEnabled=${RUNTIME_ENABLED} --set-string agentGateway.env.claudeTemplate=${CLAUDE_TEMPLATE}"
+
+      - name: Wait for rollout
+        shell: bash
+        run: kubectl -n "${KUBE_NAMESPACE}" rollout status deploy/${HELM_RELEASE}-agent-gateway --timeout=5m
+
+      - name: Smoke health endpoint
+        if: ${{ vars.MANAGED_AGENTS_INGRESS_HOST != '' }}
+        shell: bash
+        run: curl -fsS "https://${INGRESS_HOST}/healthz"

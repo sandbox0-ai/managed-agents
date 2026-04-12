@@ -10,6 +10,10 @@ WRAPPER_TAG ?= wrapper-testenv
 
 SANDBOX0_BASE_URL ?= http://fullmode-cluster-gateway.sandbox0-system.svc.cluster.local:30080
 RUNTIME_REGION_ID ?= default
+INGRESS_ENABLED ?= false
+INGRESS_CLASS_NAME ?= nginx
+INGRESS_HOST ?= agents.sandbox0.ai
+INGRESS_TLS_SECRET_NAME ?= sandbox0-ai-wildcard-tls
 
 HELM_SET_ARGS := \
 	--set-string agentGateway.image.repository=$(IMAGE_REPOSITORY) \
@@ -18,7 +22,14 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.env.sandbox0BaseURL=$(SANDBOX0_BASE_URL) \
 	--set-string agentGateway.env.runtimeRegionID=$(RUNTIME_REGION_ID) \
 	--set-string agentGateway.env.templateMainImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
-	--set-string agentGateway.env.templateSidecarImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG)
+	--set-string agentGateway.env.templateSidecarImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
+	--set agentGateway.ingress.enabled=$(INGRESS_ENABLED) \
+	--set-string agentGateway.ingress.className=$(INGRESS_CLASS_NAME) \
+	--set-string agentGateway.ingress.hosts[0].host=$(INGRESS_HOST) \
+	--set-string agentGateway.ingress.hosts[0].paths[0].path=/ \
+	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
+	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
+	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
 
 .PHONY: helm-lint helm-template helm-upgrade
 
