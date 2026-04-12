@@ -188,7 +188,9 @@ test('agent-warper persists bootstrap diagnostic events during bootstrap', async
 });
 
 test('RuntimeStore falls back to in-memory state when persistence is unavailable', () => {
-  const store = new RuntimeStore('/proc/agent-wrapper-state');
+  const parentFile = path.join(os.tmpdir(), `agent-wrapper-state-${Date.now()}`);
+  fs.writeFileSync(parentFile, 'not a directory', 'utf8');
+  const store = new RuntimeStore(path.join(parentFile, 'child'));
   const session = store.upsertSession('sesn_mem', () => ({ session_id: 'sesn_mem', ok: true }));
 
   assert.deepEqual(session, { session_id: 'sesn_mem', ok: true });
