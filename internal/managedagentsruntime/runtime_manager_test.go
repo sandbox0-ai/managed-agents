@@ -2,6 +2,8 @@ package managedagentsruntime
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -271,6 +273,60 @@ func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
 	_, _ = client.GetTemplate(context.Background(), "managed-agent-claude")
 	if !seen {
 		t.Fatal("expected template client to issue a request")
+	}
+}
+
+func TestCreateEmptyEnvironmentArtifactVolumesCreatesROXVolumesWithoutBuilderSandbox(t *testing.T) {
+	created := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxvolumes" {
+			t.Fatalf("unexpected request %s %s; empty environments must not claim a builder sandbox", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode create volume request: %v", err)
+		}
+		if got := body["access_mode"]; got != "ROX" {
+			t.Fatalf("access_mode = %#v, want ROX", got)
+		}
+		created++
+		volumeID := fmt.Sprintf("vol_%d", created)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"id":          volumeID,
+				"team_id":     "team_123",
+				"user_id":     "user_123",
+				"cache_size":  "",
+				"buffer_size": "",
+				"access_mode": "ROX",
+				"created_at":  "2026-04-12T00:00:00Z",
+				"updated_at":  "2026-04-12T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	assets, err := createEmptyEnvironmentArtifactVolumes(context.Background(), client)
+	if err != nil {
+		t.Fatalf("createEmptyEnvironmentArtifactVolumes returned error: %v", err)
+	}
+	managers := gatewaymanagedagents.ManagedEnvironmentPackageManagers()
+	if created != len(managers) {
+		t.Fatalf("created volumes = %d, want %d", created, len(managers))
+	}
+	for index, manager := range managers {
+		want := fmt.Sprintf("vol_%d", index+1)
+		if got := assets.VolumeIDForManager(manager); got != want {
+			t.Fatalf("%s volume = %q, want %q", manager, got, want)
+		}
 	}
 }
 

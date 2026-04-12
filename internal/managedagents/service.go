@@ -30,6 +30,7 @@ const (
 	runtimeWebhookLeaseDuration = 2 * time.Minute
 	runtimeWebhookPollInterval  = 100 * time.Millisecond
 	runtimeWebhookMaxAttempts   = 5
+	failedCreateCleanupTimeout  = 2 * time.Minute
 )
 
 // Service coordinates session truth and runtime orchestration.
@@ -158,6 +159,10 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 }
 
 func (s *Service) cleanupFailedCreateRuntime(ctx context.Context, credential RequestCredential, sessionID string, runtime *RuntimeRecord) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedCreateCleanupTimeout)
+	defer cancel()
+	ctx = cleanupCtx
+
 	if runtime != nil {
 		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
 			s.logger.Warn("failed to destroy runtime after create failure", zap.Error(err), zap.String("session_id", sessionID))
