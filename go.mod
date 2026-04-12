@@ -9,7 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/oapi-codegen/runtime v1.4.0
 	github.com/pressly/goose/v3 v3.26.0
-	github.com/sandbox0-ai/sdk-go v0.2.9
+	github.com/sandbox0-ai/sdk-go v0.2.10
 	go.uber.org/zap v1.27.1
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -73,5 +73,3 @@ require (
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-replace github.com/sandbox0-ai/sdk-go => ../sdk-go
