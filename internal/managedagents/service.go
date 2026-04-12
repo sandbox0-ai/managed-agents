@@ -84,20 +84,23 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	if err := ensureEnvironmentUsable(environment); err != nil {
 		return nil, err
 	}
+	title, err := normalizeOptionalText(params.Title, "title", 500)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := normalizeMetadataMap(params.Metadata, 16, 64, 512)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateManagedSessionMetadata(metadata); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	resources, resourceSecrets, err := s.validateSessionDependencies(ctx, principal, environmentID, vaultIDs, cloneMapSlice(params.Resources))
 	if err != nil {
 		return nil, err
 	}
 	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
-	if err != nil {
-		return nil, err
-	}
-	title, err := normalizeOptionalText(params.Title, "title", 500)
-	if err != nil {
-		return nil, err
-	}
-	metadata, err := normalizeMetadataMap(params.Metadata, 16, 64, 512)
 	if err != nil {
 		return nil, err
 	}
@@ -202,8 +205,14 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, creden
 		}
 	}
 	if params.Metadata.Set {
+		if err := validateManagedSessionMetadataPatch(record.Metadata, params.Metadata); err != nil {
+			return nil, err
+		}
 		metadata, err := mergeMetadataPatch(record.Metadata, params.Metadata, 16, 64, 512)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedSessionMetadata(metadata); err != nil {
 			return nil, err
 		}
 		record.Metadata = metadata

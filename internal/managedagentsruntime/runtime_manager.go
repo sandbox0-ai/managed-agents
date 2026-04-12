@@ -146,6 +146,10 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if err != nil {
 		return nil, fmt.Errorf("resolve environment artifact: %w", err)
 	}
+	sandboxTTLSeconds, sandboxHardTTLSeconds, err := m.sandboxTTLsForSession(session)
+	if err != nil {
+		return nil, err
+	}
 	workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("create workspace volume: %w", err)
@@ -186,8 +190,8 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		sandbox0sdk.WithSandboxBootstrapMount(workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
 		sandbox0sdk.WithSandboxBootstrapMount(engineStateVolumeID, m.cfg.EngineStateMountPath, nil),
 		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
-		sandbox0sdk.WithSandboxTTL(int32(m.cfg.SandboxTTLSeconds)),
-		sandbox0sdk.WithSandboxHardTTL(int32(m.cfg.SandboxHardTTLSeconds)),
+		sandbox0sdk.WithSandboxTTL(int32(sandboxTTLSeconds)),
+		sandbox0sdk.WithSandboxHardTTL(int32(sandboxHardTTLSeconds)),
 		sandbox0sdk.WithSandboxWebhook(m.runtimeWebhookURL(gatewayBaseURL), controlToken),
 		sandbox0sdk.WithSandboxEnvVars(map[string]string{
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
@@ -405,6 +409,30 @@ func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *apispec
 		return request.TemplateID
 	}
 	return m.templateForVendor(vendor)
+}
+
+func (m *SDKRuntimeManager) sandboxTTLsForSession(session *gatewaymanagedagents.SessionRecord) (int, int, error) {
+	ttlSeconds := m.cfg.SandboxTTLSeconds
+	if ttlSeconds <= 0 {
+		ttlSeconds = DefaultSandboxTTLSeconds
+	}
+	hardTTLSeconds := m.cfg.SandboxHardTTLSeconds
+	if hardTTLSeconds <= 0 {
+		hardTTLSeconds = DefaultSandboxHardTTLSeconds
+	}
+	if session != nil {
+		config, err := gatewaymanagedagents.ManagedSessionConfigFromMetadata(session.Metadata)
+		if err != nil {
+			return 0, 0, err
+		}
+		if config.SandboxHardTTLSeconds != nil {
+			hardTTLSeconds = *config.SandboxHardTTLSeconds
+		}
+	}
+	if hardTTLSeconds > 0 && ttlSeconds > hardTTLSeconds {
+		ttlSeconds = hardTTLSeconds
+	}
+	return ttlSeconds, hardTTLSeconds, nil
 }
 
 func sortedMapKeys(in map[string]any) []string {

@@ -50,6 +50,48 @@ func TestConfigWithDefaultsLeavesHardTTLConfigurable(t *testing.T) {
 	}
 }
 
+func TestSandboxTTLsForSessionUsesMetadataHardTTL(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600, SandboxHardTTLSeconds: 0}}
+	ttl, hardTTL, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
+		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "900"},
+	})
+	if err != nil {
+		t.Fatalf("sandboxTTLsForSession: %v", err)
+	}
+	if ttl != 900 {
+		t.Fatalf("ttl = %d, want 900", ttl)
+	}
+	if hardTTL != 900 {
+		t.Fatalf("hardTTL = %d, want 900", hardTTL)
+	}
+}
+
+func TestSandboxTTLsForSessionMetadataZeroOverridesConfiguredHardTTL(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600, SandboxHardTTLSeconds: 86400}}
+	ttl, hardTTL, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
+		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "0"},
+	})
+	if err != nil {
+		t.Fatalf("sandboxTTLsForSession: %v", err)
+	}
+	if ttl != 3600 {
+		t.Fatalf("ttl = %d, want 3600", ttl)
+	}
+	if hardTTL != 0 {
+		t.Fatalf("hardTTL = %d, want 0", hardTTL)
+	}
+}
+
+func TestSandboxTTLsForSessionRejectsInvalidMetadataHardTTL(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600}}
+	_, _, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
+		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "forever"},
+	})
+	if err == nil {
+		t.Fatal("sandboxTTLsForSession error = nil, want invalid hard_ttl rejection")
+	}
+}
+
 func TestCanonicalWrapperURL(t *testing.T) {
 	tests := []struct {
 		name    string

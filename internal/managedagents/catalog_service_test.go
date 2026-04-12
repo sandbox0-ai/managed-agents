@@ -577,6 +577,38 @@ func TestCreateSessionRejectsEmptyVaultID(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRejectsInvalidHardTTLMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &createSessionRuntimeManager{}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	_, err := createTestSession(ctx, service, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+		Metadata: map[string]string{
+			ManagedAgentsSessionHardTTLSecondsKey: "-1",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentsSessionHardTTLSecondsKey) {
+		t.Fatalf("CreateSession error = %v, want hard_ttl metadata rejection", err)
+	}
+	if len(runtime.ensureCalls) != 0 {
+		t.Fatalf("EnsureRuntime calls = %d, want 0", len(runtime.ensureCalls))
+	}
+}
+
 func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
@@ -1136,6 +1168,49 @@ func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 	}
 	if len(runtime.bootstrapReqs) != 0 {
 		t.Fatalf("bootstrap calls = %d, want 0", len(runtime.bootstrapReqs))
+	}
+}
+
+func TestUpdateSessionRejectsHardTTLMetadataChange(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	session, err := createTestSession(ctx, service, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+		Metadata: map[string]string{
+			ManagedAgentsSessionHardTTLSecondsKey: "3600",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	newValue := "0"
+	_, err = service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
+		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{ManagedAgentsSessionHardTTLSecondsKey: &newValue}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be changed") {
+		t.Fatalf("UpdateSession error = %v, want immutable hard_ttl rejection", err)
+	}
+	stored, _, err := repo.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got := stored.Metadata[ManagedAgentsSessionHardTTLSecondsKey]; got != "3600" {
+		t.Fatalf("stored hard_ttl metadata = %q, want 3600", got)
 	}
 }
 
