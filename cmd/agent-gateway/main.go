@@ -31,6 +31,7 @@ type config struct {
 	DatabaseMaxConns       int32
 	DatabaseMinConns       int32
 	Sandbox0BaseURL        string
+	Sandbox0AuthBaseURL    string
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
 	AnthropicSkillsBaseURL string
@@ -83,7 +84,7 @@ func main() {
 	}
 
 	authenticator, err := httpauth.NewSandbox0Authenticator(httpauth.Sandbox0AuthenticatorConfig{
-		BaseURL: cfg.Sandbox0BaseURL,
+		BaseURL: cfg.Sandbox0AuthBaseURL,
 		Timeout: cfg.Sandbox0Timeout,
 		Logger:  logger,
 	})
@@ -150,7 +151,11 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("starting agent-gateway", zap.String("addr", cfg.HTTPAddr), zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL))
+		logger.Info("starting agent-gateway",
+			zap.String("addr", cfg.HTTPAddr),
+			zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL),
+			zap.String("sandbox0_auth_base_url", cfg.Sandbox0AuthBaseURL),
+		)
 		errCh <- server.ListenAndServe()
 	}()
 
@@ -182,6 +187,7 @@ func loadConfig() (config, error) {
 		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
 		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
 		Sandbox0BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_BASE_URL")), "/"),
+		Sandbox0AuthBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL")), "/"),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
 		AnthropicSkillsBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL")), "/"),
@@ -205,6 +211,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.Sandbox0BaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_SANDBOX0_BASE_URL is required")
+	}
+	if cfg.Sandbox0AuthBaseURL == "" {
+		cfg.Sandbox0AuthBaseURL = cfg.Sandbox0BaseURL
 	}
 	return cfg, nil
 }

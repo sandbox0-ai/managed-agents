@@ -29,6 +29,7 @@ jobs:
       KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'sandbox0-cloud' }}
       IMAGE_REPOSITORY: ${{ vars.MANAGED_AGENTS_IMAGE_REPOSITORY || 'sandbox0ai/managed-agents' }}
       SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL }}
+      SANDBOX0_AUTH_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_AUTH_BASE_URL || '' }}
       RUNTIME_REGION_ID: ${{ vars.MANAGED_AGENTS_RUNTIME_REGION_ID || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
       CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
@@ -38,6 +39,7 @@ jobs:
       INGRESS_TLS_SECRET_NAME: ${{ vars.MANAGED_AGENTS_INGRESS_TLS_SECRET_NAME || '' }}
       DATABASE_URL: ${{ secrets.MANAGED_AGENTS_DATABASE_URL }}
       ANTHROPIC_SKILLS_API_KEY: ${{ secrets.MANAGED_AGENTS_ANTHROPIC_SKILLS_API_KEY }}
+      SMOKE_API_KEY: ${{ secrets.MANAGED_AGENTS_SMOKE_API_KEY }}
 
     steps:
       - name: Checkout managed-agents
@@ -132,6 +134,7 @@ jobs:
             GATEWAY_TAG="${{ steps.image.outputs.gateway_tag }}" \
             WRAPPER_TAG="${{ steps.image.outputs.wrapper_tag }}" \
             SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL}" \
+            SANDBOX0_AUTH_BASE_URL="${SANDBOX0_AUTH_BASE_URL}" \
             RUNTIME_REGION_ID="${RUNTIME_REGION_ID}" \
             INGRESS_ENABLED="${INGRESS_ENABLED}" \
             INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME}" \
@@ -146,4 +149,14 @@ jobs:
       - name: Smoke health endpoint
         if: ${{ vars.MANAGED_AGENTS_INGRESS_HOST != '' }}
         shell: bash
-        run: curl --retry 12 --retry-all-errors --retry-delay 5 -fsS "https://${INGRESS_HOST}/healthz"
+        run: |
+          set -euo pipefail
+
+          curl --retry 12 --retry-all-errors --retry-delay 5 -fsS "https://${INGRESS_HOST}/healthz"
+
+          if [[ -n "${SMOKE_API_KEY}" ]]; then
+            curl --retry 12 --retry-all-errors --retry-delay 5 -fsS \
+              -H "Authorization: Bearer ${SMOKE_API_KEY}" \
+              -H "Anthropic-Beta: managed-agents-2026-04-01" \
+              "https://${INGRESS_HOST}/v1/environments?limit=1" >/dev/null
+          fi

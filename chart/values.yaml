@@ -43,6 +43,7 @@ agentGateway:
     databaseMaxConns: 10
     databaseMinConns: 1
     sandbox0BaseURL: ""
+    sandbox0AuthBaseURL: ""
     sandbox0Timeout: 60s
     runtimeEnabled: true
     runtimeRegionID: ""

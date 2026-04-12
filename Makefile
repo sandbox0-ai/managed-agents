@@ -9,6 +9,7 @@ GATEWAY_TAG ?= gateway-testenv
 WRAPPER_TAG ?= wrapper-testenv
 
 SANDBOX0_BASE_URL ?= http://fullmode-cluster-gateway.sandbox0-system.svc.cluster.local:30080
+SANDBOX0_AUTH_BASE_URL ?=
 RUNTIME_REGION_ID ?= default
 INGRESS_ENABLED ?= false
 INGRESS_CLASS_NAME ?= nginx
@@ -20,6 +21,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.image.tag=$(GATEWAY_TAG) \
 	--set-string agentGateway.image.pullPolicy=IfNotPresent \
 	--set-string agentGateway.env.sandbox0BaseURL=$(SANDBOX0_BASE_URL) \
+	--set-string agentGateway.env.sandbox0AuthBaseURL=$(SANDBOX0_AUTH_BASE_URL) \
 	--set-string agentGateway.env.runtimeRegionID=$(RUNTIME_REGION_ID) \
 	--set-string agentGateway.env.templateMainImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
 	--set-string agentGateway.env.templateSidecarImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
