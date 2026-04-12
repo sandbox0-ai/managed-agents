@@ -7,6 +7,19 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, resolve));
 }
 
+function closeServer(server) {
+  server.closeAllConnections?.();
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 test('managed-agent webhook delivery retries transient callback failures', async () => {
   let requests = 0;
   const server = createServer((req, res) => {
@@ -32,7 +45,7 @@ test('managed-agent webhook delivery retries transient callback failures', async
 
   assert.deepEqual(result, { ok: true });
   assert.equal(requests, 2);
-  server.close();
+  await closeServer(server);
 });
 
 test('managed-agent webhook delivery does not retry client errors', async () => {
@@ -56,5 +69,5 @@ test('managed-agent webhook delivery does not retry client errors', async () => 
     /failed with 400/,
   );
   assert.equal(requests, 1);
-  server.close();
+  await closeServer(server);
 });

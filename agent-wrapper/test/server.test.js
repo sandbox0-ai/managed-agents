@@ -6,6 +6,19 @@ import path from 'node:path';
 import { createServer } from '../src/server.js';
 import { RuntimeStore } from '../src/runtime/store.js';
 
+function closeServer(server) {
+  server.closeAllConnections?.();
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
 class FakeRuntime {
   constructor() {
     this.interrupted = new Set();
@@ -62,7 +75,7 @@ test('agent-warper bootstraps a session and starts a run', async () => {
   assert.equal(callbacks.length, 1);
   assert.equal(callbacks[0].vendor_session_id, 'vendor_123');
 
-  server.close();
+  await closeServer(server);
 });
 
 test('agent-warper returns action resolution state from runtime', async () => {
@@ -92,7 +105,7 @@ test('agent-warper returns action resolution state from runtime', async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { resolved_count: 1, remaining_action_ids: ['evt_2'] });
 
-  server.close();
+  await closeServer(server);
 });
 
 test('agent-warper ignores vendor-neutral bootstrap fields and stays Claude-specific', async () => {
@@ -116,7 +129,7 @@ test('agent-warper ignores vendor-neutral bootstrap fields and stays Claude-spec
     vendor_session_id: null,
   });
 
-  server.close();
+  await closeServer(server);
 });
 
 test('agent-warper persists preload skill names during bootstrap', async () => {
@@ -139,7 +152,7 @@ test('agent-warper persists preload skill names during bootstrap', async () => {
   const store = new RuntimeStore(stateDir);
   assert.deepEqual(store.getSession('sesn_skill')?.skill_names, ['demo-skill', 'search']);
 
-  server.close();
+  await closeServer(server);
 });
 
 test('agent-warper persists bootstrap diagnostic events during bootstrap', async () => {
@@ -171,7 +184,7 @@ test('agent-warper persists bootstrap diagnostic events during bootstrap', async
   const store = new RuntimeStore(stateDir);
   assert.deepEqual(store.getSession('sesn_bootstrap')?.bootstrap_events, bootstrapEvents);
 
-  server.close();
+  await closeServer(server);
 });
 
 test('RuntimeStore falls back to in-memory state when persistence is unavailable', () => {
