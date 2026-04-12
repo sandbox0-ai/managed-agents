@@ -8,12 +8,11 @@ import (
 	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
 )
 
-func TestTemplateRequestForEnvironmentKeepsSharedTemplateStable(t *testing.T) {
+func TestTemplateRequestForEnvironmentKeepsWarmTemplateStable(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
-		Enabled:              true,
-		ClaudeTemplate:       "managed-agent-claude",
-		TemplateMainImage:    "example.com/main:latest",
-		TemplateSidecarImage: "example.com/sidecar:latest",
+		Enabled:           true,
+		ClaudeTemplate:    "managed-agent-claude",
+		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), nil)
 	if err != nil {
 		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)

@@ -25,9 +25,6 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.TemplateMainImage == "" {
 		t.Fatal("TemplateMainImage should not be empty")
 	}
-	if cfg.TemplateSidecarImage != cfg.TemplateMainImage {
-		t.Fatalf("TemplateSidecarImage = %q, want %q", cfg.TemplateSidecarImage, cfg.TemplateMainImage)
-	}
 }
 
 func TestCanonicalWrapperURL(t *testing.T) {

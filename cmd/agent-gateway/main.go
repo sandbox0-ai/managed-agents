@@ -43,7 +43,6 @@ type config struct {
 	ClaudeTemplate         string
 	TemplateManifestPath   string
 	TemplateMainImage      string
-	TemplateSidecarImage   string
 	WrapperPort            int
 	WorkspaceMountPath     string
 	EngineStateMountPath   string
@@ -111,7 +110,6 @@ func main() {
 		ClaudeTemplate:         cfg.ClaudeTemplate,
 		TemplateManifestPath:   cfg.TemplateManifestPath,
 		TemplateMainImage:      cfg.TemplateMainImage,
-		TemplateSidecarImage:   cfg.TemplateSidecarImage,
 		WrapperPort:            cfg.WrapperPort,
 		WorkspaceMountPath:     cfg.WorkspaceMountPath,
 		EngineStateMountPath:   cfg.EngineStateMountPath,
@@ -199,7 +197,6 @@ func loadConfig() (config, error) {
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
 		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
 		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
-		TemplateSidecarImage:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE")),
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
 		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),

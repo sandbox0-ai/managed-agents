@@ -1,63 +1,25 @@
 template_id: ${MANAGED_AGENT_TEMPLATE_ID}
 spec:
   displayName: Claude Managed Agent
-  description: Sandbox template for the Claude managed-agent wrapper sidecar.
+  description: Sandbox template for the Claude managed-agent wrapper warm process.
   mainContainer:
     image: ${MANAGED_AGENT_TEMPLATE_MAIN_IMAGE}
     resources:
-      cpu: 250m
-      memory: 1Gi
-  sidecars:
-    - name: agent-wrapper
-      image: ${MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE}
-      env:
-        - name: PORT
-          value: "${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}"
-        - name: AGENT_WRAPPER_STATE_DIR
-          value: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
-      resources:
-        cpu: 250m
-        memory: 1Gi
-      mounts:
-        - name: workspace
-          mountPath: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH}
-        - name: engine-state
-          mountPath: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
-        - name: environment-apt
-          mountPath: /opt/managed-env/apt
-        - name: environment-cargo
-          mountPath: /opt/managed-env/cargo
-        - name: environment-gem
-          mountPath: /opt/managed-env/gem
-        - name: environment-go
-          mountPath: /opt/managed-env/go
-        - name: environment-npm
-          mountPath: /opt/managed-env/npm
-        - name: environment-pip
-          mountPath: /opt/managed-env/pip
-      readinessProbe:
-        httpGet:
-          path: /healthz
-          port: ${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}
-        initialDelaySeconds: 2
-        periodSeconds: 2
-  sharedVolumes:
-    - name: workspace
-      mountPath: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH}
-    - name: engine-state
-      mountPath: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
-    - name: environment-apt
-      mountPath: /opt/managed-env/apt
-    - name: environment-cargo
-      mountPath: /opt/managed-env/cargo
-    - name: environment-gem
-      mountPath: /opt/managed-env/gem
-    - name: environment-go
-      mountPath: /opt/managed-env/go
-    - name: environment-npm
-      mountPath: /opt/managed-env/npm
-    - name: environment-pip
-      mountPath: /opt/managed-env/pip
+      cpu: 500m
+      memory: 2Gi
+  warmProcesses:
+    - type: cmd
+      alias: agent-wrapper
+      command:
+        - node
+        - src/index.js
+      cwd: /app
+      envVars:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        PORT: "${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}"
+        AGENT_WRAPPER_STATE_DIR: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
+        AGENT_WRAPPER_DEFAULT_VENDOR: claude
+        NODE_EXTRA_CA_CERTS: /var/run/sandbox0/netd/mitm-ca.crt
   network:
     mode: allow-all
   pool:

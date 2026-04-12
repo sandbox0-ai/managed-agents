@@ -28,10 +28,10 @@ var managedEnvironmentPackageManagers = []string{"apt", "cargo", "gem", "go", "n
 
 func defaultEnvironmentArtifactCompatibility() map[string]any {
 	return map[string]any{
-		"template_family": "managed-agent-claude-shared-v1",
+		"template_family": "managed-agent-claude-warm-v1",
 		"os":              runtime.GOOS,
 		"arch":            runtime.GOARCH,
-		"base_image":      "managed-agent-claude-shared-v1",
+		"base_image":      "managed-agent-claude-warm-v1",
 	}
 }
 

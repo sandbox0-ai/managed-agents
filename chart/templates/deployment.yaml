@@ -78,8 +78,6 @@ spec:
               value: {{ .Values.agentGateway.env.templateManifestPath | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MAIN_IMAGE
               value: {{ .Values.agentGateway.env.templateMainImage | quote }}
-            - name: MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE
-              value: {{ .Values.agentGateway.env.templateSidecarImage | quote }}
             {{- if .Values.agentGateway.secretKeys.databaseURL.enabled }}
             - name: {{ .Values.agentGateway.secretKeys.databaseURL.envName }}
               valueFrom:

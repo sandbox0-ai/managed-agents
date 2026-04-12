@@ -59,7 +59,6 @@ agentGateway:
     anthropicSkillsTimeout: 15s
     templateManifestPath: ""
     templateMainImage: sandbox0ai/managed-agents:wrapper-latest
-    templateSidecarImage: sandbox0ai/managed-agents:wrapper-latest
   extraEnv: []
   envFromSecrets: []
   envFromConfigMaps: []

@@ -24,7 +24,6 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.env.sandbox0AuthBaseURL=$(SANDBOX0_AUTH_BASE_URL) \
 	--set-string agentGateway.env.runtimeRegionID=$(RUNTIME_REGION_ID) \
 	--set-string agentGateway.env.templateMainImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
-	--set-string agentGateway.env.templateSidecarImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
 	--set agentGateway.ingress.enabled=$(INGRESS_ENABLED) \
 	--set-string agentGateway.ingress.className=$(INGRESS_CLASS_NAME) \
 	--set-string agentGateway.ingress.hosts[0].host=$(INGRESS_HOST) \

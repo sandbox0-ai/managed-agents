@@ -28,13 +28,13 @@ func TestEnvironmentArtifactDigestStableAndCompatibilitySensitive(t *testing.T) 
 		},
 	})
 	compatibilityA := map[string]any{
-		"template_family": "managed-agent-claude-shared-v1",
+		"template_family": "managed-agent-claude-warm-v1",
 		"os":              "linux",
 		"arch":            "amd64",
-		"base_image":      "shared-image-v1",
+		"base_image":      "warm-image-v1",
 	}
 	compatibilityB := cloneMap(compatibilityA)
-	compatibilityB["base_image"] = "shared-image-v2"
+	compatibilityB["base_image"] = "warm-image-v2"
 
 	digestA1, err := EnvironmentArtifactDigest(config, compatibilityA)
 	if err != nil {

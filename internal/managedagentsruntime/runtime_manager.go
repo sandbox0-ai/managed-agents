@@ -25,7 +25,6 @@ type Config struct {
 	ClaudeTemplate         string
 	TemplateManifestPath   string
 	TemplateMainImage      string
-	TemplateSidecarImage   string
 	WrapperPort            int
 	WorkspaceMountPath     string
 	EngineStateMountPath   string
@@ -44,9 +43,6 @@ func (c Config) WithDefaults(httpPort int) Config {
 	}
 	if strings.TrimSpace(c.TemplateMainImage) == "" {
 		c.TemplateMainImage = "sandbox0ai/managed-agents:wrapper-latest"
-	}
-	if strings.TrimSpace(c.TemplateSidecarImage) == "" {
-		c.TemplateSidecarImage = c.TemplateMainImage
 	}
 	if c.WrapperPort == 0 {
 		c.WrapperPort = 8080

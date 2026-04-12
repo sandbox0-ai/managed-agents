@@ -39,8 +39,6 @@ func loadTemplateRequest(cfg Config) (*apispec.TemplateCreateRequest, error) {
 			return strings.TrimSpace(cfg.ClaudeTemplate)
 		case "MANAGED_AGENT_TEMPLATE_MAIN_IMAGE":
 			return strings.TrimSpace(cfg.TemplateMainImage)
-		case "MANAGED_AGENT_TEMPLATE_SIDECAR_IMAGE":
-			return strings.TrimSpace(cfg.TemplateSidecarImage)
 		case "MANAGED_AGENT_TEMPLATE_WRAPPER_PORT":
 			return strconv.Itoa(cfg.WrapperPort)
 		case "MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH":
@@ -104,9 +102,18 @@ func validateTemplateRequest(request *apispec.TemplateCreateRequest) error {
 	if strings.TrimSpace(main.Image) == "" {
 		return errors.New("template request mainContainer.image is required")
 	}
-	for i, sidecar := range request.Spec.Sidecars {
-		if strings.TrimSpace(sidecar.Image) == "" {
-			return fmt.Errorf("template request sidecars[%d].image is required", i)
+	if len(request.Spec.WarmProcesses) == 0 {
+		return errors.New("template request warmProcesses is required")
+	}
+	for i, process := range request.Spec.WarmProcesses {
+		switch process.Type {
+		case apispec.WarmProcessSpecTypeCmd:
+			if len(process.Command) == 0 || strings.TrimSpace(process.Command[0]) == "" {
+				return fmt.Errorf("template request warmProcesses[%d].command[0] is required", i)
+			}
+		case apispec.WarmProcessSpecTypeRepl:
+		default:
+			return fmt.Errorf("template request warmProcesses[%d].type is invalid", i)
 		}
 	}
 	return nil

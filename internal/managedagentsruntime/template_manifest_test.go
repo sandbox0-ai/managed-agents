@@ -14,8 +14,7 @@ import (
 func TestLoadTemplateRequest(t *testing.T) {
 	request, err := loadTemplateRequest((Config{
 		ClaudeTemplate:       "managed-agent-claude",
-		TemplateMainImage:    "example.com/main:latest",
-		TemplateSidecarImage: "example.com/sidecar:latest",
+		TemplateMainImage:    "example.com/wrapper:latest",
 		WrapperPort:          8080,
 		WorkspaceMountPath:   "/workspace",
 		EngineStateMountPath: "/var/lib/agent-wrapper",
@@ -30,11 +29,28 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("MainContainer not set")
 	}
-	if main.Image != "example.com/main:latest" {
+	if main.Image != "example.com/wrapper:latest" {
 		t.Fatalf("MainContainer.Image = %q", main.Image)
 	}
-	if len(request.Spec.Sidecars) != 1 || request.Spec.Sidecars[0].Image != "example.com/sidecar:latest" {
-		t.Fatalf("Sidecars = %#v", request.Spec.Sidecars)
+	if len(request.Spec.WarmProcesses) != 1 {
+		t.Fatalf("WarmProcesses length = %d, want 1", len(request.Spec.WarmProcesses))
+	}
+	warmProcess := request.Spec.WarmProcesses[0]
+	if warmProcess.Type != apispec.WarmProcessSpecTypeCmd {
+		t.Fatalf("WarmProcesses[0].Type = %q, want cmd", warmProcess.Type)
+	}
+	if !reflect.DeepEqual(warmProcess.Command, []string{"node", "src/index.js"}) {
+		t.Fatalf("WarmProcesses[0].Command = %#v", warmProcess.Command)
+	}
+	envVars, ok := warmProcess.EnvVars.Get()
+	if !ok {
+		t.Fatal("WarmProcesses[0].EnvVars not set")
+	}
+	if envVars["PORT"] != "8080" {
+		t.Fatalf("WarmProcesses[0].EnvVars[PORT] = %q, want 8080", envVars["PORT"])
+	}
+	if envVars["PATH"] == "" {
+		t.Fatal("WarmProcesses[0].EnvVars[PATH] should not be empty")
 	}
 	if request.Spec.ClusterId.IsSet() {
 		t.Fatalf("ClusterId should be unset, got %#v", request.Spec.ClusterId)
@@ -43,10 +59,9 @@ func TestLoadTemplateRequest(t *testing.T) {
 
 func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
-		Enabled:              true,
-		ClaudeTemplate:       "managed-agent-claude",
-		TemplateMainImage:    "example.com/main:latest",
-		TemplateSidecarImage: "example.com/sidecar:latest",
+		Enabled:           true,
+		ClaudeTemplate:    "managed-agent-claude",
+		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)
@@ -67,10 +82,9 @@ func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 
 func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
-		Enabled:              true,
-		ClaudeTemplate:       "managed-agent-claude",
-		TemplateMainImage:    "example.com/main:latest",
-		TemplateSidecarImage: "example.com/sidecar:latest",
+		Enabled:           true,
+		ClaudeTemplate:    "managed-agent-claude",
+		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)

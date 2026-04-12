@@ -11,6 +11,7 @@ on:
 
 env:
   IMAGE_REPOSITORY: ${{ vars.MANAGED_AGENTS_IMAGE_REPOSITORY || 'sandbox0ai/managed-agents' }}
+  SDK_GO_REF: ${{ vars.MANAGED_AGENTS_SDK_GO_REF || 'feat/warm-process-openapi' }}
 
 jobs:
   build-images:
@@ -45,6 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: sandbox0-ai/sdk-go
+          ref: ${{ env.SDK_GO_REF }}
           path: sdk-go
 
       - name: Set up Docker Buildx
