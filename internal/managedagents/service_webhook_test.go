@@ -66,6 +66,20 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
 		t.Fatalf("HandleSandboxWebhook: %v", err)
 	}
+	eventsBeforeProcessing, _, err := repo.ListEvents(context.Background(), record.ID, EventListOptions{Limit: 10, Order: "asc"})
+	if err != nil {
+		t.Fatalf("ListEvents before processing: %v", err)
+	}
+	if len(eventsBeforeProcessing) != 0 {
+		t.Fatalf("events before processing = %d, want 0", len(eventsBeforeProcessing))
+	}
+	if len(runtimeManager.backgroundPauseReqs) != 0 {
+		t.Fatalf("background pause calls before processing = %d, want 0", len(runtimeManager.backgroundPauseReqs))
+	}
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil || !processed {
+		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
+	}
 	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
 	if err != nil {
 		t.Fatalf("GetRuntime: %v", err)
@@ -154,6 +168,10 @@ func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T)
 	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
 		t.Fatalf("HandleSandboxWebhook: %v", err)
 	}
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil || !processed {
+		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
+	}
 	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
 	if err != nil {
 		t.Fatalf("GetRuntime: %v", err)
@@ -163,6 +181,84 @@ func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T)
 	}
 	if len(runtimeManager.backgroundPauseReqs) != 1 {
 		t.Fatalf("background pause calls = %d, want 1", len(runtimeManager.backgroundPauseReqs))
+	}
+}
+
+func TestHandleSandboxWebhookSkipsStaleRun(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	service := NewService(repo, runtimeManager, nil)
+	now := time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_webhook_stale_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_new_123"
+	runtime := &RuntimeRecord{
+		SessionID:           record.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_stale_123",
+		WrapperURL:          "https://wrapper.example.test",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "secret_stale",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	payloadJSON, _ := json.Marshal(RuntimeCallbackPayload{
+		SessionID: record.ID,
+		RunID:     "run_old_123",
+		Events: []SessionEvent{{
+			Type:       "session.status_idle",
+			StopReason: &SessionStopReason{Type: "end_turn"},
+		}},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"event_id":   "evt_hook_stale_123",
+		"event_type": "agent.event",
+		"sandbox_id": runtime.SandboxID,
+		"payload":    json.RawMessage(payloadJSON),
+	})
+	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
+		t.Fatalf("HandleSandboxWebhook: %v", err)
+	}
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil || !processed {
+		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
+	}
+	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.ActiveRunID == nil || *updatedRuntime.ActiveRunID != activeRunID {
+		t.Fatalf("active_run_id = %v, want %q", updatedRuntime.ActiveRunID, activeRunID)
+	}
+	events, _, err := repo.ListEvents(context.Background(), record.ID, EventListOptions{Limit: 10, Order: "asc"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events len = %d, want 0", len(events))
+	}
+	if len(runtimeManager.backgroundPauseReqs) != 0 {
+		t.Fatalf("background pause calls = %d, want 0", len(runtimeManager.backgroundPauseReqs))
 	}
 }
 

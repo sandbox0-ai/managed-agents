@@ -2,6 +2,7 @@ package managedagents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -176,6 +177,102 @@ func TestSendEventsRejectsArchivedSession(t *testing.T) {
 	_, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.message", Content: []UserContentBlock{{Type: "text", Text: "hello"}}}}}, "http://gateway.test")
 	if !errors.Is(err, ErrSessionArchived) {
 		t.Fatalf("SendEvents error = %v, want ErrSessionArchived", err)
+	}
+}
+
+func TestSendEventsQueuesUserMessageWhileRunIsActive(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{}
+	service := NewService(repo, runtimeManager, nil)
+	now := time.Date(2026, 4, 10, 5, 15, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_active_send_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_active_123"
+	runtime := &RuntimeRecord{
+		SessionID:           record.ID,
+		Vendor:              "claude",
+		RegionID:            "test-region",
+		SandboxID:           "sbx_active_send_123",
+		WorkspaceVolumeID:   "vol_workspace",
+		EngineStateVolumeID: "vol_state",
+		ControlToken:        "ctl_123",
+		RuntimeGeneration:   1,
+		ActiveRunID:         &activeRunID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	returned, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.message", Content: []UserContentBlock{{Type: "text", Text: "hello"}}}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(returned) != 1 || returned[0]["processed_at"] != nil {
+		t.Fatalf("returned events = %#v, want one queued event with nil processed_at", returned)
+	}
+	if len(runtimeManager.startRunReqs) != 0 {
+		t.Fatalf("start run calls = %d, want 0", len(runtimeManager.startRunReqs))
+	}
+	events, _, err := repo.ListEvents(context.Background(), record.ID, EventListOptions{Order: "asc"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 || events[0]["processed_at"] != nil {
+		t.Fatalf("stored events = %#v, want one queued event with nil processed_at", events)
+	}
+	payloadJSON, _ := json.Marshal(RuntimeCallbackPayload{
+		SessionID: record.ID,
+		RunID:     activeRunID,
+		Events: []SessionEvent{{
+			Type:       "session.status_idle",
+			StopReason: &SessionStopReason{Type: "end_turn"},
+		}},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"event_id":   "evt_hook_queue_123",
+		"event_type": "agent.event",
+		"sandbox_id": runtime.SandboxID,
+		"payload":    json.RawMessage(payloadJSON),
+	})
+	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
+		t.Fatalf("HandleSandboxWebhook: %v", err)
+	}
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil || !processed {
+		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
+	}
+	if len(runtimeManager.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtimeManager.startRunReqs))
+	}
+	if runtimeManager.startRunReqs[0].RunID == "" || runtimeManager.startRunReqs[0].RunID == activeRunID {
+		t.Fatalf("queued run id = %q, want new run id", runtimeManager.startRunReqs[0].RunID)
+	}
+	if len(runtimeManager.startRunReqs[0].InputEvents) != 1 || runtimeManager.startRunReqs[0].InputEvents[0].ProcessedAt == nil {
+		t.Fatalf("queued run input events = %#v, want processed queued event", runtimeManager.startRunReqs[0].InputEvents)
+	}
+	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.ActiveRunID == nil || *updatedRuntime.ActiveRunID != runtimeManager.startRunReqs[0].RunID {
+		t.Fatalf("active_run_id = %v, want %q", updatedRuntime.ActiveRunID, runtimeManager.startRunReqs[0].RunID)
 	}
 }
 

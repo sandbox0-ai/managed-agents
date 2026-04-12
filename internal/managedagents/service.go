@@ -26,6 +26,12 @@ type RuntimeManager interface {
 	DestroyRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
 }
 
+const (
+	runtimeWebhookLeaseDuration = 2 * time.Minute
+	runtimeWebhookPollInterval  = 100 * time.Millisecond
+	runtimeWebhookMaxAttempts   = 5
+)
+
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
 	repo      *Repository
@@ -121,27 +127,34 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
-	if err := s.repo.CreateSession(ctx, record, nil); err != nil {
-		return nil, err
-	}
-	for resourceID, secret := range resourceSecrets {
-		if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
-			return nil, err
+	var created *Session
+	if err := s.repo.WithSessionLock(ctx, record.ID, func(ctx context.Context) error {
+		if err := s.repo.CreateSession(ctx, record, nil); err != nil {
+			return err
 		}
-	}
-	runtime, err := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
-	if err != nil {
-		s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-		return nil, err
-	}
-	if runtime != nil {
-		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+		for resourceID, secret := range resourceSecrets {
+			if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
+				return err
+			}
+		}
+		runtime, runtimeErr := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
+		if runtimeErr != nil {
 			s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-			return nil, err
+			return runtimeErr
 		}
-		s.pauseRuntimeBestEffort(ctx, credential, runtime, "create")
+		if runtime != nil {
+			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
+				return err
+			}
+			s.pauseRuntimeBestEffort(ctx, credential, runtime, "create")
+		}
+		created = record.toAPI(now)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	return record.toAPI(now), nil
+	return created, nil
 }
 
 func (s *Service) cleanupFailedCreateRuntime(ctx context.Context, credential RequestCredential, sessionID string, runtime *RuntimeRecord) {
@@ -186,6 +199,16 @@ func (s *Service) GetSession(ctx context.Context, principal Principal, sessionID
 }
 
 func (s *Service) UpdateSession(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params UpdateSessionParams) (*Session, error) {
+	var updated *Session
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		updated, err = s.updateSessionLocked(ctx, principal, credential, sessionID, params)
+		return err
+	})
+	return updated, err
+}
+
+func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params UpdateSessionParams) (*Session, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -238,6 +261,7 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, creden
 			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 				return nil, err
 			}
+			s.pauseRuntimeBestEffort(ctx, credential, runtime, "update_vault_ids")
 		} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
 			return nil, runtimeErr
 		}
@@ -250,6 +274,16 @@ func (s *Service) UpdateSession(ctx context.Context, principal Principal, creden
 }
 
 func (s *Service) DeleteSession(ctx context.Context, principal Principal, credential RequestCredential, sessionID string) (map[string]any, error) {
+	var deleted map[string]any
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		deleted, err = s.deleteSessionLocked(ctx, principal, credential, sessionID)
+		return err
+	})
+	return deleted, err
+}
+
+func (s *Service) deleteSessionLocked(ctx context.Context, principal Principal, credential RequestCredential, sessionID string) (map[string]any, error) {
 	record, _, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -305,6 +339,16 @@ func (s *Service) ListEvents(ctx context.Context, principal Principal, sessionID
 }
 
 func (s *Service) SendEvents(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params SendEventsParams, gatewayBaseURL string) ([]map[string]any, error) {
+	var events []map[string]any
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		events, err = s.sendEventsLocked(ctx, principal, credential, sessionID, params, gatewayBaseURL)
+		return err
+	})
+	return events, err
+}
+
+func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params SendEventsParams, gatewayBaseURL string) ([]map[string]any, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -321,10 +365,6 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	if err := validateInputEvents(stampedEvents); err != nil {
 		return nil, err
 	}
-	runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, stampedEvents)
-	if err != nil {
-		return nil, err
-	}
 	var runtime *RuntimeRecord
 	if existingRuntime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
 		runtime = existingRuntime
@@ -332,6 +372,31 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		return nil, runtimeErr
 	}
 	requiredActionIDs, err := s.latestRequiredActionIDs(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if runtime != nil && runtime.ActiveRunID != nil && !containsInterruptEvent(stampedEvents) && !(len(requiredActionIDs) > 0 && containsOnlyActionResolutionEvents(stampedEvents)) {
+		queuedEvents := queueEvents(stampedEvents)
+		runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, queuedEvents)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.repo.AppendEvents(ctx, sessionID, queuedEvents); err != nil {
+			return nil, err
+		}
+		if err := s.repo.CreateRuntimeInputEventBatch(ctx, &runtimeInputEventBatch{
+			ID:                 NewID("srunq"),
+			SessionID:          sessionID,
+			EventIDs:           eventIDsFromMaps(queuedEvents),
+			RuntimeInputEvents: runtimeInputEvents,
+			CreatedAt:          processedAt,
+			UpdatedAt:          processedAt,
+		}); err != nil {
+			return nil, err
+		}
+		return queuedEvents, nil
+	}
+	runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, stampedEvents)
 	if err != nil {
 		return nil, err
 	}
@@ -407,6 +472,9 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 				return nil, err
 			}
 			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
+				runtime.ActiveRunID = nil
+				runtime.UpdatedAt = time.Now().UTC()
+				_ = s.repo.UpsertRuntime(ctx, runtime)
 				failureEvents := []map[string]any{
 					stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 					stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -459,6 +527,9 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 		return nil, err
 	}
 	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
+		runtime.ActiveRunID = nil
+		runtime.UpdatedAt = time.Now().UTC()
+		_ = s.repo.UpsertRuntime(ctx, runtime)
 		failureEvents := []map[string]any{
 			stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, time.Now().UTC()),
 			stampEvent(map[string]any{"type": "session.status_terminated"}, time.Now().UTC()),
@@ -499,16 +570,140 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 	if trimmedSessionID := strings.TrimSpace(payload.SessionID); trimmedSessionID != "" && trimmedSessionID != runtime.SessionID {
 		return errors.New("runtime payload session_id mismatch")
 	}
-	return s.applyRuntimePayload(ctx, runtime, payload)
+	if strings.TrimSpace(payload.SessionID) == "" {
+		payload.SessionID = runtime.SessionID
+	}
+	jobID := strings.TrimSpace(envelope.EventID)
+	if jobID == "" {
+		jobID = NewID("whjob")
+	}
+	now := time.Now().UTC()
+	_, err = s.repo.CreateRuntimeWebhookJob(ctx, &runtimeWebhookJob{
+		ID:                jobID,
+		SessionID:         runtime.SessionID,
+		SandboxID:         runtime.SandboxID,
+		RuntimeGeneration: runtime.RuntimeGeneration,
+		RunID:             strings.TrimSpace(payload.RunID),
+		EventType:         strings.TrimSpace(envelope.EventType),
+		Payload:           payload,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	})
+	return err
 }
 
-func (s *Service) applyRuntimePayload(ctx context.Context, runtime *RuntimeRecord, payload RuntimeCallbackPayload) error {
+func (s *Service) StartRuntimeWebhookWorker(ctx context.Context) {
+	owner := NewID("whworker")
+	go s.runtimeWebhookWorkerLoop(ctx, owner)
+}
+
+func (s *Service) runtimeWebhookWorkerLoop(ctx context.Context, owner string) {
+	ticker := time.NewTicker(runtimeWebhookPollInterval)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		processed, err := s.ProcessNextRuntimeWebhookJob(ctx, owner)
+		if err != nil {
+			s.logger.Warn("runtime webhook worker failed", zap.Error(err), zap.String("worker", owner))
+		}
+		if processed {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string) (bool, error) {
+	job, err := s.repo.LeaseNextRuntimeWebhookJob(ctx, owner, time.Now().UTC().Add(runtimeWebhookLeaseDuration))
+	if err != nil || job == nil {
+		return job != nil, err
+	}
+	if err := s.applyRuntimeWebhookJob(ctx, job); err != nil {
+		retry := job.Attempts < runtimeWebhookMaxAttempts
+		if releaseErr := s.repo.ReleaseRuntimeWebhookJob(ctx, job.ID, err, retry); releaseErr != nil {
+			return true, releaseErr
+		}
+		s.logger.Warn("runtime webhook job failed",
+			zap.Error(err),
+			zap.String("job_id", job.ID),
+			zap.String("session_id", job.SessionID),
+			zap.Int("attempts", job.Attempts),
+			zap.Bool("retry", retry),
+		)
+		return true, nil
+	}
+	if err := s.repo.CompleteRuntimeWebhookJob(ctx, job.ID); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (s *Service) applyRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) error {
+	if job == nil {
+		return nil
+	}
+	return s.repo.WithSessionLock(ctx, job.SessionID, func(ctx context.Context) error {
+		runtime, err := s.repo.GetRuntime(ctx, job.SessionID)
+		if err != nil {
+			if errors.Is(err, ErrRuntimeNotFound) {
+				return nil
+			}
+			return err
+		}
+		if runtimeWebhookJobIsStale(runtime, job) {
+			s.logger.Debug("skipping stale runtime webhook job",
+				zap.String("job_id", job.ID),
+				zap.String("session_id", job.SessionID),
+				zap.String("run_id", job.RunID),
+				zap.Int64("runtime_generation", job.RuntimeGeneration),
+			)
+			return nil
+		}
+		return s.applyRuntimePayloadLocked(ctx, runtime, job.Payload)
+	})
+}
+
+func runtimeWebhookJobIsStale(runtime *RuntimeRecord, job *runtimeWebhookJob) bool {
+	if runtime == nil || job == nil {
+		return true
+	}
+	if strings.TrimSpace(runtime.SandboxID) != strings.TrimSpace(job.SandboxID) || runtime.RuntimeGeneration != job.RuntimeGeneration {
+		return true
+	}
+	runID := strings.TrimSpace(job.RunID)
+	if runID == "" {
+		runID = strings.TrimSpace(job.Payload.RunID)
+	}
+	if runID == "" {
+		return len(job.Payload.Events) > 0
+	}
+	return runtime.ActiveRunID == nil || strings.TrimSpace(*runtime.ActiveRunID) != runID
+}
+
+func (s *Service) applyRuntimePayloadLocked(ctx context.Context, runtime *RuntimeRecord, payload RuntimeCallbackPayload) error {
 	record, engine, err := s.repo.GetSession(ctx, runtime.SessionID)
 	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return nil
+		}
 		return err
 	}
 	processedAt := time.Now().UTC()
 	stampedEvents := stampEvents(sessionEventsToMaps(payload.Events), processedAt)
+	if runtimePayloadAllowsQueuedRun(stampedEvents) {
+		batch, err := s.repo.GetNextRuntimeInputEventBatch(ctx, runtime.SessionID)
+		if err != nil {
+			return err
+		}
+		if batch != nil {
+			if err := s.runtime.BootstrapSession(ctx, RequestCredential{}, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+				return err
+			}
+		}
+	}
 	if err := s.repo.AppendEvents(ctx, runtime.SessionID, stampedEvents); err != nil {
 		return err
 	}
@@ -536,9 +731,80 @@ func (s *Service) applyRuntimePayload(ctx context.Context, runtime *RuntimeRecor
 		return err
 	}
 	if shouldPause {
+		if runtime.ActiveRunID == nil {
+			started, err := s.startNextQueuedRunLocked(ctx, record, engine, runtime, processedAt)
+			if err != nil {
+				return err
+			}
+			if started {
+				return nil
+			}
+		}
 		s.pauseRuntimeInBackgroundBestEffort(ctx, runtime, "runtime_idle")
 	}
 	return nil
+}
+
+func (s *Service) startNextQueuedRunLocked(ctx context.Context, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, processedAt time.Time) (bool, error) {
+	batch, err := s.repo.GetNextRuntimeInputEventBatch(ctx, runtime.SessionID)
+	if err != nil || batch == nil {
+		return batch != nil, err
+	}
+	runtimeInputEvents := markRuntimeInputEventsProcessed(batch.RuntimeInputEvents, processedAt)
+	if err := s.repo.MarkEventsProcessed(ctx, runtime.SessionID, batch.EventIDs, processedAt); err != nil {
+		return false, err
+	}
+	runID := NewID("srun")
+	runtime.ActiveRunID = &runID
+	runtime.UpdatedAt = processedAt
+	if err := s.repo.UpsertRuntime(ctx, runtime); err != nil {
+		return false, err
+	}
+	runningEvent := stampEvent(map[string]any{"type": "session.status_running"}, processedAt)
+	if err := s.repo.AppendEvents(ctx, runtime.SessionID, []map[string]any{runningEvent}); err != nil {
+		return false, err
+	}
+	record = applySessionBatch(record, processedAt, Usage{}, []map[string]any{runningEvent})
+	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
+		return false, err
+	}
+	if err := s.runtime.StartRun(ctx, RequestCredential{}, runtime, &WrapperRunRequest{SessionID: runtime.SessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
+		s.logger.Warn("failed to start queued managed-agent run", zap.Error(err), zap.String("session_id", runtime.SessionID))
+		runtime.ActiveRunID = nil
+		runtime.UpdatedAt = time.Now().UTC()
+		_ = s.repo.UpsertRuntime(ctx, runtime)
+		failureAt := time.Now().UTC()
+		failureEvents := []map[string]any{
+			stampEvent(map[string]any{"type": "session.error", "error": map[string]any{"type": "unknown_error", "message": err.Error()}}, failureAt),
+			stampEvent(map[string]any{"type": "session.status_terminated"}, failureAt),
+		}
+		_ = s.repo.AppendEvents(ctx, runtime.SessionID, failureEvents)
+		record = applySessionBatch(record, failureAt, Usage{}, failureEvents)
+		_ = s.repo.UpdateSession(ctx, record, engine)
+		_ = s.repo.DeleteRuntimeInputEventBatch(ctx, batch.ID)
+		return true, nil
+	}
+	if err := s.repo.DeleteRuntimeInputEventBatch(ctx, batch.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func runtimePayloadAllowsQueuedRun(events []map[string]any) bool {
+	for _, event := range events {
+		if stringValue(event["type"]) == "session.status_idle" && stopReasonType(event) != "requires_action" {
+			return true
+		}
+	}
+	return false
+}
+
+func markRuntimeInputEventsProcessed(events []map[string]any, processedAt time.Time) []map[string]any {
+	processed := cloneDeepMapSlice(events)
+	for _, event := range processed {
+		event["processed_at"] = processedAt.UTC().Format(time.RFC3339)
+	}
+	return processed
 }
 
 func (s *Service) pauseRuntimeBestEffort(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord, reason string) {
@@ -592,6 +858,7 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 }
 
 type sandboxWebhookEnvelope struct {
+	EventID   string          `json:"event_id"`
 	EventType string          `json:"event_type"`
 	SandboxID string          `json:"sandbox_id"`
 	Payload   json.RawMessage `json:"payload"`
@@ -621,6 +888,32 @@ func stampEvent(event map[string]any, when time.Time) map[string]any {
 		cloned["processed_at"] = when.UTC().Format(time.RFC3339)
 	}
 	return cloned
+}
+
+func queueEvents(events []map[string]any) []map[string]any {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		queued := cloneMap(event)
+		if strings.TrimSpace(stringValue(queued["id"])) == "" {
+			queued["id"] = NewID("evt")
+		}
+		queued["processed_at"] = nil
+		out = append(out, queued)
+	}
+	return out
+}
+
+func eventIDsFromMaps(events []map[string]any) []string {
+	ids := make([]string, 0, len(events))
+	for _, event := range events {
+		if id := strings.TrimSpace(stringValue(event["id"])); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (s *Service) latestRequiredActionIDs(ctx context.Context, sessionID string) ([]string, error) {

@@ -23,7 +23,7 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	if err != nil {
 		return fmt.Errorf("marshal skill version files: %w", err)
 	}
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin create skill transaction: %w", err)
 	}
@@ -67,7 +67,7 @@ func (r *Repository) ListSkills(ctx context.Context, teamID string, limit int, p
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("list managed-agent skills: %w", err)
 	}
@@ -105,7 +105,7 @@ func (r *Repository) ListSkills(ctx context.Context, teamID string, limit int, p
 
 func (r *Repository) GetSkill(ctx context.Context, teamID, skillID string) (*Skill, error) {
 	var payloadJSON []byte
-	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_skills WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(skillID)).Scan(&payloadJSON)
+	err := r.db(ctx).QueryRow(ctx, `SELECT snapshot FROM managed_agent_skills WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(skillID)).Scan(&payloadJSON)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrSkillNotFound
@@ -132,7 +132,7 @@ func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID str
 	if err != nil {
 		return fmt.Errorf("marshal skill version files: %w", err)
 	}
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin create skill version transaction: %w", err)
 	}
@@ -194,7 +194,7 @@ func (r *Repository) ListSkillVersions(ctx context.Context, teamID, skillID stri
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY v.created_at DESC, v.id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("list managed-agent skill versions: %w", err)
 	}
@@ -232,7 +232,7 @@ func (r *Repository) ListSkillVersions(ctx context.Context, teamID, skillID stri
 
 func (r *Repository) GetSkillVersion(ctx context.Context, teamID, skillID, version string) (*SkillVersion, error) {
 	var payloadJSON []byte
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT v.snapshot
 		FROM managed_agent_skill_versions v
 		JOIN managed_agent_skills s ON s.id = v.skill_id
@@ -256,7 +256,7 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 		payloadJSON []byte
 		filesJSON   []byte
 	)
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT v.snapshot, v.files
 		FROM managed_agent_skill_versions v
 		JOIN managed_agent_skills s ON s.id = v.skill_id
@@ -282,7 +282,7 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 }
 
 func (r *Repository) DeleteSkillVersion(ctx context.Context, teamID, skillID, version string, now time.Time) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin delete skill version transaction: %w", err)
 	}

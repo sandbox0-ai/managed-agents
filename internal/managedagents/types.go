@@ -232,6 +232,32 @@ type RuntimeCallbackPayload struct {
 	Events          []SessionEvent `json:"events"`
 }
 
+type runtimeWebhookJob struct {
+	ID                string
+	SessionID         string
+	SandboxID         string
+	RuntimeGeneration int64
+	RunID             string
+	EventType         string
+	Payload           RuntimeCallbackPayload
+	Status            string
+	Attempts          int
+	LeaseOwner        string
+	LeaseExpiresAt    *time.Time
+	LastError         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type runtimeInputEventBatch struct {
+	ID                 string
+	SessionID          string
+	EventIDs           []string
+	RuntimeInputEvents []map[string]any
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
 // WrapperSessionBootstrapRequest provisions or refreshes wrapper-side runtime state.
 type WrapperSessionBootstrapRequest struct {
 	SessionID           string           `json:"session_id"`

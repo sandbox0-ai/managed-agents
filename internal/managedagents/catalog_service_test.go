@@ -1107,6 +1107,12 @@ func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
 	if len(runtime.bootstrapReqs[0].VaultIDs) != 1 || runtime.bootstrapReqs[0].VaultIDs[0] != "vlt_b" {
 		t.Fatalf("bootstrap vault_ids = %#v, want [vlt_b]", runtime.bootstrapReqs[0].VaultIDs)
 	}
+	if len(runtime.resumeReqs) != 1 {
+		t.Fatalf("resume calls = %d, want 1", len(runtime.resumeReqs))
+	}
+	if len(runtime.pauseReqs) != 1 {
+		t.Fatalf("pause calls = %d, want 1", len(runtime.pauseReqs))
+	}
 }
 
 func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
@@ -1390,6 +1396,8 @@ func (noopRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *Ru
 
 type updateSessionRuntimeManager struct {
 	bootstrapReqs []*WrapperSessionBootstrapRequest
+	resumeReqs    []*RuntimeRecord
+	pauseReqs     []*RuntimeRecord
 }
 
 func (m *updateSessionRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
@@ -1413,11 +1421,13 @@ func (m *updateSessionRuntimeManager) InterruptRun(context.Context, RequestCrede
 	return nil
 }
 
-func (m *updateSessionRuntimeManager) PauseRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
+func (m *updateSessionRuntimeManager) PauseRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
+	m.pauseReqs = append(m.pauseReqs, runtime)
 	return nil
 }
 
-func (m *updateSessionRuntimeManager) ResumeRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
+func (m *updateSessionRuntimeManager) ResumeRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
+	m.resumeReqs = append(m.resumeReqs, runtime)
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,9 +37,50 @@ type Repository struct {
 	pool *pgxpool.Pool
 }
 
+type repositoryDB interface {
+	Begin(context.Context) (pgx.Tx, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	SendBatch(context.Context, *pgx.Batch) pgx.BatchResults
+}
+
+type repositoryDBContextKey struct{}
+
 // NewRepository returns a new managed-agent repository.
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
+}
+
+func (r *Repository) db(ctx context.Context) repositoryDB {
+	if db, ok := ctx.Value(repositoryDBContextKey{}).(repositoryDB); ok && db != nil {
+		return db
+	}
+	return r.pool
+}
+
+func (r *Repository) WithSessionLock(ctx context.Context, sessionID string, fn func(context.Context) error) error {
+	if _, ok := ctx.Value(repositoryDBContextKey{}).(repositoryDB); ok {
+		return fn(ctx)
+	}
+	lockKey := "managed-agent-session:" + strings.TrimSpace(sessionID)
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("managed-agent session id is required")
+	}
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire managed-agent session lock connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return fmt.Errorf("lock managed-agent session: %w", err)
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, lockKey)
+	}()
+	return fn(context.WithValue(ctx, repositoryDBContextKey{}, conn))
 }
 
 func (r *Repository) CreateSession(ctx context.Context, record *SessionRecord, engine map[string]any) error {
@@ -62,7 +104,7 @@ func (r *Repository) CreateSession(ctx context.Context, record *SessionRecord, e
 	if err != nil {
 		return fmt.Errorf("marshal engine: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_sessions (
 			id, team_id, created_by_user_id, vendor, environment_id, environment_artifact_id, working_directory, title, metadata,
 			agent, resources, vault_ids, engine, status,
@@ -92,7 +134,7 @@ func (r *Repository) GetSession(ctx context.Context, sessionID string) (*Session
 		vaultIDsJSON  []byte
 		engineJSON    []byte
 	)
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT id, team_id, COALESCE(created_by_user_id::text, ''), vendor, environment_id, COALESCE(environment_artifact_id, ''), working_directory, title,
 			metadata, agent, resources, vault_ids, engine, status,
 			usage_input_tokens, usage_output_tokens, usage_cache_read_input_tokens,
@@ -194,7 +236,7 @@ func (r *Repository) ListSessions(ctx context.Context, teamID string, opts Sessi
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, strings.ToUpper(order), strings.ToUpper(order), len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list managed-agent sessions: %w", err)
 	}
@@ -255,7 +297,7 @@ func (r *Repository) UpdateSession(ctx context.Context, record *SessionRecord, e
 	if err != nil {
 		return fmt.Errorf("marshal engine: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_sessions
 		SET environment_artifact_id = $2, working_directory = $3, title = $4, metadata = $5::jsonb, agent = $6::jsonb, resources = $7::jsonb,
 			vault_ids = $8::jsonb, engine = $9::jsonb, status = $10,
@@ -278,7 +320,7 @@ func (r *Repository) UpdateSession(ctx context.Context, record *SessionRecord, e
 }
 
 func (r *Repository) MarkSessionDeleted(ctx context.Context, sessionID string, deletedAt time.Time) error {
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_sessions
 		SET deleted_at = $2, status = 'terminated', last_status_started_at = NULL, updated_at = $2
 		WHERE id = $1 AND deleted_at IS NULL
@@ -305,9 +347,10 @@ func (r *Repository) AppendEvents(ctx context.Context, sessionID string, events 
 		batch.Queue(`
 			INSERT INTO managed_agent_session_events (id, session_id, event_type, payload, created_at)
 			VALUES ($1, $2, $3, $4::jsonb, $5)
+			ON CONFLICT (id) DO NOTHING
 		`, stringValue(event["id"]), sessionID, stringValue(event["type"]), string(payloadJSON), time.Now().UTC())
 	}
-	results := r.pool.SendBatch(ctx, batch)
+	results := r.db(ctx).SendBatch(ctx, batch)
 	defer results.Close()
 	for range events {
 		if _, err := results.Exec(); err != nil {
@@ -344,7 +387,7 @@ func (r *Repository) ListEvents(ctx context.Context, sessionID string, opts Even
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, strings.ToUpper(order), strings.ToUpper(order), len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list session events: %w", err)
 	}
@@ -381,7 +424,7 @@ func (r *Repository) ListEventsAfterID(ctx context.Context, sessionID, afterID s
 	}
 	if trimmedAfterID := strings.TrimSpace(afterID); trimmedAfterID != "" {
 		var exists bool
-		if err := r.pool.QueryRow(ctx, `
+		if err := r.db(ctx).QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM managed_agent_session_events WHERE session_id = $1 AND id = $2
 			)
@@ -412,7 +455,7 @@ func (r *Repository) ListEventsAfterID(ctx context.Context, sessionID, afterID s
 	}
 	args = append(args, limit)
 	query += fmt.Sprintf(` ORDER BY created_at ASC, id ASC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		if strings.TrimSpace(afterID) != "" && strings.Contains(err.Error(), "more than one row") {
 			return nil, ErrEventNotFound
@@ -440,7 +483,7 @@ func (r *Repository) UpsertSessionResourceSecret(ctx context.Context, sessionID,
 	if err != nil {
 		return fmt.Errorf("marshal session resource secret: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_resource_secrets (session_id, resource_id, secret)
 		VALUES ($1, $2, $3::jsonb)
 		ON CONFLICT (session_id, resource_id) DO UPDATE SET
@@ -454,7 +497,7 @@ func (r *Repository) UpsertSessionResourceSecret(ctx context.Context, sessionID,
 }
 
 func (r *Repository) DeleteSessionResourceSecret(ctx context.Context, sessionID, resourceID string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := r.db(ctx).Exec(ctx, `
 		DELETE FROM managed_agent_session_resource_secrets
 		WHERE session_id = $1 AND resource_id = $2
 	`, strings.TrimSpace(sessionID), strings.TrimSpace(resourceID))
@@ -465,7 +508,7 @@ func (r *Repository) DeleteSessionResourceSecret(ctx context.Context, sessionID,
 }
 
 func (r *Repository) DeleteSessionResourceSecrets(ctx context.Context, sessionID string) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := r.db(ctx).Exec(ctx, `
 		DELETE FROM managed_agent_session_resource_secrets
 		WHERE session_id = $1
 	`, strings.TrimSpace(sessionID))
@@ -477,7 +520,7 @@ func (r *Repository) DeleteSessionResourceSecrets(ctx context.Context, sessionID
 
 func (r *Repository) GetSessionResourceSecret(ctx context.Context, sessionID, resourceID string) (map[string]any, error) {
 	var secretJSON []byte
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT secret
 		FROM managed_agent_session_resource_secrets
 		WHERE session_id = $1 AND resource_id = $2
@@ -496,7 +539,7 @@ func (r *Repository) GetSessionResourceSecret(ctx context.Context, sessionID, re
 }
 
 func (r *Repository) DeleteRuntime(ctx context.Context, sessionID string) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM managed_agent_session_runtimes WHERE session_id = $1`, strings.TrimSpace(sessionID))
+	_, err := r.db(ctx).Exec(ctx, `DELETE FROM managed_agent_session_runtimes WHERE session_id = $1`, strings.TrimSpace(sessionID))
 	if err != nil {
 		return fmt.Errorf("delete managed-agent runtime: %w", err)
 	}
@@ -514,7 +557,7 @@ func (r *Repository) ResolveRuntimeRegionID(ctx context.Context, teamID string, 
 
 func (r *Repository) teamHomeRegionID(ctx context.Context, teamID string) (string, error) {
 	var homeRegionID string
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT COALESCE(home_region_id, '')
 		FROM teams
 		WHERE id = $1
@@ -530,7 +573,7 @@ func (r *Repository) teamHomeRegionID(ctx context.Context, teamID string) (strin
 
 func (r *Repository) ensureRegionExists(ctx context.Context, regionID string) error {
 	var storedRegionID string
-	err := r.pool.QueryRow(ctx, `SELECT id FROM regions WHERE id = $1`, strings.TrimSpace(regionID)).Scan(&storedRegionID)
+	err := r.db(ctx).QueryRow(ctx, `SELECT id FROM regions WHERE id = $1`, strings.TrimSpace(regionID)).Scan(&storedRegionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("managed-agent runtime region %q not found", strings.TrimSpace(regionID))
@@ -541,7 +584,7 @@ func (r *Repository) ensureRegionExists(ctx context.Context, regionID string) er
 }
 
 func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id FROM regions ORDER BY id`)
+	rows, err := r.db(ctx).Query(ctx, `SELECT id FROM regions ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("query managed-agent runtime regions: %w", err)
 	}
@@ -563,7 +606,7 @@ func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
 
 func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id, engine_state_volume_id,
 			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
 		FROM managed_agent_session_runtimes
@@ -583,7 +626,7 @@ func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*Runtime
 
 func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id, engine_state_volume_id,
 			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
 		FROM managed_agent_session_runtimes
@@ -602,7 +645,7 @@ func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string
 }
 
 func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_runtimes (
 			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id, engine_state_volume_id,
 			callback_token, vendor_session_id, runtime_generation, active_run_id, created_at, updated_at
@@ -624,6 +667,199 @@ func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) 
 		runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.CreatedAt, runtime.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert managed-agent runtime: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) CreateRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) (bool, error) {
+	if job == nil {
+		return false, errors.New("managed-agent webhook job is required")
+	}
+	payloadJSON, err := json.Marshal(job.Payload)
+	if err != nil {
+		return false, fmt.Errorf("marshal runtime webhook payload: %w", err)
+	}
+	createdAt := job.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	updatedAt := job.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	result, err := r.db(ctx).Exec(ctx, `
+		INSERT INTO managed_agent_runtime_webhook_jobs (
+			id, session_id, sandbox_id, runtime_generation, run_id, event_type, payload, status, attempts,
+			created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', 0, $8, $9)
+		ON CONFLICT (id) DO NOTHING
+	`, strings.TrimSpace(job.ID), strings.TrimSpace(job.SessionID), strings.TrimSpace(job.SandboxID), job.RuntimeGeneration, nullableString(job.RunID), strings.TrimSpace(job.EventType), string(payloadJSON), createdAt, updatedAt)
+	if err != nil {
+		return false, fmt.Errorf("insert runtime webhook job: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+func (r *Repository) LeaseNextRuntimeWebhookJob(ctx context.Context, owner string, leaseUntil time.Time) (*runtimeWebhookJob, error) {
+	if strings.TrimSpace(owner) == "" {
+		owner = NewID("whworker")
+	}
+	var (
+		job         runtimeWebhookJob
+		payloadJSON []byte
+	)
+	err := r.db(ctx).QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT j.id
+			FROM managed_agent_runtime_webhook_jobs j
+			WHERE (j.status = 'pending' OR (j.status = 'running' AND j.lease_expires_at < NOW()))
+				AND NOT EXISTS (
+					SELECT 1
+					FROM managed_agent_runtime_webhook_jobs older
+					WHERE older.session_id = j.session_id
+						AND older.status IN ('pending', 'running')
+						AND (older.created_at < j.created_at OR (older.created_at = j.created_at AND older.id < j.id))
+				)
+			ORDER BY j.created_at ASC, j.id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE managed_agent_runtime_webhook_jobs j
+		SET status = 'running', lease_owner = $1, lease_expires_at = $2, attempts = j.attempts + 1,
+			last_error = NULL, updated_at = NOW()
+		FROM candidate
+		WHERE j.id = candidate.id
+		RETURNING j.id, j.session_id, j.sandbox_id, j.runtime_generation, COALESCE(j.run_id, ''), j.event_type,
+			j.payload, j.status, j.attempts, COALESCE(j.lease_owner, ''), j.lease_expires_at, COALESCE(j.last_error, ''), j.created_at, j.updated_at
+	`, strings.TrimSpace(owner), leaseUntil.UTC()).Scan(
+		&job.ID, &job.SessionID, &job.SandboxID, &job.RuntimeGeneration, &job.RunID, &job.EventType,
+		&payloadJSON, &job.Status, &job.Attempts, &job.LeaseOwner, &job.LeaseExpiresAt, &job.LastError, &job.CreatedAt, &job.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lease runtime webhook job: %w", err)
+	}
+	if err := json.Unmarshal(payloadJSON, &job.Payload); err != nil {
+		return nil, fmt.Errorf("decode runtime webhook payload: %w", err)
+	}
+	return &job, nil
+}
+
+func (r *Repository) CompleteRuntimeWebhookJob(ctx context.Context, jobID string) error {
+	_, err := r.db(ctx).Exec(ctx, `
+		UPDATE managed_agent_runtime_webhook_jobs
+		SET status = 'done', lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, strings.TrimSpace(jobID))
+	if err != nil {
+		return fmt.Errorf("complete runtime webhook job: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) ReleaseRuntimeWebhookJob(ctx context.Context, jobID string, lastErr error, retry bool) error {
+	status := "failed"
+	if retry {
+		status = "pending"
+	}
+	message := ""
+	if lastErr != nil {
+		message = lastErr.Error()
+		if len(message) > 2048 {
+			message = message[:2048]
+		}
+	}
+	_, err := r.db(ctx).Exec(ctx, `
+		UPDATE managed_agent_runtime_webhook_jobs
+		SET status = $2, lease_owner = NULL, lease_expires_at = NULL, last_error = $3, updated_at = NOW()
+		WHERE id = $1
+	`, strings.TrimSpace(jobID), status, nullableString(message))
+	if err != nil {
+		return fmt.Errorf("release runtime webhook job: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) CreateRuntimeInputEventBatch(ctx context.Context, batch *runtimeInputEventBatch) error {
+	if batch == nil {
+		return errors.New("managed-agent runtime input event batch is required")
+	}
+	eventIDsJSON, err := json.Marshal(batch.EventIDs)
+	if err != nil {
+		return fmt.Errorf("marshal runtime input event ids: %w", err)
+	}
+	runtimeEventsJSON, err := json.Marshal(batch.RuntimeInputEvents)
+	if err != nil {
+		return fmt.Errorf("marshal runtime input events: %w", err)
+	}
+	createdAt := batch.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	updatedAt := batch.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	_, err = r.db(ctx).Exec(ctx, `
+		INSERT INTO managed_agent_runtime_input_event_batches (id, session_id, event_ids, runtime_input_events, created_at, updated_at)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+	`, strings.TrimSpace(batch.ID), strings.TrimSpace(batch.SessionID), string(eventIDsJSON), string(runtimeEventsJSON), createdAt, updatedAt)
+	if err != nil {
+		return fmt.Errorf("insert runtime input event batch: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) GetNextRuntimeInputEventBatch(ctx context.Context, sessionID string) (*runtimeInputEventBatch, error) {
+	var (
+		batch             runtimeInputEventBatch
+		eventIDsJSON      []byte
+		runtimeEventsJSON []byte
+	)
+	err := r.db(ctx).QueryRow(ctx, `
+		SELECT id, session_id, event_ids, runtime_input_events, created_at, updated_at
+		FROM managed_agent_runtime_input_event_batches
+		WHERE session_id = $1
+		ORDER BY created_at ASC, id ASC
+		LIMIT 1
+	`, strings.TrimSpace(sessionID)).Scan(&batch.ID, &batch.SessionID, &eventIDsJSON, &runtimeEventsJSON, &batch.CreatedAt, &batch.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query runtime input event batch: %w", err)
+	}
+	if err := json.Unmarshal(eventIDsJSON, &batch.EventIDs); err != nil {
+		return nil, fmt.Errorf("decode runtime input event ids: %w", err)
+	}
+	if err := json.Unmarshal(runtimeEventsJSON, &batch.RuntimeInputEvents); err != nil {
+		return nil, fmt.Errorf("decode runtime input events: %w", err)
+	}
+	return &batch, nil
+}
+
+func (r *Repository) MarkEventsProcessed(ctx context.Context, sessionID string, eventIDs []string, processedAt time.Time) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	_, err := r.db(ctx).Exec(ctx, `
+		UPDATE managed_agent_session_events
+		SET payload = jsonb_set(payload, '{processed_at}', to_jsonb($3::text), true)
+		WHERE session_id = $1 AND id = ANY($2::text[])
+	`, strings.TrimSpace(sessionID), eventIDs, processedAt.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("mark session events processed: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteRuntimeInputEventBatch(ctx context.Context, batchID string) error {
+	_, err := r.db(ctx).Exec(ctx, `DELETE FROM managed_agent_runtime_input_event_batches WHERE id = $1`, strings.TrimSpace(batchID))
+	if err != nil {
+		return fmt.Errorf("delete runtime input event batch: %w", err)
 	}
 	return nil
 }

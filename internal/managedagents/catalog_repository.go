@@ -17,14 +17,14 @@ func (r *Repository) CreateAgent(ctx context.Context, teamID, vendor string, ver
 	if err != nil {
 		return fmt.Errorf("marshal agent snapshot: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_agents (id, team_id, vendor, current_version, snapshot, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5::jsonb, NULL, $6, $7)
 	`, snapshot.ID, teamID, vendor, version, string(payloadJSON), now, now)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent agent: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_agent_versions (agent_id, version, snapshot, created_at)
 		VALUES ($1, $2, $3::jsonb, $4)
 	`, snapshot.ID, version, string(payloadJSON), now)
@@ -68,7 +68,7 @@ func (r *Repository) ListAgents(ctx context.Context, teamID string, opts AgentLi
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, strings.ToUpper(order), strings.ToUpper(order), len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list managed-agent agents: %w", err)
 	}
@@ -106,7 +106,7 @@ func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, versi
 			payloadJSON []byte
 			vendor      string
 		)
-		err := r.pool.QueryRow(ctx, `
+		err := r.db(ctx).QueryRow(ctx, `
 			SELECT v.snapshot, a.vendor
 			FROM managed_agent_agent_versions v
 			JOIN managed_agent_agents a ON a.id = v.agent_id
@@ -128,7 +128,7 @@ func (r *Repository) GetAgent(ctx context.Context, teamID, agentID string, versi
 		payloadJSON []byte
 		vendor      string
 	)
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT snapshot, vendor
 		FROM managed_agent_agents
 		WHERE team_id = $1 AND id = $2
@@ -151,7 +151,7 @@ func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor st
 	if err != nil {
 		return fmt.Errorf("marshal agent snapshot: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_agents
 		SET vendor = $3, current_version = $4, snapshot = $5::jsonb, archived_at = $6, updated_at = $7
 		WHERE team_id = $1 AND id = $2 AND current_version = $8
@@ -161,7 +161,7 @@ func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor st
 	}
 	if result.RowsAffected() == 0 {
 		var exists bool
-		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_agent_agents WHERE team_id = $1 AND id = $2)`, teamID, strings.TrimSpace(agentID)).Scan(&exists); err != nil {
+		if err := r.db(ctx).QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_agent_agents WHERE team_id = $1 AND id = $2)`, teamID, strings.TrimSpace(agentID)).Scan(&exists); err != nil {
 			return fmt.Errorf("query managed-agent agent existence: %w", err)
 		}
 		if !exists {
@@ -169,7 +169,7 @@ func (r *Repository) UpdateAgent(ctx context.Context, teamID, agentID, vendor st
 		}
 		return errors.New("invalid version")
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_agent_versions (agent_id, version, snapshot, created_at)
 		VALUES ($1, $2, $3::jsonb, $4)
 		ON CONFLICT (agent_id, version) DO UPDATE SET snapshot = EXCLUDED.snapshot, created_at = EXCLUDED.created_at
@@ -206,7 +206,7 @@ func (r *Repository) ListAgentVersions(ctx context.Context, teamID, agentID stri
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY v.created_at DESC, v.version DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list managed-agent agent versions: %w", err)
 	}
@@ -247,7 +247,7 @@ func (r *Repository) CreateEnvironment(ctx context.Context, teamID string, snaps
 	if err != nil {
 		return fmt.Errorf("marshal managed_agent_environments snapshot: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_environments (id, team_id, snapshot, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3::jsonb, $4, $5, $6)
 	`, snapshot.ID, teamID, string(payloadJSON), archivedAt, now, now)
@@ -277,7 +277,7 @@ func (r *Repository) ListEnvironments(ctx context.Context, teamID string, limit 
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
 	}
@@ -287,7 +287,7 @@ func (r *Repository) ListEnvironments(ctx context.Context, teamID string, limit 
 
 func (r *Repository) GetEnvironment(ctx context.Context, teamID, environmentID string) (*Environment, error) {
 	var payloadJSON []byte
-	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_environments WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(environmentID)).Scan(&payloadJSON)
+	err := r.db(ctx).QueryRow(ctx, `SELECT snapshot FROM managed_agent_environments WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(environmentID)).Scan(&payloadJSON)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrEnvironmentNotFound
@@ -306,7 +306,7 @@ func (r *Repository) UpdateEnvironment(ctx context.Context, teamID, environmentI
 	if err != nil {
 		return fmt.Errorf("marshal managed_agent_environments snapshot: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_environments SET snapshot = $3::jsonb, archived_at = $4, updated_at = $5 WHERE team_id = $1 AND id = $2
 	`, teamID, strings.TrimSpace(environmentID), string(payloadJSON), archivedAt, updatedAt)
 	if err != nil {
@@ -327,7 +327,7 @@ func (r *Repository) CreateVault(ctx context.Context, teamID string, snapshot Va
 	if err != nil {
 		return fmt.Errorf("marshal managed_agent_vaults snapshot: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_vaults (id, team_id, snapshot, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3::jsonb, $4, $5, $6)
 	`, snapshot.ID, teamID, string(payloadJSON), archivedAt, now, now)
@@ -357,7 +357,7 @@ func (r *Repository) ListVaults(ctx context.Context, teamID string, limit int, p
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
 	}
@@ -367,7 +367,7 @@ func (r *Repository) ListVaults(ctx context.Context, teamID string, limit int, p
 
 func (r *Repository) GetVault(ctx context.Context, teamID, vaultID string) (*Vault, error) {
 	var payloadJSON []byte
-	err := r.pool.QueryRow(ctx, `SELECT snapshot FROM managed_agent_vaults WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(vaultID)).Scan(&payloadJSON)
+	err := r.db(ctx).QueryRow(ctx, `SELECT snapshot FROM managed_agent_vaults WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(vaultID)).Scan(&payloadJSON)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrVaultNotFound
@@ -386,7 +386,7 @@ func (r *Repository) UpdateVault(ctx context.Context, teamID, vaultID string, sn
 	if err != nil {
 		return fmt.Errorf("marshal managed_agent_vaults snapshot: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_vaults SET snapshot = $3::jsonb, archived_at = $4, updated_at = $5 WHERE team_id = $1 AND id = $2
 	`, teamID, strings.TrimSpace(vaultID), string(payloadJSON), archivedAt, updatedAt)
 	if err != nil {
@@ -411,7 +411,7 @@ func (r *Repository) CreateCredential(ctx context.Context, teamID, vaultID strin
 	if err != nil {
 		return fmt.Errorf("marshal credential secret: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_credentials (id, team_id, vault_id, snapshot, secret, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
 	`, snapshot.ID, teamID, vaultID, string(payloadJSON), string(secretJSON), archivedAt, now, now)
@@ -441,7 +441,7 @@ func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
 	}
@@ -450,7 +450,7 @@ func (r *Repository) ListCredentials(ctx context.Context, teamID, vaultID string
 }
 
 func (r *Repository) ListActiveCredentialsForVault(ctx context.Context, teamID, vaultID string) ([]StoredCredential, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.db(ctx).Query(ctx, `
 		SELECT c.snapshot, c.secret
 		FROM managed_agent_credentials c
 		JOIN managed_agent_vaults v
@@ -496,7 +496,7 @@ func (r *Repository) GetCredential(ctx context.Context, teamID, vaultID, credent
 		payloadJSON []byte
 		secretJSON  []byte
 	)
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT snapshot, secret
 		FROM managed_agent_credentials
 		WHERE team_id = $1 AND vault_id = $2 AND id = $3
@@ -527,7 +527,7 @@ func (r *Repository) UpdateCredential(ctx context.Context, teamID, vaultID, cred
 	if err != nil {
 		return fmt.Errorf("marshal credential secret: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_credentials
 		SET snapshot = $4::jsonb, secret = $5::jsonb, archived_at = $6, updated_at = $7
 		WHERE team_id = $1 AND vault_id = $2 AND id = $3
@@ -542,7 +542,7 @@ func (r *Repository) UpdateCredential(ctx context.Context, teamID, vaultID, cred
 }
 
 func (r *Repository) DeleteCredential(ctx context.Context, teamID, vaultID, credentialID string) error {
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		DELETE FROM managed_agent_credentials
 		WHERE team_id = $1 AND vault_id = $2 AND id = $3
 	`, teamID, strings.TrimSpace(vaultID), strings.TrimSpace(credentialID))
@@ -560,7 +560,7 @@ func (r *Repository) CreateFile(ctx context.Context, record *managedFileRecord) 
 	if err != nil {
 		return fmt.Errorf("marshal file snapshot: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_files (
 			id, team_id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id,
 			file_store_volume_id, file_store_path, sha256, content, snapshot, created_at, updated_at
@@ -601,7 +601,7 @@ func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileList
 	}
 	args = append(args, limit+1)
 	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list managed-agent files: %w", err)
 	}
@@ -630,7 +630,7 @@ func (r *Repository) ListFiles(ctx context.Context, teamID string, opts FileList
 
 func (r *Repository) GetFile(ctx context.Context, teamID, fileID string) (*managedFileRecord, error) {
 	var record managedFileRecord
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT id, team_id, filename, mime_type, size_bytes, COALESCE(scope_type, ''), COALESCE(scope_id, ''),
 			COALESCE(file_store_volume_id, ''), COALESCE(file_store_path, ''), COALESCE(sha256, ''),
 			COALESCE(content, ''::bytea), created_at, updated_at
@@ -650,7 +650,7 @@ func (r *Repository) GetFile(ctx context.Context, teamID, fileID string) (*manag
 }
 
 func (r *Repository) DeleteFile(ctx context.Context, teamID, fileID string) error {
-	result, err := r.pool.Exec(ctx, `DELETE FROM managed_agent_files WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(fileID))
+	result, err := r.db(ctx).Exec(ctx, `DELETE FROM managed_agent_files WHERE team_id = $1 AND id = $2`, teamID, strings.TrimSpace(fileID))
 	if err != nil {
 		return fmt.Errorf("delete managed-agent file: %w", err)
 	}
@@ -665,7 +665,7 @@ func (r *Repository) createSnapshotObject(ctx context.Context, table, teamID str
 	if err != nil {
 		return fmt.Errorf("marshal %s snapshot: %w", table, err)
 	}
-	_, err = r.pool.Exec(ctx, fmt.Sprintf(`
+	_, err = r.db(ctx).Exec(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, team_id, snapshot, archived_at, created_at, updated_at)
 		VALUES ($1, $2, $3::jsonb, $4, $5, $6)
 	`, table), stringValue(snapshot["id"]), teamID, string(payloadJSON), archivedAt, now, now)
@@ -677,7 +677,7 @@ func (r *Repository) createSnapshotObject(ctx context.Context, table, teamID str
 
 func (r *Repository) getSnapshotObject(ctx context.Context, table, teamID, id string, notFound error) (map[string]any, error) {
 	var payloadJSON []byte
-	err := r.pool.QueryRow(ctx, fmt.Sprintf(`
+	err := r.db(ctx).QueryRow(ctx, fmt.Sprintf(`
 		SELECT snapshot FROM %s WHERE team_id = $1 AND id = $2
 	`, table), teamID, strings.TrimSpace(id)).Scan(&payloadJSON)
 	if err != nil {
@@ -694,7 +694,7 @@ func (r *Repository) updateSnapshotObject(ctx context.Context, table, teamID, id
 	if err != nil {
 		return fmt.Errorf("marshal %s snapshot: %w", table, err)
 	}
-	result, err := r.pool.Exec(ctx, fmt.Sprintf(`
+	result, err := r.db(ctx).Exec(ctx, fmt.Sprintf(`
 		UPDATE %s SET snapshot = $3::jsonb, archived_at = $4, updated_at = $5 WHERE team_id = $1 AND id = $2
 	`, table), teamID, strings.TrimSpace(id), string(payloadJSON), archivedAt, updatedAt)
 	if err != nil {
@@ -707,7 +707,7 @@ func (r *Repository) updateSnapshotObject(ctx context.Context, table, teamID, id
 }
 
 func (r *Repository) deleteSnapshotObject(ctx context.Context, table, teamID, id string, notFound error) error {
-	result, err := r.pool.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE team_id = $1 AND id = $2`, table), teamID, strings.TrimSpace(id))
+	result, err := r.db(ctx).Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE team_id = $1 AND id = $2`, table), teamID, strings.TrimSpace(id))
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", table, err)
 	}
@@ -718,7 +718,7 @@ func (r *Repository) deleteSnapshotObject(ctx context.Context, table, teamID, id
 }
 
 func (r *Repository) listSnapshots(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
@@ -727,7 +727,7 @@ func (r *Repository) listSnapshots(ctx context.Context, query string, args ...an
 }
 
 func (r *Repository) listSnapshotsWithCursor(ctx context.Context, query string, limit int, args ...any) ([]map[string]any, *string, error) {
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query snapshot page: %w", err)
 	}

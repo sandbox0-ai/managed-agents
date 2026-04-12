@@ -13,7 +13,7 @@ import (
 
 func (r *Repository) EnvironmentNameExists(ctx context.Context, teamID, name, excludeID string) (bool, error) {
 	var exists bool
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1
 			FROM managed_agent_environments
@@ -30,7 +30,7 @@ func (r *Repository) EnvironmentNameExists(ctx context.Context, teamID, name, ex
 
 func (r *Repository) CountActiveSessionsForEnvironment(ctx context.Context, teamID, environmentID string) (int, error) {
 	var count int
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT COUNT(1)
 		FROM managed_agent_sessions
 		WHERE team_id = $1
@@ -45,7 +45,7 @@ func (r *Repository) CountActiveSessionsForEnvironment(ctx context.Context, team
 
 func (r *Repository) CountActiveSessionsForEnvironmentArtifact(ctx context.Context, teamID, artifactID string) (int, error) {
 	var count int
-	err := r.pool.QueryRow(ctx, `
+	err := r.db(ctx).QueryRow(ctx, `
 		SELECT COUNT(1)
 		FROM managed_agent_sessions
 		WHERE team_id = $1
@@ -71,7 +71,7 @@ func (r *Repository) CreateEnvironmentArtifact(ctx context.Context, artifact *En
 	if err != nil {
 		return fmt.Errorf("marshal environment artifact assets: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_environment_artifacts (
 			id, team_id, environment_id, digest, status, config_snapshot, compatibility, assets,
 			build_log, failure_reason, archived_at, created_at, updated_at
@@ -98,7 +98,7 @@ func (r *Repository) UpdateEnvironmentArtifact(ctx context.Context, artifact *En
 	if err != nil {
 		return fmt.Errorf("marshal environment artifact assets: %w", err)
 	}
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_environment_artifacts
 		SET status = $3,
 			config_snapshot = $4::jsonb,
@@ -121,7 +121,7 @@ func (r *Repository) UpdateEnvironmentArtifact(ctx context.Context, artifact *En
 }
 
 func (r *Repository) BeginEnvironmentArtifactBuild(ctx context.Context, teamID, artifactID string, now time.Time) (bool, error) {
-	result, err := r.pool.Exec(ctx, `
+	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_environment_artifacts
 		SET status = $3,
 			build_log = '',
@@ -167,7 +167,7 @@ func (r *Repository) GetLatestEnvironmentArtifact(ctx context.Context, teamID, e
 }
 
 func (r *Repository) ListGCableEnvironmentArtifacts(ctx context.Context, teamID, environmentID, keepArtifactID string) ([]*EnvironmentArtifact, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.db(ctx).Query(ctx, `
 		SELECT id, team_id, environment_id, digest, status, config_snapshot, compatibility, assets,
 			build_log, failure_reason, archived_at, created_at, updated_at
 		FROM managed_agent_environment_artifacts artifact
@@ -204,7 +204,7 @@ func (r *Repository) ListGCableEnvironmentArtifacts(ctx context.Context, teamID,
 }
 
 func (r *Repository) getEnvironmentArtifact(ctx context.Context, query string, args ...any) (*EnvironmentArtifact, error) {
-	row := r.pool.QueryRow(ctx, query, args...)
+	row := r.db(ctx).QueryRow(ctx, query, args...)
 	artifact, err := scanEnvironmentArtifact(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

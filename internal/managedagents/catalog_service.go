@@ -658,6 +658,16 @@ func (s *Service) readFileContent(ctx context.Context, credential RequestCredent
 }
 
 func (s *Service) ArchiveSession(ctx context.Context, principal Principal, sessionID string) (*Session, error) {
+	var archived *Session
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		archived, err = s.archiveSessionLocked(ctx, principal, sessionID)
+		return err
+	})
+	return archived, err
+}
+
+func (s *Service) archiveSessionLocked(ctx context.Context, principal Principal, sessionID string) (*Session, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -723,6 +733,16 @@ func (s *Service) ListSessionResources(ctx context.Context, principal Principal,
 }
 
 func (s *Service) AddSessionResource(ctx context.Context, principal Principal, sessionID string, req AddSessionResourceRequest) (map[string]any, error) {
+	var resource map[string]any
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		resource, err = s.addSessionResourceLocked(ctx, principal, sessionID, req)
+		return err
+	})
+	return resource, err
+}
+
+func (s *Service) addSessionResourceLocked(ctx context.Context, principal Principal, sessionID string, req AddSessionResourceRequest) (map[string]any, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -759,6 +779,16 @@ func (s *Service) GetSessionResource(ctx context.Context, principal Principal, s
 }
 
 func (s *Service) UpdateSessionResource(ctx context.Context, principal Principal, sessionID, resourceID string, req UpdateSessionResourceRequest) (map[string]any, error) {
+	var resource map[string]any
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		resource, err = s.updateSessionResourceLocked(ctx, principal, sessionID, resourceID, req)
+		return err
+	})
+	return resource, err
+}
+
+func (s *Service) updateSessionResourceLocked(ctx context.Context, principal Principal, sessionID, resourceID string, req UpdateSessionResourceRequest) (map[string]any, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -797,6 +827,16 @@ func (s *Service) UpdateSessionResource(ctx context.Context, principal Principal
 }
 
 func (s *Service) DeleteSessionResource(ctx context.Context, principal Principal, sessionID, resourceID string) (map[string]any, error) {
+	var deleted map[string]any
+	err := s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+		var err error
+		deleted, err = s.deleteSessionResourceLocked(ctx, principal, sessionID, resourceID)
+		return err
+	})
+	return deleted, err
+}
+
+func (s *Service) deleteSessionResourceLocked(ctx context.Context, principal Principal, sessionID, resourceID string) (map[string]any, error) {
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err

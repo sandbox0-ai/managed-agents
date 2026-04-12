@@ -51,7 +51,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	if err != nil {
 		return err
 	}
-	client, err := m.newSandboxClient(credential.Token, record.TeamID)
+	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
 	if err != nil {
 		return err
 	}
