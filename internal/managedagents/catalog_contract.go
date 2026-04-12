@@ -563,11 +563,7 @@ func (s *Service) normalizeAgentSkills(ctx context.Context, principal Principal,
 			}
 			out = append(out, map[string]any{"type": "custom", "skill_id": skillID, "version": version})
 		case "anthropic":
-			version, err = s.anthropicSkills.ResolveVersion(ctx, skillID, version)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, map[string]any{"type": "anthropic", "skill_id": skillID, "version": version})
+			return nil, errors.New("anthropic pre-built skills are not supported")
 		default:
 			return nil, errors.New("invalid skill type")
 		}

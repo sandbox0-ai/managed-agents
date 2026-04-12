@@ -68,12 +68,6 @@ spec:
               value: {{ .Values.agentGateway.env.sandboxTTLSeconds | quote }}
             - name: MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS
               value: {{ .Values.agentGateway.env.sandboxHardTTLSeconds | quote }}
-            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL
-              value: {{ .Values.agentGateway.env.anthropicSkillsBaseURL | quote }}
-            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_API_VERSION
-              value: {{ .Values.agentGateway.env.anthropicSkillsVersion | quote }}
-            - name: MANAGED_AGENT_ANTHROPIC_SKILLS_TIMEOUT
-              value: {{ .Values.agentGateway.env.anthropicSkillsTimeout | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MANIFEST_PATH
               value: {{ .Values.agentGateway.env.templateManifestPath | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MAIN_IMAGE
@@ -84,13 +78,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.agentGateway.secretKeys.databaseURL.secretName }}
                   key: {{ .Values.agentGateway.secretKeys.databaseURL.key }}
-            {{- end }}
-            {{- if .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.enabled }}
-            - name: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.envName }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.secretName }}
-                  key: {{ .Values.agentGateway.secretKeys.anthropicSkillsAPIKey.key }}
             {{- end }}
             {{- with .Values.agentGateway.extraEnv }}
             {{- toYaml . | nindent 12 }}

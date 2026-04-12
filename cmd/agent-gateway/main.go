@@ -34,10 +34,6 @@ type config struct {
 	Sandbox0AuthBaseURL    string
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
-	AnthropicSkillsBaseURL string
-	AnthropicSkillsAPIKey  string
-	AnthropicSkillsVersion string
-	AnthropicSkillsTimeout time.Duration
 	RuntimeEnabled         bool
 	RuntimeRegionID        string
 	ClaudeTemplate         string
@@ -93,18 +89,6 @@ func main() {
 
 	repo := managedagents.NewRepository(pool)
 	serviceOpts := make([]managedagents.ServiceOption, 0, 1)
-	if strings.TrimSpace(cfg.AnthropicSkillsAPIKey) != "" {
-		catalog, err := managedagents.NewAnthropicRemoteSkillCatalog(managedagents.AnthropicRemoteSkillCatalogConfig{
-			BaseURL:    cfg.AnthropicSkillsBaseURL,
-			APIKey:     cfg.AnthropicSkillsAPIKey,
-			APIVersion: cfg.AnthropicSkillsVersion,
-			Timeout:    cfg.AnthropicSkillsTimeout,
-		})
-		if err != nil {
-			logger.Fatal("create anthropic skill catalog", zap.Error(err))
-		}
-		serviceOpts = append(serviceOpts, managedagents.WithAnthropicSkillCatalog(catalog))
-	}
 	runtimeCfg := managedagentsruntime.Config{
 		Enabled:                cfg.RuntimeEnabled,
 		ClaudeTemplate:         cfg.ClaudeTemplate,
@@ -188,10 +172,6 @@ func loadConfig() (config, error) {
 		Sandbox0AuthBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL")), "/"),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
-		AnthropicSkillsBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_BASE_URL")), "/"),
-		AnthropicSkillsAPIKey:  strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY")),
-		AnthropicSkillsVersion: strings.TrimSpace(os.Getenv("MANAGED_AGENT_ANTHROPIC_SKILLS_API_VERSION")),
-		AnthropicSkillsTimeout: envDuration("MANAGED_AGENT_ANTHROPIC_SKILLS_TIMEOUT", 15*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
 		RuntimeRegionID:        strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_REGION_ID")),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),

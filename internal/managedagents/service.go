@@ -26,22 +26,13 @@ type RuntimeManager interface {
 
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
-	repo            *Repository
-	runtime         RuntimeManager
-	logger          *zap.Logger
-	anthropicSkills AnthropicSkillCatalog
-	fileStore       FileStore
+	repo      *Repository
+	runtime   RuntimeManager
+	logger    *zap.Logger
+	fileStore FileStore
 }
 
 type ServiceOption func(*Service)
-
-func WithAnthropicSkillCatalog(catalog AnthropicSkillCatalog) ServiceOption {
-	return func(s *Service) {
-		if catalog != nil {
-			s.anthropicSkills = catalog
-		}
-	}
-}
 
 func WithFileStore(store FileStore) ServiceOption {
 	return func(s *Service) {
@@ -56,7 +47,7 @@ func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger, op
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	service := &Service{repo: repo, runtime: runtime, logger: logger, anthropicSkills: defaultAnthropicSkillRegistry()}
+	service := &Service{repo: repo, runtime: runtime, logger: logger}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(service)

@@ -181,10 +181,7 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 		}
 		switch skillType {
 		case "anthropic":
-			if !supportsAnthropicPrebuiltSkills(vendor, engine) {
-				return nil, fmt.Errorf("anthropic pre-built skill %s requires a Claude runtime that supports Anthropic pre-built skills", skillID)
-			}
-			preloadSet[skillID] = struct{}{}
+			return nil, fmt.Errorf("anthropic pre-built skill %s is not supported", skillID)
 		case "custom":
 			if version == "" {
 				return nil, fmt.Errorf("custom skill %s is missing version", skillID)
@@ -211,50 +208,6 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 	}
 	sort.Strings(preloadNames)
 	return preloadNames, nil
-}
-
-func supportsAnthropicPrebuiltSkills(vendor string, engine map[string]any) bool {
-	if normalizeManagedRuntimeMetadataValue(vendor) != gatewaymanagedagents.ManagedAgentCredentialVendorClaude {
-		return false
-	}
-	if enabled, ok := optionalBoolValue(engine["supports_anthropic_prebuilt_skills"]); ok {
-		return enabled
-	}
-	env := mapValue(engine["env"])
-	baseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"]))
-	if baseURL == "" {
-		return true
-	}
-	return isAnthropicRuntimeBaseURL(baseURL)
-}
-
-func optionalBoolValue(value any) (bool, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		trimmed := strings.ToLower(strings.TrimSpace(typed))
-		if trimmed == "true" {
-			return true, true
-		}
-		if trimmed == "false" {
-			return false, true
-		}
-	}
-	return false, false
-}
-
-func isAnthropicRuntimeBaseURL(raw string) bool {
-	canonical, err := canonicalManagedRuntimeURL(raw)
-	if err != nil {
-		return false
-	}
-	parsedURL, err := url.Parse(canonical)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))
-	return host == "api.anthropic.com" || strings.HasSuffix(host, ".anthropic.com")
 }
 
 func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, resources []map[string]any) ([]managedCredentialBinding, error) {

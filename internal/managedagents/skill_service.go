@@ -34,7 +34,7 @@ func (s *Service) ListSkills(ctx context.Context, principal Principal, limit int
 		return nil, nil, false, errors.New("source must be custom or anthropic")
 	}
 	if trimmedSource == "anthropic" {
-		return s.anthropicSkills.ListSkills(ctx, limit, page)
+		return []Skill{}, nil, false, nil
 	}
 	if trimmedSource == "" {
 		return s.listAllSkills(ctx, principal, limit, page)
@@ -43,11 +43,6 @@ func (s *Service) ListSkills(ctx context.Context, principal Principal, limit int
 }
 
 func (s *Service) GetSkill(ctx context.Context, principal Principal, skillID string) (*Skill, error) {
-	if skill, err := s.anthropicSkills.GetSkill(ctx, skillID); err == nil {
-		return skill, nil
-	} else if !errors.Is(err, ErrSkillNotFound) {
-		return nil, err
-	}
 	return s.repo.GetSkill(ctx, principal.TeamID, skillID)
 }
 
@@ -73,20 +68,10 @@ func (s *Service) CreateSkillVersion(ctx context.Context, principal Principal, s
 }
 
 func (s *Service) ListSkillVersions(ctx context.Context, principal Principal, skillID string, limit int, page string) ([]SkillVersion, *string, bool, error) {
-	if _, err := s.anthropicSkills.GetSkill(ctx, skillID); err == nil {
-		return s.anthropicSkills.ListSkillVersions(ctx, skillID, limit, page)
-	} else if !errors.Is(err, ErrSkillNotFound) {
-		return nil, nil, false, err
-	}
 	return s.repo.ListSkillVersions(ctx, principal.TeamID, skillID, limit, page)
 }
 
 func (s *Service) GetSkillVersion(ctx context.Context, principal Principal, skillID, version string) (*SkillVersion, error) {
-	if _, err := s.anthropicSkills.GetSkill(ctx, skillID); err == nil {
-		return s.anthropicSkills.GetSkillVersion(ctx, skillID, version)
-	} else if !errors.Is(err, ErrSkillNotFound) {
-		return nil, err
-	}
 	return s.repo.GetSkillVersion(ctx, principal.TeamID, skillID, version)
 }
 

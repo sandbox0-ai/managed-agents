@@ -54,9 +54,6 @@ agentGateway:
     engineStateMountPath: /var/lib/agent-wrapper
     sandboxTTLSeconds: 3600
     sandboxHardTTLSeconds: 21600
-    anthropicSkillsBaseURL: ""
-    anthropicSkillsVersion: ""
-    anthropicSkillsTimeout: 15s
     templateManifestPath: ""
     templateMainImage: sandbox0ai/managed-agents:wrapper-latest
   extraEnv: []
@@ -68,8 +65,3 @@ agentGateway:
       envName: MANAGED_AGENT_DATABASE_URL
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_DATABASE_URL
-    anthropicSkillsAPIKey:
-      enabled: false
-      envName: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY
-      secretName: managed-agents-runtime
-      key: MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY

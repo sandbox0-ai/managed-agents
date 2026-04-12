@@ -417,39 +417,12 @@ func TestSkillFileTargetPathPlacesFilesUnderProjectSkillsDirectory(t *testing.T)
 	}
 }
 
-func TestMaterializeAgentSkillsPassesAnthropicPrebuiltByName(t *testing.T) {
+func TestMaterializeAgentSkillsRejectsAnthropicPrebuiltSkill(t *testing.T) {
 	manager := &SDKRuntimeManager{}
-	names, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{}, map[string]any{
+	_, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{}, map[string]any{
 		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}},
 	})
-	if err != nil {
-		t.Fatalf("materializeAgentSkills: %v", err)
-	}
-	if len(names) != 1 || names[0] != "xlsx" {
-		t.Fatalf("names = %#v, want xlsx", names)
-	}
-}
-
-func TestMaterializeAgentSkillsRejectsDisabledAnthropicPrebuiltRuntime(t *testing.T) {
-	manager := &SDKRuntimeManager{}
-	_, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{
-		"supports_anthropic_prebuilt_skills": false,
-	}, map[string]any{
-		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "requires a Claude runtime") {
-		t.Fatalf("error = %v, want pre-built runtime capability rejection", err)
-	}
-}
-
-func TestMaterializeAgentSkillsRejectsAnthropicPrebuiltForNonAnthropicBaseURL(t *testing.T) {
-	manager := &SDKRuntimeManager{}
-	_, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{
-		"env": map[string]any{"ANTHROPIC_BASE_URL": "https://proxy.example.com"},
-	}, map[string]any{
-		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "requires a Claude runtime") {
-		t.Fatalf("error = %v, want pre-built runtime capability rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("error = %v, want pre-built skill rejection", err)
 	}
 }
