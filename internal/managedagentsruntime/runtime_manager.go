@@ -39,6 +39,7 @@ type Config struct {
 	SandboxBaseURL         string
 	SandboxAdminAPIKey     string
 	RuntimeCallbackBaseURL string
+	RuntimeProxyBaseURL    string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -510,12 +511,13 @@ func (m *SDKRuntimeManager) wrapperRequestTarget(rawWrapperURL, path string) (st
 	if err != nil {
 		return "", "", err
 	}
-	if strings.TrimSpace(m.cfg.SandboxBaseURL) == "" {
+	proxyBaseURL := strings.TrimSpace(m.cfg.RuntimeProxyBaseURL)
+	if proxyBaseURL == "" {
 		return strings.TrimRight(wrapperURL, "/") + path, "", nil
 	}
-	baseURL, err := canonicalManagedRuntimeURL(m.cfg.SandboxBaseURL)
+	baseURL, err := canonicalManagedRuntimeURL(proxyBaseURL)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid sandbox base url %q", m.cfg.SandboxBaseURL)
+		return "", "", fmt.Errorf("invalid runtime proxy base url %q", proxyBaseURL)
 	}
 	baseParsed, err := url.Parse(baseURL)
 	if err != nil {

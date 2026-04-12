@@ -33,6 +33,7 @@ type config struct {
 	Sandbox0BaseURL        string
 	Sandbox0AdminAPIKey    string
 	RuntimeCallbackBaseURL string
+	RuntimeProxyBaseURL    string
 	Sandbox0Timeout        time.Duration
 	RuntimeEnabled         bool
 	ClaudeTemplate         string
@@ -104,6 +105,7 @@ func main() {
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
 		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
+		RuntimeProxyBaseURL:    cfg.RuntimeProxyBaseURL,
 	}.WithDefaults(0)
 	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
 	if err != nil {
@@ -172,6 +174,7 @@ func loadConfig() (config, error) {
 		Sandbox0BaseURL:        strings.TrimRight(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL), "/"),
 		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
+		RuntimeProxyBaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_PROXY_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 60*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),

@@ -46,6 +46,7 @@ agentGateway:
     sandbox0Timeout: 60s
     runtimeEnabled: true
     runtimeCallbackBaseURL: ""
+    runtimeProxyBaseURL: ""
     claudeTemplate: managed-agent-claude
     wrapperPort: 8080
     workspaceMountPath: /workspace

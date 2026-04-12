@@ -30,6 +30,9 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
 		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
 	}
+	if cfg.RuntimeProxyBaseURL != "" {
+		t.Fatalf("RuntimeProxyBaseURL = %q, want empty default", cfg.RuntimeProxyBaseURL)
+	}
 }
 
 func TestConfigWithDefaultsLeavesHardTTLConfigurable(t *testing.T) {
@@ -132,8 +135,22 @@ func TestCanonicalWrapperURL(t *testing.T) {
 	}
 }
 
-func TestWrapperRequestTargetUsesSandboxBaseURLAndHostHeader(t *testing.T) {
+func TestWrapperRequestTargetUsesDirectWrapperURLByDefault(t *testing.T) {
 	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: "http://127.0.0.1:18080"}}
+	requestURL, hostHeader, err := mgr.wrapperRequestTarget("rs-example--p8080.aws-us-east-1.sandbox0.app", "/v1/runtime/session")
+	if err != nil {
+		t.Fatalf("wrapperRequestTarget returned error: %v", err)
+	}
+	if requestURL != "https://rs-example--p8080.aws-us-east-1.sandbox0.app/v1/runtime/session" {
+		t.Fatalf("requestURL = %q, want %q", requestURL, "https://rs-example--p8080.aws-us-east-1.sandbox0.app/v1/runtime/session")
+	}
+	if hostHeader != "" {
+		t.Fatalf("hostHeader = %q, want empty direct request host", hostHeader)
+	}
+}
+
+func TestWrapperRequestTargetUsesRuntimeProxyBaseURLAndHostHeader(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{RuntimeProxyBaseURL: "http://127.0.0.1:18080"}}
 	requestURL, hostHeader, err := mgr.wrapperRequestTarget("rs-example--p8080.aws-us-east-1.sandbox0.app", "/v1/runtime/session")
 	if err != nil {
 		t.Fatalf("wrapperRequestTarget returned error: %v", err)
@@ -147,7 +164,7 @@ func TestWrapperRequestTargetUsesSandboxBaseURLAndHostHeader(t *testing.T) {
 }
 
 func TestWrapperRequestTargetPreservesBasePathPrefix(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: "http://gateway.internal/base"}}
+	mgr := &SDKRuntimeManager{cfg: Config{RuntimeProxyBaseURL: "http://gateway.internal/base"}}
 	requestURL, hostHeader, err := mgr.wrapperRequestTarget("https://wrapper.example.test", "/v1/runs")
 	if err != nil {
 		t.Fatalf("wrapperRequestTarget returned error: %v", err)

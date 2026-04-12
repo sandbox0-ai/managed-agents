@@ -26,3 +26,16 @@ func TestLoadConfigTrimsSandbox0BaseURL(t *testing.T) {
 		t.Fatalf("Sandbox0BaseURL = %q, want trimmed URL", cfg.Sandbox0BaseURL)
 	}
 }
+
+func TestLoadConfigTrimsRuntimeProxyBaseURL(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
+	t.Setenv("MANAGED_AGENT_RUNTIME_PROXY_BASE_URL", "http://127.0.0.1:18080/base/")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.RuntimeProxyBaseURL != "http://127.0.0.1:18080/base" {
+		t.Fatalf("RuntimeProxyBaseURL = %q, want trimmed URL", cfg.RuntimeProxyBaseURL)
+	}
+}
