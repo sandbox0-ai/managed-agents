@@ -3,6 +3,7 @@ package managedagents
 import (
 	"errors"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -12,6 +13,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const maxSkillUploadBytes int64 = 30 * 1024 * 1024
+
+var errSkillUploadTooLarge = errors.New("skill upload exceeds 30 MiB limit")
+
 func (h *Handler) CreateSkill(c *gin.Context) {
 	principal, _, ok := h.requirePrincipal(c)
 	if !ok {
@@ -19,7 +24,7 @@ func (h *Handler) CreateSkill(c *gin.Context) {
 	}
 	displayTitle, files, err := readValidatedSkillCreateUpload(c)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeSkillUploadError(c, err)
 		return
 	}
 	skill, err := h.service.CreateSkill(c.Request.Context(), principal, displayTitle, files)
@@ -105,7 +110,7 @@ func (h *Handler) CreateSkillVersion(c *gin.Context) {
 	}
 	files, err := readValidatedSkillVersionUpload(c)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		writeSkillUploadError(c, err)
 		return
 	}
 	version, err := h.service.CreateSkillVersion(c.Request.Context(), principal, c.Param("skill_id"), files)
@@ -184,27 +189,8 @@ func (h *Handler) DeleteSkillVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, contractResponse)
 }
 
-func readUploadedSkillFiles(c *gin.Context) ([]uploadedSkillFile, error) {
-	form, err := c.MultipartForm()
-	if err != nil {
-		return nil, err
-	}
-	return uploadedSkillFilesFromForm(form)
-}
-
 func readValidatedSkillCreateUpload(c *gin.Context) (*string, []uploadedSkillFile, error) {
-	form, err := c.MultipartForm()
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := validateSkillMultipartForm(form, true); err != nil {
-		return nil, nil, err
-	}
-	displayTitle, err := singleOptionalMultipartValue(form, "display_title")
-	if err != nil {
-		return nil, nil, err
-	}
-	files, err := uploadedSkillFilesFromForm(form)
+	displayTitle, files, err := readSkillMultipartUpload(c, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -212,75 +198,97 @@ func readValidatedSkillCreateUpload(c *gin.Context) (*string, []uploadedSkillFil
 }
 
 func readValidatedSkillVersionUpload(c *gin.Context) ([]uploadedSkillFile, error) {
-	form, err := c.MultipartForm()
+	_, files, err := readSkillMultipartUpload(c, false)
+	return files, err
+}
+
+func readSkillMultipartUpload(c *gin.Context, allowDisplayTitle bool) (*string, []uploadedSkillFile, error) {
+	reader, err := c.Request.MultipartReader()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := validateSkillMultipartForm(form, false); err != nil {
-		return nil, err
-	}
-	return uploadedSkillFilesFromForm(form)
-}
-
-func uploadedSkillFilesFromForm(form *multipart.Form) ([]uploadedSkillFile, error) {
-	if form == nil {
-		return nil, errors.New("multipart form is required")
-	}
-	fileHeaders := form.File["files"]
-	if len(fileHeaders) == 0 {
-		return nil, errors.New("files are required")
-	}
-	files := make([]uploadedSkillFile, 0, len(fileHeaders))
-	for _, header := range fileHeaders {
-		file, err := header.Open()
+	var displayTitleValues []string
+	files := make([]uploadedSkillFile, 0)
+	var totalBytes int64
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		content, readErr := io.ReadAll(file)
-		file.Close()
-		if readErr != nil {
-			return nil, readErr
+		fieldName, fileName, err := skillMultipartPartDisposition(part)
+		if err != nil {
+			_ = part.Close()
+			return nil, nil, err
 		}
-		files = append(files, uploadedSkillFile{Path: header.Filename, Content: content})
+		switch fieldName {
+		case "display_title":
+			if !allowDisplayTitle || fileName != "" {
+				_ = part.Close()
+				return nil, nil, errors.New("invalid multipart field: display_title")
+			}
+			content, readErr := io.ReadAll(part)
+			_ = part.Close()
+			if readErr != nil {
+				return nil, nil, readErr
+			}
+			displayTitleValues = append(displayTitleValues, string(content))
+		case "files", "files[]":
+			if strings.TrimSpace(fileName) == "" {
+				_ = part.Close()
+				return nil, nil, errors.New("uploaded file path is required")
+			}
+			remaining := maxSkillUploadBytes - totalBytes
+			content, readErr := io.ReadAll(io.LimitReader(part, remaining+1))
+			_ = part.Close()
+			if readErr != nil {
+				return nil, nil, readErr
+			}
+			if int64(len(content)) > remaining {
+				return nil, nil, errSkillUploadTooLarge
+			}
+			totalBytes += int64(len(content))
+			files = append(files, uploadedSkillFile{Path: fileName, Content: content})
+		default:
+			_ = part.Close()
+			return nil, nil, errors.New("invalid multipart field: " + fieldName)
+		}
 	}
-	return files, nil
+	if len(displayTitleValues) > 1 {
+		return nil, nil, errors.New("invalid multipart field: display_title")
+	}
+	if len(files) == 0 {
+		return nil, nil, errors.New("files are required")
+	}
+	if len(displayTitleValues) == 0 {
+		return nil, files, nil
+	}
+	return optionalTrimmedString(displayTitleValues[0]), files, nil
 }
 
-func validateSkillMultipartForm(form *multipart.Form, allowDisplayTitle bool) error {
-	if form == nil {
-		return errors.New("multipart form is required")
+func skillMultipartPartDisposition(part *multipart.Part) (string, string, error) {
+	if part == nil {
+		return "", "", errors.New("multipart part is required")
 	}
-	for key := range form.Value {
-		if key == "display_title" && allowDisplayTitle {
-			continue
-		}
-		return errors.New("invalid multipart field: " + key)
+	_, params, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if err != nil {
+		return "", "", err
 	}
-	for key := range form.File {
-		if key != "files" {
-			return errors.New("invalid multipart field: " + key)
-		}
+	fieldName := strings.TrimSpace(params["name"])
+	if fieldName == "" {
+		return "", "", errors.New("multipart field name is required")
 	}
-	if !allowDisplayTitle {
-		if values := form.Value["display_title"]; len(values) > 0 {
-			return errors.New("invalid multipart field: display_title")
-		}
-	}
-	return nil
+	return fieldName, params["filename"], nil
 }
 
-func singleOptionalMultipartValue(form *multipart.Form, key string) (*string, error) {
-	if form == nil {
-		return nil, nil
+func writeSkillUploadError(c *gin.Context, err error) {
+	if errors.Is(err, errSkillUploadTooLarge) {
+		writeError(c, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+		return
 	}
-	values := form.Value[key]
-	if len(values) == 0 {
-		return nil, nil
-	}
-	if len(values) > 1 {
-		return nil, errors.New("invalid multipart field: " + key)
-	}
-	return optionalTrimmedString(values[0]), nil
+	writeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 }
 
 func optionalTrimmedString(value string) *string {

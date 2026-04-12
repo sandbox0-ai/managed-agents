@@ -21,6 +21,32 @@ func TestRequireManagedAgentsBetaAcceptsFilesAPIBetaForFilesRoutes(t *testing.T)
 	}
 }
 
+func TestRequireManagedAgentsBetaAcceptsSkillsAPIBetaForSkillsRoutes(t *testing.T) {
+	router := betaTestRouter("/v1/skills/:skill_id/versions")
+	req := httptest.NewRequest(http.MethodGet, "/v1/skills/skill_123/versions", nil)
+	req.Header.Set("Anthropic-Beta", skillsAPIBetaHeader)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequireManagedAgentsBetaRejectsSkillsAPIBetaForManagedAgentRoutes(t *testing.T) {
+	router := betaTestRouter("/v1/agents")
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	req.Header.Set("Anthropic-Beta", skillsAPIBetaHeader)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestRequireManagedAgentsBetaRejectsFilesAPIBetaForManagedAgentRoutes(t *testing.T) {
 	router := betaTestRouter("/v1/agents")
 	req := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)

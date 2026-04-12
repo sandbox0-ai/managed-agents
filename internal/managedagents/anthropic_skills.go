@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const managedAgentsUpstreamBetaHeader = managedAgentsBetaHeader
+const managedAgentsUpstreamBetaHeader = skillsAPIBetaHeader
 
 type AnthropicSkillCatalog interface {
 	Has(skillID string) bool
@@ -216,6 +216,10 @@ func (c *anthropicRemoteSkillCatalog) ResolveVersion(ctx context.Context, skillI
 		if _, err := normalizeRequiredText(trimmedVersion, "version", 64); err != nil {
 			return "", err
 		}
+		path := "/v1/skills/" + url.PathEscape(strings.TrimSpace(skillID)) + "/versions/" + url.PathEscape(trimmedVersion)
+		if err := c.doJSON(ctx, http.MethodGet, path, nil, nil, nil); err != nil {
+			return "", err
+		}
 		return trimmedVersion, nil
 	}
 	skill, err := c.GetSkill(ctx, skillID)
@@ -268,8 +272,14 @@ func (c *anthropicRemoteSkillCatalog) ListSkillVersions(ctx context.Context, ski
 }
 
 func (c *anthropicRemoteSkillCatalog) GetSkillVersion(ctx context.Context, skillID, version string) (*SkillVersion, error) {
-	resolvedVersion, err := c.ResolveVersion(ctx, skillID, version)
-	if err != nil {
+	resolvedVersion := strings.TrimSpace(version)
+	if resolvedVersion == "" || strings.EqualFold(resolvedVersion, "latest") {
+		var err error
+		resolvedVersion, err = c.ResolveVersion(ctx, skillID, version)
+		if err != nil {
+			return nil, err
+		}
+	} else if _, err := normalizeRequiredText(resolvedVersion, "version", 64); err != nil {
 		return nil, err
 	}
 	response := SkillVersion{}
@@ -300,7 +310,7 @@ func (c *anthropicRemoteSkillCatalog) doJSON(ctx context.Context, method, reques
 	if err != nil {
 		return fmt.Errorf("request anthropic skill api: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("read anthropic skill api response: %w", err)

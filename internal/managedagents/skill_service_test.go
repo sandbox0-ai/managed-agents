@@ -107,8 +107,8 @@ func TestAnthropicRemoteSkillCatalogListSkills(t *testing.T) {
 		if got := r.Header.Get("X-Api-Key"); got != "test-key" {
 			t.Fatalf("x-api-key = %q, want test-key", got)
 		}
-		if got := r.Header.Get("Anthropic-Beta"); got != managedAgentsBetaHeader {
-			t.Fatalf("anthropic-beta = %q, want %q", got, managedAgentsBetaHeader)
+		if got := r.Header.Get("Anthropic-Beta"); got != skillsAPIBetaHeader {
+			t.Fatalf("anthropic-beta = %q, want %q", got, skillsAPIBetaHeader)
 		}
 		if r.URL.Path != "/v1/skills" {
 			t.Fatalf("path = %q, want /v1/skills", r.URL.Path)
@@ -136,6 +136,31 @@ func TestAnthropicRemoteSkillCatalogListSkills(t *testing.T) {
 	}
 	if hasMore || nextPage != nil {
 		t.Fatalf("hasMore/nextPage = %v/%v, want false/nil", hasMore, nextPage)
+	}
+}
+
+func TestAnthropicRemoteSkillCatalogResolveVersionVerifiesExplicitVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/skills/xlsx/versions/2" {
+			t.Fatalf("path = %q, want /v1/skills/xlsx/versions/2", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"type":"skill_version","id":"skillver_anthropic_xlsx_2","skill_id":"xlsx","version":"2","name":"xlsx","description":"Excel","directory":"xlsx","created_at":"2026-04-10T00:00:00Z"}`))
+	}))
+	defer server.Close()
+
+	catalog, err := NewAnthropicRemoteSkillCatalog(AnthropicRemoteSkillCatalogConfig{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropicRemoteSkillCatalog: %v", err)
+	}
+	version, err := catalog.ResolveVersion(t.Context(), "xlsx", "2")
+	if err != nil {
+		t.Fatalf("ResolveVersion: %v", err)
+	}
+	if version != "2" {
+		t.Fatalf("version = %q, want 2", version)
 	}
 }
 

@@ -2,11 +2,22 @@ package managedagents
 
 import (
 	"errors"
+	"fmt"
 	"path"
 	"strings"
 )
 
-func parseSkillUpload(files []uploadedSkillFile, fallbackDirectory string) (*parsedSkillUpload, error) {
+const (
+	maxSkillNameLength        = 64
+	maxSkillDescriptionLength = 1024
+)
+
+var reservedSkillNames = map[string]struct{}{
+	"anthropic": {},
+	"claude":    {},
+}
+
+func parseSkillUpload(files []uploadedSkillFile, _ string) (*parsedSkillUpload, error) {
 	if len(files) == 0 {
 		return nil, errors.New("files are required")
 	}
@@ -14,9 +25,15 @@ func parseSkillUpload(files []uploadedSkillFile, fallbackDirectory string) (*par
 	skillMarkdown := ""
 	normalizedFiles := make([]uploadedSkillFile, 0, len(files))
 	for _, file := range files {
+		if hasParentDirectorySegment(strings.ReplaceAll(file.Path, "\\", "/")) {
+			return nil, errors.New("uploaded file path must not contain parent directory segments")
+		}
 		normalizedPath := normalizeUploadedPath(file.Path)
 		if normalizedPath == "" {
 			return nil, errors.New("uploaded file path is required")
+		}
+		if hasParentDirectorySegment(normalizedPath) {
+			return nil, errors.New("uploaded file path must not contain parent directory segments")
 		}
 		directory, relativePath := splitUploadedPath(normalizedPath)
 		if directory != "" {
@@ -26,7 +43,7 @@ func parseSkillUpload(files []uploadedSkillFile, fallbackDirectory string) (*par
 				return nil, errors.New("all skill files must be in the same top-level directory")
 			}
 		}
-		if strings.EqualFold(relativePath, "SKILL.md") {
+		if directory != "" && strings.EqualFold(relativePath, "SKILL.md") {
 			skillMarkdown = string(file.Content)
 		}
 		normalizedFiles = append(normalizedFiles, uploadedSkillFile{
@@ -35,20 +52,14 @@ func parseSkillUpload(files []uploadedSkillFile, fallbackDirectory string) (*par
 		})
 	}
 	if topDirectory == "" {
-		topDirectory = sanitizeSkillDirectory(fallbackDirectory)
-	}
-	if topDirectory == "" {
-		topDirectory = "skill"
+		return nil, errors.New("all skill files must be in the same top-level directory")
 	}
 	if strings.TrimSpace(skillMarkdown) == "" {
 		return nil, errors.New("skill upload must include SKILL.md at the top-level directory root")
 	}
-	name, description := extractSkillMetadata(skillMarkdown)
-	if name == "" {
-		name = topDirectory
-	}
-	if description == "" {
-		description = "Custom skill uploaded to sandbox0 managed agents"
+	name, description, err := extractSkillMetadata(skillMarkdown)
+	if err != nil {
+		return nil, err
 	}
 	return &parsedSkillUpload{
 		Name:        name,
@@ -76,46 +87,43 @@ func splitUploadedPath(value string) (string, string) {
 	return parts[0], strings.Join(parts[1:], "/")
 }
 
-func sanitizeSkillDirectory(value string) string {
-	trimmed := strings.TrimSpace(strings.ToLower(value))
-	trimmed = strings.ReplaceAll(trimmed, " ", "-")
-	trimmed = strings.ReplaceAll(trimmed, "_", "-")
-	trimmed = strings.Trim(trimmed, "-")
-	if trimmed == "" {
-		return ""
-	}
-	var builder strings.Builder
-	for _, char := range trimmed {
-		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-' {
-			builder.WriteRune(char)
+func hasParentDirectorySegment(value string) bool {
+	for _, part := range strings.Split(value, "/") {
+		if part == ".." {
+			return true
 		}
 	}
-	return strings.Trim(builder.String(), "-")
+	return false
 }
 
-func extractSkillMetadata(markdown string) (string, string) {
-	frontMatter := parseFrontMatter(markdown)
+func extractSkillMetadata(markdown string) (string, string, error) {
+	frontMatter, ok := parseFrontMatter(markdown)
+	if !ok {
+		return "", "", errors.New("SKILL.md must begin with YAML front matter")
+	}
 	name := strings.TrimSpace(frontMatter["name"])
 	description := strings.TrimSpace(frontMatter["description"])
-	if name == "" {
-		name = firstMarkdownHeading(markdown)
+	if err := validateSkillName(name); err != nil {
+		return "", "", err
 	}
-	if description == "" {
-		description = firstMarkdownParagraph(markdown)
+	if err := validateSkillDescription(description); err != nil {
+		return "", "", err
 	}
-	return name, description
+	return name, description, nil
 }
 
-func parseFrontMatter(markdown string) map[string]string {
+func parseFrontMatter(markdown string) (map[string]string, bool) {
 	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
 	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
-		return map[string]string{}
+		return map[string]string{}, false
 	}
 	values := map[string]string{}
 	currentKey := ""
+	closed := false
 	for _, line := range lines[1:] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "---" {
+			closed = true
 			break
 		}
 		if currentKey != "" && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
@@ -145,47 +153,70 @@ func parseFrontMatter(markdown string) map[string]string {
 		}
 		values[key] = strings.Trim(value, "\"'")
 	}
-	return values
+	return values, closed
 }
 
-func firstMarkdownHeading(markdown string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			return strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
-		}
+func validateSkillName(name string) error {
+	if name == "" {
+		return errors.New("skill name is required")
 	}
-	return ""
+	if len(name) > maxSkillNameLength {
+		return fmt.Errorf("skill name must be at most %d characters", maxSkillNameLength)
+	}
+	if containsXMLTag(name) {
+		return errors.New("skill name must not contain XML tags")
+	}
+	if _, reserved := reservedSkillNames[name]; reserved {
+		return errors.New("skill name is reserved")
+	}
+	containsAlphaNumeric := false
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			containsAlphaNumeric = true
+			continue
+		}
+		if char == '-' {
+			continue
+		}
+		return errors.New("skill name must contain only lowercase letters, numbers, and hyphens")
+	}
+	if !containsAlphaNumeric {
+		return errors.New("skill name must contain a lowercase letter or number")
+	}
+	return nil
 }
 
-func firstMarkdownParagraph(markdown string) string {
-	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
-	skipFrontMatter := false
-	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
-		skipFrontMatter = true
+func validateSkillDescription(description string) error {
+	if description == "" {
+		return errors.New("skill description is required")
 	}
-	paragraph := []string{}
-	for index, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if skipFrontMatter {
-			if index == 0 {
-				continue
-			}
-			if trimmed == "---" {
-				skipFrontMatter = false
-			}
-			continue
-		}
-		if trimmed == "" {
-			if len(paragraph) > 0 {
-				break
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		paragraph = append(paragraph, trimmed)
+	if len(description) > maxSkillDescriptionLength {
+		return fmt.Errorf("skill description must be at most %d characters", maxSkillDescriptionLength)
 	}
-	return strings.TrimSpace(strings.Join(paragraph, " "))
+	if containsXMLTag(description) {
+		return errors.New("skill description must not contain XML tags")
+	}
+	return nil
+}
+
+func containsXMLTag(value string) bool {
+	remaining := value
+	for {
+		start := strings.Index(remaining, "<")
+		if start < 0 {
+			return false
+		}
+		end := strings.Index(remaining[start+1:], ">")
+		if end < 0 {
+			return false
+		}
+		inside := strings.TrimSpace(remaining[start+1 : start+1+end])
+		if inside != "" {
+			first := inside[0]
+			if first == '/' || (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') {
+				return true
+			}
+		}
+		remaining = remaining[start+1+end+1:]
+	}
 }
