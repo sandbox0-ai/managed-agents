@@ -104,7 +104,7 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 }
 
 func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest) (*gatewaymanagedagents.EnvironmentArtifact, error) {
-	client, err := m.newSandboxClient(credential.Token)
+	client, err := m.newSandboxClient(credential.Token, artifact.TeamID)
 	if err != nil {
 		return nil, err
 	}

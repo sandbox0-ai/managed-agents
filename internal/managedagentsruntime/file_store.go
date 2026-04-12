@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ func NewVolumeFileStore(baseURL string, timeout time.Duration) *VolumeFileStore 
 }
 
 func (s *VolumeFileStore) PutFile(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.FileStorePutRequest) (gatewaymanagedagents.FileStoreObject, error) {
-	client, err := s.client(credential)
+	client, err := s.client(credential, req.TeamID)
 	if err != nil {
 		return gatewaymanagedagents.FileStoreObject{}, err
 	}
@@ -65,7 +66,7 @@ func (s *VolumeFileStore) ReadFile(ctx context.Context, credential gatewaymanage
 		}
 		return append([]byte(nil), req.FallbackContent...), nil
 	}
-	client, err := s.client(credential)
+	client, err := s.client(credential, req.TeamID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func (s *VolumeFileStore) DeleteFile(ctx context.Context, credential gatewaymana
 	if strings.TrimSpace(req.VolumeID) == "" {
 		return nil
 	}
-	client, err := s.client(credential)
+	client, err := s.client(credential, req.TeamID)
 	if err != nil {
 		return err
 	}
@@ -90,18 +91,25 @@ func (s *VolumeFileStore) DeleteFile(ctx context.Context, credential gatewaymana
 	return nil
 }
 
-func (s *VolumeFileStore) client(credential gatewaymanagedagents.RequestCredential) (*sandbox0sdk.Client, error) {
+func (s *VolumeFileStore) client(credential gatewaymanagedagents.RequestCredential, teamID string) (*sandbox0sdk.Client, error) {
 	if strings.TrimSpace(s.baseURL) == "" {
 		return nil, fmt.Errorf("file-store sandbox0 base URL is required")
 	}
 	if strings.TrimSpace(credential.Token) == "" {
 		return nil, fmt.Errorf("request credential is required")
 	}
-	return sandbox0sdk.NewClient(
+	opts := []sandbox0sdk.Option{
 		sandbox0sdk.WithBaseURL(s.baseURL),
 		sandbox0sdk.WithToken(credential.Token),
 		sandbox0sdk.WithTimeout(s.timeout),
-	)
+	}
+	if trimmedTeamID := strings.TrimSpace(teamID); trimmedTeamID != "" {
+		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-Team-ID", trimmedTeamID)
+			return nil
+		}))
+	}
+	return sandbox0sdk.NewClient(opts...)
 }
 
 func managedFileStorePath(teamID, fileID, filename string) string {

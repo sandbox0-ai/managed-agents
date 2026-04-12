@@ -1,6 +1,12 @@
 package managedagentsruntime
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 func TestConfigWithDefaults(t *testing.T) {
 	cfg := (Config{}).WithDefaults(8443)
@@ -110,5 +116,31 @@ func TestRuntimeWebhookURLFallsBackToRequestBaseURL(t *testing.T) {
 	want := "http://127.0.0.1:18088/internal/managed-agents/runtime/webhooks"
 	if got != want {
 		t.Fatalf("runtimeWebhookURL() = %q, want %q", got, want)
+	}
+}
+
+func TestNewSandboxClientAddsTeamHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/sandboxvolumes" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/api/v1/sandboxvolumes")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token_123" {
+			t.Fatalf("Authorization = %q, want %q", got, "Bearer token_123")
+		}
+		if got := r.Header.Get("X-Team-ID"); got != "team_123" {
+			t.Fatalf("X-Team-ID = %q, want %q", got, "team_123")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":[]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", " team_123 ")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	if _, err := client.ListVolume(context.Background()); err != nil {
+		t.Fatalf("ListVolume returned error: %v", err)
 	}
 }

@@ -42,11 +42,11 @@ type managedProjectedHeader struct {
 }
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
-	client, err := m.newSandboxClient(credential.Token)
+	record, _, err := m.repo.GetSession(ctx, req.SessionID)
 	if err != nil {
 		return err
 	}
-	record, _, err := m.repo.GetSession(ctx, req.SessionID)
+	client, err := m.newSandboxClient(credential.Token, record.TeamID)
 	if err != nil {
 		return err
 	}

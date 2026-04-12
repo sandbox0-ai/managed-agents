@@ -118,7 +118,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if err != nil {
 		return nil, err
 	}
-	client, err := m.newSandboxClient(credential.Token)
+	client, err := m.newSandboxClient(credential.Token, session.TeamID)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,11 @@ func (m *SDKRuntimeManager) DeleteWrapperSession(ctx context.Context, credential
 }
 
 func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	client, err := m.newSandboxClient(credential.Token)
+	teamID, err := m.teamIDForRuntime(ctx, runtime)
+	if err != nil {
+		return err
+	}
+	client, err := m.newSandboxClient(credential.Token, teamID)
 	if err != nil {
 		return err
 	}
@@ -263,12 +267,19 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	return nil
 }
 
-func (m *SDKRuntimeManager) newSandboxClient(token string) (*sandbox0sdk.Client, error) {
-	return sandbox0sdk.NewClient(
+func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk.Client, error) {
+	opts := []sandbox0sdk.Option{
 		sandbox0sdk.WithBaseURL(strings.TrimRight(m.cfg.SandboxBaseURL, "/")),
 		sandbox0sdk.WithToken(token),
 		sandbox0sdk.WithTimeout(m.cfg.SandboxRequestTimeout),
-	)
+	}
+	if trimmedTeamID := strings.TrimSpace(teamID); trimmedTeamID != "" {
+		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-Team-ID", trimmedTeamID)
+			return nil
+		}))
+	}
+	return sandbox0sdk.NewClient(opts...)
 }
 
 func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
@@ -297,11 +308,26 @@ func sortedMapKeys(in map[string]any) []string {
 	return out
 }
 
+func (m *SDKRuntimeManager) teamIDForRuntime(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) (string, error) {
+	if runtime == nil || strings.TrimSpace(runtime.SessionID) == "" {
+		return "", errors.New("runtime session id is required")
+	}
+	record, _, err := m.repo.GetSession(ctx, runtime.SessionID)
+	if err != nil {
+		return "", err
+	}
+	return record.TeamID, nil
+}
+
 func (m *SDKRuntimeManager) ensureWrapperEndpoint(ctx context.Context, token string, runtime *gatewaymanagedagents.RuntimeRecord) (*gatewaymanagedagents.RuntimeRecord, error) {
 	if strings.TrimSpace(runtime.WrapperURL) != "" {
 		return runtime, nil
 	}
-	client, err := m.newSandboxClient(token)
+	teamID, err := m.teamIDForRuntime(ctx, runtime)
+	if err != nil {
+		return nil, err
+	}
+	client, err := m.newSandboxClient(token, teamID)
 	if err != nil {
 		return nil, err
 	}
