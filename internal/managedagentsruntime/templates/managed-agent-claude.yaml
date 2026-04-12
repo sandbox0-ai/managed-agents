@@ -15,11 +15,8 @@ spec:
         - src/index.js
       cwd: /app
       envVars:
-        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         PORT: "${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}"
         AGENT_WRAPPER_STATE_DIR: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
-        AGENT_WRAPPER_DEFAULT_VENDOR: claude
-        NODE_EXTRA_CA_CERTS: /var/run/sandbox0/netd/mitm-ca.crt
   network:
     mode: allow-all
   pool:

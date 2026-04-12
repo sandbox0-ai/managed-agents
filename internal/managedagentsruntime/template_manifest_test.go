@@ -49,8 +49,8 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if envVars["PORT"] != "8080" {
 		t.Fatalf("WarmProcesses[0].EnvVars[PORT] = %q, want 8080", envVars["PORT"])
 	}
-	if envVars["PATH"] == "" {
-		t.Fatal("WarmProcesses[0].EnvVars[PATH] should not be empty")
+	if _, ok := envVars["PATH"]; ok {
+		t.Fatal("WarmProcesses[0].EnvVars should inherit PATH from the image")
 	}
 	if request.Spec.ClusterId.IsSet() {
 		t.Fatalf("ClusterId should be unset, got %#v", request.Spec.ClusterId)

@@ -6,9 +6,6 @@ on:
       - main
   pull_request:
 
-env:
-  SDK_GO_REF: ${{ vars.MANAGED_AGENTS_SDK_GO_REF || 'feat/warm-process-openapi' }}
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,7 +20,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: sandbox0-ai/sdk-go
-          ref: ${{ env.SDK_GO_REF }}
           path: sdk-go
 
       - name: Set up Go
