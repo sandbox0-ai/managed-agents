@@ -44,6 +44,7 @@ agentGateway:
     databaseMinConns: 1
     sandbox0BaseURL: https://api.sandbox0.ai
     sandbox0Timeout: 90s
+    sandbox0TLSInsecureSkipVerify: false
     runtimeEnabled: true
     runtimeCallbackBaseURL: ""
     runtimeProxyBaseURL: ""

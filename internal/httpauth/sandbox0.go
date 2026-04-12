@@ -2,6 +2,7 @@ package httpauth
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,16 +21,18 @@ const teamIDHeader = "X-Team-ID"
 
 // Sandbox0AuthenticatorConfig configures sandbox0-backed request authentication.
 type Sandbox0AuthenticatorConfig struct {
-	BaseURL string
-	Timeout time.Duration
-	Logger  *zap.Logger
+	BaseURL               string
+	Timeout               time.Duration
+	TLSInsecureSkipVerify bool
+	Logger                *zap.Logger
 }
 
 // Sandbox0Authenticator resolves tenant and user identity through sandbox0 APIs.
 type Sandbox0Authenticator struct {
-	baseURL string
-	timeout time.Duration
-	logger  *zap.Logger
+	baseURL               string
+	timeout               time.Duration
+	tlsInsecureSkipVerify bool
+	logger                *zap.Logger
 }
 
 // NewSandbox0Authenticator creates a sandbox0-backed authenticator.
@@ -46,7 +49,7 @@ func NewSandbox0Authenticator(cfg Sandbox0AuthenticatorConfig) (*Sandbox0Authent
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Sandbox0Authenticator{baseURL: baseURL, timeout: timeout, logger: logger}, nil
+	return &Sandbox0Authenticator{baseURL: baseURL, timeout: timeout, tlsInsecureSkipVerify: cfg.TLSInsecureSkipVerify, logger: logger}, nil
 }
 
 // Authenticate resolves the current caller via sandbox0 and stores the auth context on gin.Context.
@@ -115,9 +118,21 @@ func (a *Sandbox0Authenticator) authenticateAPIKey(ctx context.Context, token, s
 	if err != nil {
 		return nil, newAuthError(http.StatusBadGateway, "failed to initialize sandbox0 client", err)
 	}
-	apiKey, err := client.GetCurrentAPIKey(ctx)
+	resp, err := client.API().APIKeysCurrentGet(ctx)
 	if err != nil {
 		return nil, a.wrapSandbox0Error(err)
+	}
+	response, ok := resp.(*apispec.SuccessCurrentAPIKeyResponse)
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "unexpected sandbox0 api key response", nil)
+	}
+	data, ok := response.Data.Get()
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "sandbox0 api key response missing data", nil)
+	}
+	apiKey, ok := data.APIKey.Get()
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "sandbox0 api key response missing api key", nil)
 	}
 	teamID := strings.TrimSpace(apiKey.TeamID)
 	if teamID == "" {
@@ -202,7 +217,7 @@ func (a *Sandbox0Authenticator) newClient(token, teamID string) (*sandbox0sdk.Cl
 	opts := []sandbox0sdk.Option{
 		sandbox0sdk.WithBaseURL(a.baseURL),
 		sandbox0sdk.WithToken(token),
-		sandbox0sdk.WithTimeout(a.timeout),
+		sandbox0sdk.WithHTTPClient(sandbox0HTTPClient(a.timeout, a.tlsInsecureSkipVerify)),
 	}
 	if teamID != "" {
 		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
@@ -211,6 +226,17 @@ func (a *Sandbox0Authenticator) newClient(token, teamID string) (*sandbox0sdk.Cl
 		}))
 	}
 	return sandbox0sdk.NewClient(opts...)
+}
+
+func sandbox0HTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if insecureSkipVerify {
+		client.Transport = &http.Transport{
+			//nolint:gosec // Some private regional gateways terminate TLS with a private origin certificate.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+	return client
 }
 
 func (a *Sandbox0Authenticator) wrapSandbox0Error(err error) error {

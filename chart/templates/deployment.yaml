@@ -48,6 +48,8 @@ spec:
               value: {{ .Values.agentGateway.env.sandbox0BaseURL | quote }}
             - name: MANAGED_AGENT_SANDBOX0_TIMEOUT
               value: {{ .Values.agentGateway.env.sandbox0Timeout | quote }}
+            - name: MANAGED_AGENT_SANDBOX0_TLS_INSECURE_SKIP_VERIFY
+              value: {{ .Values.agentGateway.env.sandbox0TLSInsecureSkipVerify | quote }}
             - name: MANAGED_AGENT_RUNTIME_ENABLED
               value: {{ .Values.agentGateway.env.runtimeEnabled | quote }}
             - name: MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL

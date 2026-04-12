@@ -3,6 +3,7 @@ package managedagentsruntime
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,20 +27,21 @@ const (
 
 // Config configures sandbox-backed Claude managed-agent runtimes.
 type Config struct {
-	Enabled                bool
-	ClaudeTemplate         string
-	TemplateManifestPath   string
-	TemplateMainImage      string
-	WrapperPort            int
-	WorkspaceMountPath     string
-	EngineStateMountPath   string
-	SandboxTTLSeconds      int
-	SandboxHardTTLSeconds  int
-	SandboxRequestTimeout  time.Duration
-	SandboxBaseURL         string
-	SandboxAdminAPIKey     string
-	RuntimeCallbackBaseURL string
-	RuntimeProxyBaseURL    string
+	Enabled                      bool
+	ClaudeTemplate               string
+	TemplateManifestPath         string
+	TemplateMainImage            string
+	WrapperPort                  int
+	WorkspaceMountPath           string
+	EngineStateMountPath         string
+	SandboxTTLSeconds            int
+	SandboxHardTTLSeconds        int
+	SandboxRequestTimeout        time.Duration
+	SandboxBaseURL               string
+	SandboxAdminAPIKey           string
+	SandboxTLSInsecureSkipVerify bool
+	RuntimeCallbackBaseURL       string
+	RuntimeProxyBaseURL          string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -95,7 +97,7 @@ func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, log
 		repo:       repo,
 		cfg:        cfg,
 		logger:     logger,
-		httpClient: &http.Client{Timeout: cfg.SandboxRequestTimeout},
+		httpClient: sandboxHTTPClient(cfg.SandboxRequestTimeout, cfg.SandboxTLSInsecureSkipVerify),
 	}
 	if cfg.Enabled {
 		request, err := loadTemplateRequest(cfg)
@@ -388,7 +390,7 @@ func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk
 	opts := []sandbox0sdk.Option{
 		sandbox0sdk.WithBaseURL(strings.TrimRight(m.cfg.SandboxBaseURL, "/")),
 		sandbox0sdk.WithToken(token),
-		sandbox0sdk.WithTimeout(m.cfg.SandboxRequestTimeout),
+		sandbox0sdk.WithHTTPClient(m.sandboxClientHTTPClient()),
 	}
 	if trimmedTeamID := strings.TrimSpace(teamID); trimmedTeamID != "" {
 		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
@@ -397,6 +399,24 @@ func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk
 		}))
 	}
 	return sandbox0sdk.NewClient(opts...)
+}
+
+func (m *SDKRuntimeManager) sandboxClientHTTPClient() *http.Client {
+	if m.httpClient != nil {
+		return m.httpClient
+	}
+	return sandboxHTTPClient(m.cfg.SandboxRequestTimeout, m.cfg.SandboxTLSInsecureSkipVerify)
+}
+
+func sandboxHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if insecureSkipVerify {
+		client.Transport = &http.Transport{
+			//nolint:gosec // Some private regional gateways terminate TLS with a private origin certificate.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+	return client
 }
 
 func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
