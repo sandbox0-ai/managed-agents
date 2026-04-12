@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	DefaultSandboxTTLSeconds     = 3600
-	DefaultSandboxHardTTLSeconds = 0
+	DefaultSandboxTTLSeconds     = 0
+	DefaultSandboxHardTTLSeconds = 3600
 )
 
 // Config configures sandbox-backed Claude managed-agent runtimes.
