@@ -2,8 +2,6 @@ package managedagentsruntime
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -245,57 +243,77 @@ func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
 	}
 }
 
-func TestCreateEmptyEnvironmentArtifactVolumesCreatesROXVolumesWithoutBuilderSandbox(t *testing.T) {
-	created := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxvolumes" {
-			t.Fatalf("unexpected request %s %s; empty environments must not claim a builder sandbox", r.Method, r.URL.Path)
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode create volume request: %v", err)
-		}
-		if got := body["access_mode"]; got != "ROX" {
-			t.Fatalf("access_mode = %#v, want ROX", got)
-		}
-		created++
-		volumeID := fmt.Sprintf("vol_%d", created)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"data": map[string]any{
-				"id":          volumeID,
-				"team_id":     "team_123",
-				"user_id":     "user_123",
-				"cache_size":  "",
-				"buffer_size": "",
-				"access_mode": "ROX",
-				"created_at":  "2026-04-12T00:00:00Z",
-				"updated_at":  "2026-04-12T00:00:00Z",
-			},
-		})
-	}))
-	t.Cleanup(server.Close)
+func TestBuildEnvironmentArtifactAttemptSkipsPackageVolumesWhenNoPackages(t *testing.T) {
+	mgr := &SDKRuntimeManager{}
+	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{Type: "packages"},
+	}}
 
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
-	client, err := mgr.newSandboxClient("token_123", "team_123")
+	assets, buildLog, err := mgr.buildEnvironmentArtifactAttempt(context.Background(), nil, environment, nil, nil)
 	if err != nil {
-		t.Fatalf("newSandboxClient returned error: %v", err)
+		t.Fatalf("buildEnvironmentArtifactAttempt returned error: %v", err)
 	}
-	assets, err := createEmptyEnvironmentArtifactVolumes(context.Background(), client)
+	if got := assets.VolumeIDs(); len(got) != 0 {
+		t.Fatalf("artifact volume ids = %#v, want empty", got)
+	}
+	if buildLog != "no environment packages requested; no package volumes created\n" {
+		t.Fatalf("build log = %q", buildLog)
+	}
+}
+
+func TestEnvironmentArtifactMountsOnlyConfiguredPackageManagers(t *testing.T) {
+	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{
+			Type: "packages",
+			NPM:  []string{"typescript"},
+			Pip:  []string{"ruff==0.9.0"},
+		},
+	}}
+	artifact := &gatewaymanagedagents.EnvironmentArtifact{
+		ID: "art_123",
+		Assets: gatewaymanagedagents.EnvironmentArtifactAssets{
+			AptVolumeID: "vol_unused_apt",
+			NPMVolumeID: "vol_npm",
+			PipVolumeID: "vol_pip",
+		},
+	}
+
+	mounts, err := environmentArtifactMounts(environment, artifact)
 	if err != nil {
-		t.Fatalf("createEmptyEnvironmentArtifactVolumes returned error: %v", err)
+		t.Fatalf("environmentArtifactMounts returned error: %v", err)
 	}
-	managers := gatewaymanagedagents.ManagedEnvironmentPackageManagers()
-	if created != len(managers) {
-		t.Fatalf("created volumes = %d, want %d", created, len(managers))
+	if len(mounts) != 2 {
+		t.Fatalf("mount count = %d, want 2: %#v", len(mounts), mounts)
 	}
-	for index, manager := range managers {
-		want := fmt.Sprintf("vol_%d", index+1)
-		if got := assets.VolumeIDForManager(manager); got != want {
-			t.Fatalf("%s volume = %q, want %q", manager, got, want)
-		}
+	if mounts[0].volumeID != "vol_npm" || mounts[0].mountPath != gatewaymanagedagents.ManagedEnvironmentNPMMountPath {
+		t.Fatalf("first mount = %#v, want npm", mounts[0])
+	}
+	if mounts[1].volumeID != "vol_pip" || mounts[1].mountPath != gatewaymanagedagents.ManagedEnvironmentPipMountPath {
+		t.Fatalf("second mount = %#v, want pip", mounts[1])
+	}
+}
+
+func TestEnvironmentArtifactMountsAllowsEmptyPackageConfig(t *testing.T) {
+	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{Type: "packages"},
+	}}
+	mounts, err := environmentArtifactMounts(environment, &gatewaymanagedagents.EnvironmentArtifact{ID: "art_empty"})
+	if err != nil {
+		t.Fatalf("environmentArtifactMounts returned error: %v", err)
+	}
+	if len(mounts) != 0 {
+		t.Fatalf("mount count = %d, want 0: %#v", len(mounts), mounts)
+	}
+}
+
+func TestEnvironmentArtifactMountsRequiresConfiguredManagerVolume(t *testing.T) {
+	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{Type: "packages", Pip: []string{"ruff==0.9.0"}},
+	}}
+
+	_, err := environmentArtifactMounts(environment, &gatewaymanagedagents.EnvironmentArtifact{ID: "art_missing"})
+	if err == nil {
+		t.Fatal("environmentArtifactMounts error = nil, want missing pip volume error")
 	}
 }
 

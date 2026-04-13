@@ -148,14 +148,10 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
 	steps := environmentBuildSteps(environment)
 	if len(steps) == 0 {
-		assets, err := createEmptyEnvironmentArtifactVolumes(ctx, client)
-		if err != nil {
-			return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
-		}
-		return assets, "no environment packages requested; created empty package volumes\n", nil
+		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "no environment packages requested; no package volumes created\n", nil
 	}
 
-	resources, err := m.createEnvironmentBuildResources(ctx, client)
+	resources, err := m.createEnvironmentBuildResources(ctx, client, stepManagers(steps))
 	if err != nil {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
 	}
@@ -173,8 +169,14 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 		sandbox0sdk.WithSandboxHardTTL(int32(m.cfg.SandboxHardTTLSeconds)),
 		sandbox0sdk.WithSandboxNetworkPolicy(builderNetworkPolicy(environment)),
 	}
-	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
-		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(resources.managerVolumeIDs[manager], gatewaymanagedagents.ManagedEnvironmentMountPath(manager), nil))
+	for _, manager := range stepManagers(steps) {
+		volumeID := resources.managerVolumeIDs[manager]
+		mountPath := gatewaymanagedagents.ManagedEnvironmentMountPath(manager)
+		if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(mountPath) == "" {
+			m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
+			return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", fmt.Errorf("environment builder is missing %s volume", manager)
+		}
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath, nil))
 	}
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession("claude", templateRequest), claimOpts...)
 	if err != nil {
@@ -204,26 +206,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	return assets, buildLog.String(), nil
 }
 
-func createEmptyEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.Client) (gatewaymanagedagents.EnvironmentArtifactAssets, error) {
-	assets := gatewaymanagedagents.EnvironmentArtifactAssets{}
-	created := make([]string, 0, len(gatewaymanagedagents.ManagedEnvironmentPackageManagers()))
-	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
-		volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
-			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
-		})
-		if err != nil {
-			for _, volumeID := range created {
-				_, _ = client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
-			}
-			return gatewaymanagedagents.EnvironmentArtifactAssets{}, fmt.Errorf("create empty %s environment volume: %w", manager, err)
-		}
-		assets.SetVolumeIDForManager(manager, volume.ID)
-		created = append(created, volume.ID)
-	}
-	return assets, nil
-}
-
-func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context, client *sandbox0sdk.Client) (*environmentBuildResources, error) {
+func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context, client *sandbox0sdk.Client, managers []string) (*environmentBuildResources, error) {
 	workspace, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("create builder workspace volume: %w", err)
@@ -236,9 +219,9 @@ func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context,
 	resources := &environmentBuildResources{
 		workspaceVolumeID:   workspace.ID,
 		engineStateVolumeID: engineState.ID,
-		managerVolumeIDs:    make(map[string]string, len(gatewaymanagedagents.ManagedEnvironmentPackageManagers())),
+		managerVolumeIDs:    make(map[string]string, len(managers)),
 	}
-	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
+	for _, manager := range managers {
 		volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 		if err != nil {
 			m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
@@ -276,7 +259,11 @@ func publishEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.
 	assets := gatewaymanagedagents.EnvironmentArtifactAssets{}
 	published := make([]string, 0, len(tempVolumes))
 	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
-		volume, err := client.ForkVolume(ctx, tempVolumes[manager], &apispec.ForkVolumeRequest{
+		tempVolumeID := strings.TrimSpace(tempVolumes[manager])
+		if tempVolumeID == "" {
+			continue
+		}
+		volume, err := client.ForkVolume(ctx, tempVolumeID, &apispec.ForkVolumeRequest{
 			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
 		})
 		if err != nil {
@@ -332,7 +319,7 @@ func environmentBuildSteps(environment *gatewaymanagedagents.Environment) []envi
 		return nil
 	}
 	packages := environment.Config.Packages
-	steps := make([]environmentBuildStep, 0, len(gatewaymanagedagents.ManagedEnvironmentPackageManagers()))
+	steps := make([]environmentBuildStep, 0, len(gatewaymanagedagents.ConfiguredEnvironmentPackageManagers(environment.Config)))
 	if len(packages.Apt) > 0 {
 		steps = append(steps, environmentBuildStep{manager: "apt", script: buildAptScript(packages.Apt)})
 	}
@@ -352,6 +339,38 @@ func environmentBuildSteps(environment *gatewaymanagedagents.Environment) []envi
 		steps = append(steps, environmentBuildStep{manager: "pip", script: buildPipScript(packages.Pip)})
 	}
 	return steps
+}
+
+func stepManagers(steps []environmentBuildStep) []string {
+	out := make([]string, 0, len(steps))
+	for _, step := range steps {
+		if strings.TrimSpace(step.manager) != "" {
+			out = append(out, step.manager)
+		}
+	}
+	return out
+}
+
+type environmentArtifactMount struct {
+	volumeID  string
+	mountPath string
+}
+
+func environmentArtifactMounts(environment *gatewaymanagedagents.Environment, artifact *gatewaymanagedagents.EnvironmentArtifact) ([]environmentArtifactMount, error) {
+	if environment == nil || artifact == nil {
+		return nil, nil
+	}
+	managers := gatewaymanagedagents.ConfiguredEnvironmentPackageManagers(environment.Config)
+	mounts := make([]environmentArtifactMount, 0, len(managers))
+	for _, manager := range managers {
+		volumeID := artifact.Assets.VolumeIDForManager(manager)
+		mountPath := gatewaymanagedagents.ManagedEnvironmentMountPath(manager)
+		if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(mountPath) == "" {
+			return nil, fmt.Errorf("environment artifact %s is missing %s volume", artifact.ID, manager)
+		}
+		mounts = append(mounts, environmentArtifactMount{volumeID: volumeID, mountPath: mountPath})
+	}
+	return mounts, nil
 }
 
 func runEnvironmentBuildStep(ctx context.Context, sandbox *sandbox0sdk.Sandbox, step environmentBuildStep) (string, error) {
