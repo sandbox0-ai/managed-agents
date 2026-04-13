@@ -371,22 +371,27 @@ func (r *Repository) ListEvents(ctx context.Context, sessionID string, opts Even
 		return nil, nil, err
 	}
 	query := `
-		SELECT payload, id, created_at
+		SELECT payload, id, created_at, position
 		FROM managed_agent_session_events
 		WHERE session_id = $1
 	`
 	args := []any{strings.TrimSpace(sessionID)}
 	if cursor != nil {
-		cursorTime, _ := time.Parse(time.RFC3339, cursor.CreatedAt)
-		args = append(args, cursorTime.UTC(), cursor.ID)
 		cmp := "<"
 		if order == "asc" {
 			cmp = ">"
 		}
-		query += fmt.Sprintf(` AND (created_at %s $%d OR (created_at = $%d AND id %s $%d))`, cmp, len(args)-1, len(args)-1, cmp, len(args))
+		if cursor.Position > 0 {
+			args = append(args, cursor.Position)
+			query += fmt.Sprintf(` AND position %s $%d`, cmp, len(args))
+		} else {
+			cursorTime, _ := time.Parse(time.RFC3339, cursor.CreatedAt)
+			args = append(args, cursorTime.UTC(), cursor.ID)
+			query += fmt.Sprintf(` AND (created_at %s $%d OR (created_at = $%d AND id %s $%d))`, cmp, len(args)-1, len(args)-1, cmp, len(args))
+		}
 	}
 	args = append(args, limit+1)
-	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, strings.ToUpper(order), strings.ToUpper(order), len(args))
+	query += fmt.Sprintf(` ORDER BY position %s LIMIT $%d`, strings.ToUpper(order), len(args))
 	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list session events: %w", err)
@@ -395,11 +400,13 @@ func (r *Repository) ListEvents(ctx context.Context, sessionID string, opts Even
 	var events []map[string]any
 	createdAt := make([]time.Time, 0, limit)
 	ids := make([]string, 0, limit)
+	positions := make([]int64, 0, limit)
 	for rows.Next() {
 		var payloadJSON []byte
 		var id string
 		var when time.Time
-		if err := rows.Scan(&payloadJSON, &id, &when); err != nil {
+		var position int64
+		if err := rows.Scan(&payloadJSON, &id, &when, &position); err != nil {
 			return nil, nil, fmt.Errorf("scan session event: %w", err)
 		}
 		var payload map[string]any
@@ -409,10 +416,11 @@ func (r *Repository) ListEvents(ctx context.Context, sessionID string, opts Even
 		events = append(events, payload)
 		createdAt = append(createdAt, when)
 		ids = append(ids, id)
+		positions = append(positions, position)
 	}
 	var nextPage *string
 	if len(events) > limit {
-		nextPage = encodePageCursor(createdAt[limit-1], ids[limit-1])
+		nextPage = encodePositionPageCursor(createdAt[limit-1], ids[limit-1], positions[limit-1])
 		events = events[:limit]
 	}
 	return events, nextPage, nil
@@ -422,44 +430,33 @@ func (r *Repository) ListEventsAfterID(ctx context.Context, sessionID, afterID s
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
+	args := []any{strings.TrimSpace(sessionID)}
 	if trimmedAfterID := strings.TrimSpace(afterID); trimmedAfterID != "" {
-		var exists bool
+		var afterPosition int64
 		if err := r.db(ctx).QueryRow(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM managed_agent_session_events WHERE session_id = $1 AND id = $2
-			)
-		`, strings.TrimSpace(sessionID), trimmedAfterID).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("check session event after id: %w", err)
+			SELECT position
+			FROM managed_agent_session_events
+			WHERE session_id = $1 AND id = $2
+		`, strings.TrimSpace(sessionID), trimmedAfterID).Scan(&afterPosition); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrEventNotFound
+			}
+			return nil, fmt.Errorf("get session event position after id: %w", err)
 		}
-		if !exists {
-			return nil, ErrEventNotFound
-		}
+		args = append(args, afterPosition)
 	}
 	query := `
 		SELECT payload
 		FROM managed_agent_session_events
 		WHERE session_id = $1
 	`
-	args := []any{strings.TrimSpace(sessionID)}
 	if trimmedAfterID := strings.TrimSpace(afterID); trimmedAfterID != "" {
-		args = append(args, trimmedAfterID)
-		query += `
-			AND (
-				created_at > (SELECT created_at FROM managed_agent_session_events WHERE session_id = $1 AND id = $2)
-				OR (
-					created_at = (SELECT created_at FROM managed_agent_session_events WHERE session_id = $1 AND id = $2)
-					AND id > $2
-				)
-			)
-		`
+		query += ` AND position > $2`
 	}
 	args = append(args, limit)
-	query += fmt.Sprintf(` ORDER BY created_at ASC, id ASC LIMIT $%d`, len(args))
+	query += fmt.Sprintf(` ORDER BY position ASC LIMIT $%d`, len(args))
 	rows, err := r.db(ctx).Query(ctx, query, args...)
 	if err != nil {
-		if strings.TrimSpace(afterID) != "" && strings.Contains(err.Error(), "more than one row") {
-			return nil, ErrEventNotFound
-		}
 		return nil, fmt.Errorf("list session events after id: %w", err)
 	}
 	defer rows.Close()
