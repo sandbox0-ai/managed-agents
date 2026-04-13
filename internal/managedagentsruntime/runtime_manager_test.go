@@ -32,9 +32,6 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
 		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
 	}
-	if cfg.RuntimeProxyBaseURL != "" {
-		t.Fatalf("RuntimeProxyBaseURL = %q, want empty default", cfg.RuntimeProxyBaseURL)
-	}
 }
 
 func TestConfigWithDefaultsLeavesHardTTLConfigurable(t *testing.T) {
@@ -148,34 +145,6 @@ func TestWrapperRequestTargetUsesDirectWrapperURLByDefault(t *testing.T) {
 	}
 	if hostHeader != "" {
 		t.Fatalf("hostHeader = %q, want empty direct request host", hostHeader)
-	}
-}
-
-func TestWrapperRequestTargetUsesRuntimeProxyBaseURLAndHostHeader(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{RuntimeProxyBaseURL: "http://127.0.0.1:18080"}}
-	requestURL, hostHeader, err := mgr.wrapperRequestTarget("rs-example--p8080.aws-us-east-1.sandbox0.app", "/v1/runtime/session")
-	if err != nil {
-		t.Fatalf("wrapperRequestTarget returned error: %v", err)
-	}
-	if requestURL != "http://127.0.0.1:18080/v1/runtime/session" {
-		t.Fatalf("requestURL = %q, want %q", requestURL, "http://127.0.0.1:18080/v1/runtime/session")
-	}
-	if hostHeader != "rs-example--p8080.aws-us-east-1.sandbox0.app" {
-		t.Fatalf("hostHeader = %q, want %q", hostHeader, "rs-example--p8080.aws-us-east-1.sandbox0.app")
-	}
-}
-
-func TestWrapperRequestTargetPreservesBasePathPrefix(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{RuntimeProxyBaseURL: "http://gateway.internal/base"}}
-	requestURL, hostHeader, err := mgr.wrapperRequestTarget("https://wrapper.example.test", "/v1/runs")
-	if err != nil {
-		t.Fatalf("wrapperRequestTarget returned error: %v", err)
-	}
-	if requestURL != "http://gateway.internal/base/v1/runs" {
-		t.Fatalf("requestURL = %q, want %q", requestURL, "http://gateway.internal/base/v1/runs")
-	}
-	if hostHeader != "wrapper.example.test" {
-		t.Fatalf("hostHeader = %q, want %q", hostHeader, "wrapper.example.test")
 	}
 }
 

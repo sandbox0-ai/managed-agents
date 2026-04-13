@@ -24,27 +24,25 @@ import (
 )
 
 type config struct {
-	HTTPAddr                      string
-	LogLevel                      string
-	DatabaseURL                   string
-	DatabaseSchema                string
-	DatabaseMaxConns              int32
-	DatabaseMinConns              int32
-	Sandbox0BaseURL               string
-	Sandbox0AdminAPIKey           string
-	Sandbox0TLSInsecureSkipVerify bool
-	RuntimeCallbackBaseURL        string
-	RuntimeProxyBaseURL           string
-	Sandbox0Timeout               time.Duration
-	RuntimeEnabled                bool
-	ClaudeTemplate                string
-	TemplateManifestPath          string
-	TemplateMainImage             string
-	WrapperPort                   int
-	WorkspaceMountPath            string
-	EngineStateMountPath          string
-	SandboxTTLSeconds             int
-	SandboxHardTTLSeconds         int
+	HTTPAddr               string
+	LogLevel               string
+	DatabaseURL            string
+	DatabaseSchema         string
+	DatabaseMaxConns       int32
+	DatabaseMinConns       int32
+	Sandbox0BaseURL        string
+	Sandbox0AdminAPIKey    string
+	RuntimeCallbackBaseURL string
+	Sandbox0Timeout        time.Duration
+	RuntimeEnabled         bool
+	ClaudeTemplate         string
+	TemplateManifestPath   string
+	TemplateMainImage      string
+	WrapperPort            int
+	WorkspaceMountPath     string
+	EngineStateMountPath   string
+	SandboxTTLSeconds      int
+	SandboxHardTTLSeconds  int
 }
 
 const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
@@ -82,10 +80,9 @@ func main() {
 	}
 
 	authenticator, err := httpauth.NewSandbox0Authenticator(httpauth.Sandbox0AuthenticatorConfig{
-		BaseURL:               cfg.Sandbox0BaseURL,
-		Timeout:               cfg.Sandbox0Timeout,
-		TLSInsecureSkipVerify: cfg.Sandbox0TLSInsecureSkipVerify,
-		Logger:                logger,
+		BaseURL: cfg.Sandbox0BaseURL,
+		Timeout: cfg.Sandbox0Timeout,
+		Logger:  logger,
 	})
 	if err != nil {
 		logger.Fatal("create authenticator", zap.Error(err))
@@ -94,21 +91,19 @@ func main() {
 	repo := managedagents.NewRepository(pool)
 	serviceOpts := make([]managedagents.ServiceOption, 0, 1)
 	runtimeCfg := managedagentsruntime.Config{
-		Enabled:                      cfg.RuntimeEnabled,
-		ClaudeTemplate:               cfg.ClaudeTemplate,
-		TemplateManifestPath:         cfg.TemplateManifestPath,
-		TemplateMainImage:            cfg.TemplateMainImage,
-		WrapperPort:                  cfg.WrapperPort,
-		WorkspaceMountPath:           cfg.WorkspaceMountPath,
-		EngineStateMountPath:         cfg.EngineStateMountPath,
-		SandboxTTLSeconds:            cfg.SandboxTTLSeconds,
-		SandboxHardTTLSeconds:        cfg.SandboxHardTTLSeconds,
-		SandboxRequestTimeout:        cfg.Sandbox0Timeout,
-		SandboxBaseURL:               cfg.Sandbox0BaseURL,
-		SandboxAdminAPIKey:           cfg.Sandbox0AdminAPIKey,
-		SandboxTLSInsecureSkipVerify: cfg.Sandbox0TLSInsecureSkipVerify,
-		RuntimeCallbackBaseURL:       cfg.RuntimeCallbackBaseURL,
-		RuntimeProxyBaseURL:          cfg.RuntimeProxyBaseURL,
+		Enabled:                cfg.RuntimeEnabled,
+		ClaudeTemplate:         cfg.ClaudeTemplate,
+		TemplateManifestPath:   cfg.TemplateManifestPath,
+		TemplateMainImage:      cfg.TemplateMainImage,
+		WrapperPort:            cfg.WrapperPort,
+		WorkspaceMountPath:     cfg.WorkspaceMountPath,
+		EngineStateMountPath:   cfg.EngineStateMountPath,
+		SandboxTTLSeconds:      cfg.SandboxTTLSeconds,
+		SandboxHardTTLSeconds:  cfg.SandboxHardTTLSeconds,
+		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
+		SandboxBaseURL:         cfg.Sandbox0BaseURL,
+		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
+		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
 	}.WithDefaults(0)
 	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
 	if err != nil {
@@ -168,27 +163,25 @@ func main() {
 
 func loadConfig() (config, error) {
 	cfg := config{
-		HTTPAddr:                      envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
-		LogLevel:                      envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
-		DatabaseURL:                   strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
-		DatabaseSchema:                envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
-		DatabaseMaxConns:              int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
-		DatabaseMinConns:              int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
-		Sandbox0BaseURL:               strings.TrimRight(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL), "/"),
-		Sandbox0AdminAPIKey:           strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
-		Sandbox0TLSInsecureSkipVerify: envBool("MANAGED_AGENT_SANDBOX0_TLS_INSECURE_SKIP_VERIFY"),
-		RuntimeCallbackBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
-		RuntimeProxyBaseURL:           strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_PROXY_BASE_URL")), "/"),
-		Sandbox0Timeout:               envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
-		RuntimeEnabled:                !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
-		ClaudeTemplate:                strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
-		TemplateManifestPath:          strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
-		TemplateMainImage:             strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
-		WrapperPort:                   envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
-		WorkspaceMountPath:            strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
-		EngineStateMountPath:          strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
-		SandboxTTLSeconds:             envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
-		SandboxHardTTLSeconds:         envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", managedagentsruntime.DefaultSandboxHardTTLSeconds),
+		HTTPAddr:               envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
+		LogLevel:               envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
+		DatabaseURL:            strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
+		DatabaseSchema:         envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
+		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
+		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
+		Sandbox0BaseURL:        strings.TrimRight(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL), "/"),
+		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
+		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
+		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
+		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
+		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
+		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
+		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
+		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
+		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
+		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
+		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
+		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", managedagentsruntime.DefaultSandboxHardTTLSeconds),
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")
@@ -271,11 +264,6 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
-}
-
-func envBool(key string) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	return strings.EqualFold(value, "true") || value == "1"
 }
 
 type zapLogger struct {

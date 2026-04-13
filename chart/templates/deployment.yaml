@@ -26,10 +26,6 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.agentGateway.hostAliases }}
-      hostAliases:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       containers:
         - name: agent-gateway
           image: "{{ .Values.agentGateway.image.repository }}:{{ .Values.agentGateway.image.tag }}"
@@ -52,14 +48,10 @@ spec:
               value: {{ .Values.agentGateway.env.sandbox0BaseURL | quote }}
             - name: MANAGED_AGENT_SANDBOX0_TIMEOUT
               value: {{ .Values.agentGateway.env.sandbox0Timeout | quote }}
-            - name: MANAGED_AGENT_SANDBOX0_TLS_INSECURE_SKIP_VERIFY
-              value: {{ .Values.agentGateway.env.sandbox0TLSInsecureSkipVerify | quote }}
             - name: MANAGED_AGENT_RUNTIME_ENABLED
               value: {{ .Values.agentGateway.env.runtimeEnabled | quote }}
             - name: MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL
               value: {{ include "managed-agents.callbackBaseURL" . | quote }}
-            - name: MANAGED_AGENT_RUNTIME_PROXY_BASE_URL
-              value: {{ .Values.agentGateway.env.runtimeProxyBaseURL | quote }}
             - name: MANAGED_AGENT_CLAUDE_TEMPLATE
               value: {{ .Values.agentGateway.env.claudeTemplate | quote }}
             - name: MANAGED_AGENT_WRAPPER_PORT

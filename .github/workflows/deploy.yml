@@ -29,11 +29,7 @@ jobs:
       KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'sandbox0-cloud' }}
       IMAGE_REPOSITORY: ${{ vars.MANAGED_AGENTS_IMAGE_REPOSITORY || 'sandbox0ai/managed-agents' }}
       SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL || 'https://api.sandbox0.ai' }}
-      SANDBOX0_TLS_INSECURE_SKIP_VERIFY: ${{ vars.MANAGED_AGENTS_SANDBOX0_TLS_INSECURE_SKIP_VERIFY || 'false' }}
       RUNTIME_CALLBACK_BASE_URL: ${{ vars.MANAGED_AGENTS_RUNTIME_CALLBACK_BASE_URL || '' }}
-      RUNTIME_PROXY_BASE_URL: ${{ vars.MANAGED_AGENTS_RUNTIME_PROXY_BASE_URL || '' }}
-      SANDBOX0_HOST_ALIAS_IP: ${{ vars.MANAGED_AGENTS_SANDBOX0_HOST_ALIAS_IP || '' }}
-      SANDBOX0_HOST_ALIAS_HOST: ${{ vars.MANAGED_AGENTS_SANDBOX0_HOST_ALIAS_HOST || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
       CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
       INGRESS_ENABLED: ${{ vars.MANAGED_AGENTS_INGRESS_ENABLED || 'false' }}
@@ -100,11 +96,6 @@ jobs:
             exit 1
           fi
 
-          if [[ -n "${SANDBOX0_HOST_ALIAS_IP}" && -z "${SANDBOX0_HOST_ALIAS_HOST}" ]] || [[ -z "${SANDBOX0_HOST_ALIAS_IP}" && -n "${SANDBOX0_HOST_ALIAS_HOST}" ]]; then
-            echo "MANAGED_AGENTS_SANDBOX0_HOST_ALIAS_IP and MANAGED_AGENTS_SANDBOX0_HOST_ALIAS_HOST must be set together."
-            exit 1
-          fi
-
       - name: Ensure namespace exists
         shell: bash
         run: kubectl create namespace "${KUBE_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
@@ -137,11 +128,7 @@ jobs:
             GATEWAY_TAG="${{ steps.image.outputs.gateway_tag }}" \
             WRAPPER_TAG="${{ steps.image.outputs.wrapper_tag }}" \
             SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL}" \
-            SANDBOX0_TLS_INSECURE_SKIP_VERIFY="${SANDBOX0_TLS_INSECURE_SKIP_VERIFY}" \
             RUNTIME_CALLBACK_BASE_URL="${RUNTIME_CALLBACK_BASE_URL}" \
-            RUNTIME_PROXY_BASE_URL="${RUNTIME_PROXY_BASE_URL}" \
-            SANDBOX0_HOST_ALIAS_IP="${SANDBOX0_HOST_ALIAS_IP}" \
-            SANDBOX0_HOST_ALIAS_HOST="${SANDBOX0_HOST_ALIAS_HOST}" \
             INGRESS_ENABLED="${INGRESS_ENABLED}" \
             INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME}" \
             INGRESS_HOST="${INGRESS_HOST}" \

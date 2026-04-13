@@ -3,7 +3,6 @@ package managedagentsruntime
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,21 +26,19 @@ const (
 
 // Config configures sandbox-backed Claude managed-agent runtimes.
 type Config struct {
-	Enabled                      bool
-	ClaudeTemplate               string
-	TemplateManifestPath         string
-	TemplateMainImage            string
-	WrapperPort                  int
-	WorkspaceMountPath           string
-	EngineStateMountPath         string
-	SandboxTTLSeconds            int
-	SandboxHardTTLSeconds        int
-	SandboxRequestTimeout        time.Duration
-	SandboxBaseURL               string
-	SandboxAdminAPIKey           string
-	SandboxTLSInsecureSkipVerify bool
-	RuntimeCallbackBaseURL       string
-	RuntimeProxyBaseURL          string
+	Enabled                bool
+	ClaudeTemplate         string
+	TemplateManifestPath   string
+	TemplateMainImage      string
+	WrapperPort            int
+	WorkspaceMountPath     string
+	EngineStateMountPath   string
+	SandboxTTLSeconds      int
+	SandboxHardTTLSeconds  int
+	SandboxRequestTimeout  time.Duration
+	SandboxBaseURL         string
+	SandboxAdminAPIKey     string
+	RuntimeCallbackBaseURL string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -97,7 +94,7 @@ func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, log
 		repo:       repo,
 		cfg:        cfg,
 		logger:     logger,
-		httpClient: sandboxHTTPClient(cfg.SandboxRequestTimeout, cfg.SandboxTLSInsecureSkipVerify),
+		httpClient: &http.Client{Timeout: cfg.SandboxRequestTimeout},
 	}
 	if cfg.Enabled {
 		request, err := loadTemplateRequest(cfg)
@@ -390,7 +387,7 @@ func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk
 	opts := []sandbox0sdk.Option{
 		sandbox0sdk.WithBaseURL(strings.TrimRight(m.cfg.SandboxBaseURL, "/")),
 		sandbox0sdk.WithToken(token),
-		sandbox0sdk.WithHTTPClient(m.sandboxClientHTTPClient()),
+		sandbox0sdk.WithTimeout(m.cfg.SandboxRequestTimeout),
 	}
 	if trimmedTeamID := strings.TrimSpace(teamID); trimmedTeamID != "" {
 		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
@@ -399,24 +396,6 @@ func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk
 		}))
 	}
 	return sandbox0sdk.NewClient(opts...)
-}
-
-func (m *SDKRuntimeManager) sandboxClientHTTPClient() *http.Client {
-	if m.httpClient != nil {
-		return m.httpClient
-	}
-	return sandboxHTTPClient(m.cfg.SandboxRequestTimeout, m.cfg.SandboxTLSInsecureSkipVerify)
-}
-
-func sandboxHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
-	client := &http.Client{Timeout: timeout}
-	if insecureSkipVerify {
-		client.Transport = &http.Transport{
-			//nolint:gosec // Some private regional gateways terminate TLS with a private origin certificate.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-	}
-	return client
 }
 
 func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
@@ -533,36 +512,7 @@ func (m *SDKRuntimeManager) wrapperRequestTarget(rawWrapperURL, path string) (st
 	if err != nil {
 		return "", "", err
 	}
-	proxyBaseURL := strings.TrimSpace(m.cfg.RuntimeProxyBaseURL)
-	if proxyBaseURL == "" {
-		return strings.TrimRight(wrapperURL, "/") + path, "", nil
-	}
-	baseURL, err := canonicalManagedRuntimeURL(proxyBaseURL)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid runtime proxy base url %q", proxyBaseURL)
-	}
-	baseParsed, err := url.Parse(baseURL)
-	if err != nil {
-		return "", "", fmt.Errorf("parse sandbox base url: %w", err)
-	}
-	wrapperParsed, err := url.Parse(wrapperURL)
-	if err != nil {
-		return "", "", fmt.Errorf("parse wrapper url: %w", err)
-	}
-	baseParsed.Path = joinURLPath(baseParsed.Path, path)
-	baseParsed.RawPath = ""
-	baseParsed.RawQuery = ""
-	baseParsed.Fragment = ""
-	return baseParsed.String(), wrapperParsed.Host, nil
-}
-
-func joinURLPath(basePath, suffix string) string {
-	trimmedBase := strings.TrimRight(strings.TrimSpace(basePath), "/")
-	trimmedSuffix := "/" + strings.TrimLeft(strings.TrimSpace(suffix), "/")
-	if trimmedBase == "" {
-		return trimmedSuffix
-	}
-	return trimmedBase + trimmedSuffix
+	return strings.TrimRight(wrapperURL, "/") + path, "", nil
 }
 
 func (m *SDKRuntimeManager) wrapperJSON(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, method, path string, payload any) error {
