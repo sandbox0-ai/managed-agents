@@ -89,6 +89,42 @@ func ManagedEnvironmentPackageManagers() []string {
 	return append([]string(nil), managedEnvironmentPackageManagers...)
 }
 
+// ConfiguredEnvironmentPackageManagers returns package managers with at least
+// one configured package in the stable mount order.
+func ConfiguredEnvironmentPackageManagers(config CloudConfig) []string {
+	packages := config.Packages
+	out := make([]string, 0, len(managedEnvironmentPackageManagers))
+	for _, manager := range managedEnvironmentPackageManagers {
+		switch manager {
+		case "apt":
+			if len(packages.Apt) > 0 {
+				out = append(out, manager)
+			}
+		case "cargo":
+			if len(packages.Cargo) > 0 {
+				out = append(out, manager)
+			}
+		case "gem":
+			if len(packages.Gem) > 0 {
+				out = append(out, manager)
+			}
+		case "go":
+			if len(packages.Go) > 0 {
+				out = append(out, manager)
+			}
+		case "npm":
+			if len(packages.NPM) > 0 {
+				out = append(out, manager)
+			}
+		case "pip":
+			if len(packages.Pip) > 0 {
+				out = append(out, manager)
+			}
+		}
+	}
+	return out
+}
+
 func managedEnvironmentMountSnapshot() map[string]any {
 	return map[string]any{
 		"apt":   managedEnvironmentAssetSnapshot("apt", ""),

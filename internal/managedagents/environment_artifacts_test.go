@@ -13,6 +13,37 @@ func TestManagedEnvironmentPackageManagersStableOrder(t *testing.T) {
 	}
 }
 
+func TestConfiguredEnvironmentPackageManagersReturnsOnlyManagersWithPackages(t *testing.T) {
+	config := environmentConfigFromMap(map[string]any{
+		"type":       "cloud",
+		"networking": map[string]any{"type": "unrestricted"},
+		"packages": map[string]any{
+			"type": "packages",
+			"pip":  []any{"ruff==0.9.0"},
+			"npm":  []any{"typescript"},
+			"apt":  []any{},
+		},
+	})
+
+	got := ConfiguredEnvironmentPackageManagers(config)
+	want := []string{"npm", "pip"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ConfiguredEnvironmentPackageManagers() = %#v, want %#v", got, want)
+	}
+}
+
+func TestConfiguredEnvironmentPackageManagersReturnsEmptyForNoPackages(t *testing.T) {
+	config := environmentConfigFromMap(map[string]any{
+		"type":       "cloud",
+		"networking": map[string]any{"type": "unrestricted"},
+		"packages":   map[string]any{"type": "packages"},
+	})
+
+	if got := ConfiguredEnvironmentPackageManagers(config); len(got) != 0 {
+		t.Fatalf("ConfiguredEnvironmentPackageManagers() = %#v, want empty", got)
+	}
+}
+
 func TestEnvironmentArtifactDigestStableAndCompatibilitySensitive(t *testing.T) {
 	config := environmentConfigFromMap(map[string]any{
 		"type":       "cloud",

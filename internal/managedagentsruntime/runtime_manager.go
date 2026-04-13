@@ -198,13 +198,12 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
 		}),
 	}
-	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
-		volumeID := artifact.Assets.VolumeIDForManager(manager)
-		mountPath := gatewaymanagedagents.ManagedEnvironmentMountPath(manager)
-		if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(mountPath) == "" {
-			return nil, fmt.Errorf("environment artifact %s is missing %s volume", artifact.ID, manager)
-		}
-		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath, nil))
+	packageMounts, err := environmentArtifactMounts(environment, artifact)
+	if err != nil {
+		return nil, err
+	}
+	for _, mount := range packageMounts {
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath, nil))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine, session.Agent)))
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
