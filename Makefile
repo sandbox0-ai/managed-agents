@@ -10,6 +10,7 @@ WRAPPER_TAG ?= wrapper-testenv
 
 SANDBOX0_BASE_URL ?= https://api.sandbox0.ai
 SANDBOX0_TLS_INSECURE_SKIP_VERIFY ?= false
+RUNTIME_CALLBACK_BASE_URL ?=
 RUNTIME_PROXY_BASE_URL ?=
 SANDBOX0_HOST_ALIAS_IP ?=
 SANDBOX0_HOST_ALIAS_HOST ?=
@@ -24,6 +25,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.image.pullPolicy=IfNotPresent \
 	--set-string agentGateway.env.sandbox0BaseURL=$(SANDBOX0_BASE_URL) \
 	--set-string agentGateway.env.sandbox0TLSInsecureSkipVerify=$(SANDBOX0_TLS_INSECURE_SKIP_VERIFY) \
+	--set-string agentGateway.env.runtimeCallbackBaseURL=$(RUNTIME_CALLBACK_BASE_URL) \
 	--set-string agentGateway.env.runtimeProxyBaseURL=$(RUNTIME_PROXY_BASE_URL) \
 	--set-string agentGateway.env.templateMainImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
 	--set agentGateway.ingress.enabled=$(INGRESS_ENABLED) \
