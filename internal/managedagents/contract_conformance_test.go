@@ -392,6 +392,9 @@ func TestStreamEventsReturnsSSEPayload(t *testing.T) {
 	if !strings.Contains(body, "id: evt_stream_123\n") {
 		t.Fatalf("stream body missing event id: %q", body)
 	}
+	if !strings.Contains(body, "event: message\n") {
+		t.Fatalf("stream body missing message event name: %q", body)
+	}
 	if !strings.Contains(body, "data: ") {
 		t.Fatalf("stream body missing data field: %q", body)
 	}
