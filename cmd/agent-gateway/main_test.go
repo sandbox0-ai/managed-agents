@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestLoadConfigDefaultsSandbox0BaseURLToGlobal(t *testing.T) {
 	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
@@ -24,5 +27,19 @@ func TestLoadConfigTrimsSandbox0BaseURL(t *testing.T) {
 	}
 	if cfg.Sandbox0BaseURL != "https://api.sandbox0.ai" {
 		t.Fatalf("Sandbox0BaseURL = %q, want trimmed URL", cfg.Sandbox0BaseURL)
+	}
+}
+
+func TestLoadConfigParsesRuntimeAllowedDomains(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
+	t.Setenv("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS", "api.search.test, https://gateway.example.test/path\nextra.example.test")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	want := []string{"api.search.test", "https://gateway.example.test/path", "extra.example.test"}
+	if !reflect.DeepEqual(cfg.RuntimeAllowedDomains, want) {
+		t.Fatalf("RuntimeAllowedDomains = %#v, want %#v", cfg.RuntimeAllowedDomains, want)
 	}
 }

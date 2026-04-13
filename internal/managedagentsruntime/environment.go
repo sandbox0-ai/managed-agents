@@ -3,6 +3,8 @@ package managedagentsruntime
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -18,6 +20,8 @@ var packageManagerDomains = map[string][]string{
 	"npm":   {"registry.npmjs.org"},
 	"pip":   {"pypi.org", "files.pythonhosted.org"},
 }
+
+var defaultRuntimeAllowedURLs = []string{managedAnthropicDefaultBaseURL}
 
 func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewaymanagedagents.Environment) (*apispec.TemplateCreateRequest, error) {
 	if m.templateRequest == nil {
@@ -46,13 +50,25 @@ func cloneTemplateRequest(request *apispec.TemplateCreateRequest) (*apispec.Temp
 }
 
 func runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any, agent map[string]any) apispec.SandboxNetworkPolicy {
+	return runtimeNetworkPolicyWithPlatformDomains(environment, engine, agent, nil)
+}
+
+func (m *SDKRuntimeManager) runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any, agent map[string]any) apispec.SandboxNetworkPolicy {
+	return runtimeNetworkPolicyWithPlatformDomains(environment, engine, agent, m.runtimePlatformAllowedDomains())
+}
+
+func runtimeNetworkPolicyWithPlatformDomains(environment *gatewaymanagedagents.Environment, engine map[string]any, agent map[string]any, platformDomains []string) apispec.SandboxNetworkPolicy {
 	if policy, ok := decodeNetworkPolicy(engine); ok {
 		return policy
 	}
-	return environmentNetworkPolicy(environment, agent)
+	return environmentNetworkPolicyWithPlatformDomains(environment, agent, platformDomains)
 }
 
 func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment, agent map[string]any) apispec.SandboxNetworkPolicy {
+	return environmentNetworkPolicyWithPlatformDomains(environment, agent, nil)
+}
+
+func environmentNetworkPolicyWithPlatformDomains(environment *gatewaymanagedagents.Environment, agent map[string]any, platformDomains []string) apispec.SandboxNetworkPolicy {
 	if environment == nil || strings.TrimSpace(environment.Config.Networking.Type) == "unrestricted" {
 		return apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeAllowAll}
 	}
@@ -63,12 +79,27 @@ func environmentNetworkPolicy(environment *gatewaymanagedagents.Environment, age
 	if environment.Config.Networking.AllowMCPServers {
 		domains = append(domains, mcpServerDomainsFromAgent(agent)...)
 	}
+	domains = append(domains, platformDomains...)
 	domains = normalizeDomains(domains)
 	policy := apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeBlockAll}
 	if len(domains) > 0 {
 		policy.Egress = apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{AllowedDomains: domains})
 	}
 	return policy
+}
+
+func (m *SDKRuntimeManager) runtimePlatformAllowedDomains() []string {
+	domains := make([]string, 0, len(defaultRuntimeAllowedURLs)+len(m.cfg.RuntimeAllowedDomains)+1)
+	for _, raw := range defaultRuntimeAllowedURLs {
+		if domain := domainFromURL(raw); domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	domains = append(domains, m.cfg.RuntimeAllowedDomains...)
+	if domain := domainFromURL(m.runtimeWebhookURL("")); domain != "" {
+		domains = append(domains, domain)
+	}
+	return normalizeDomains(domains)
 }
 
 func builderNetworkPolicy(environment *gatewaymanagedagents.Environment) apispec.SandboxNetworkPolicy {
@@ -160,10 +191,7 @@ func normalizeDomains(domains []string) []string {
 	seen := make(map[string]struct{}, len(domains))
 	out := make([]string, 0, len(domains))
 	for _, domain := range domains {
-		trimmed := strings.ToLower(strings.TrimSpace(domain))
-		trimmed = strings.TrimPrefix(trimmed, "https://")
-		trimmed = strings.TrimPrefix(trimmed, "http://")
-		trimmed = strings.Trim(trimmed, "/")
+		trimmed := normalizeDomain(domain)
 		if trimmed == "" {
 			continue
 		}
@@ -175,6 +203,34 @@ func normalizeDomains(domains []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func normalizeDomain(domain string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(domain))
+	if trimmed == "" {
+		return ""
+	}
+	if parsedURL, err := url.Parse(trimmed); err == nil && parsedURL.Hostname() != "" {
+		return strings.TrimSpace(parsedURL.Hostname())
+	}
+	trimmed = strings.TrimPrefix(trimmed, "https://")
+	trimmed = strings.TrimPrefix(trimmed, "http://")
+	trimmed = strings.Trim(trimmed, "/")
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = strings.TrimSpace(host)
+	}
+	if index := strings.Index(trimmed, "/"); index >= 0 {
+		trimmed = trimmed[:index]
+	}
+	return strings.TrimSpace(trimmed)
+}
+
+func domainFromURL(raw string) string {
+	parsedURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))
 }
 
 func appendUniqueStrings(base []string, values ...string) []string {

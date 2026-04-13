@@ -41,6 +41,23 @@ func TestRuntimeNetworkPolicyAllowsEngineOverride(t *testing.T) {
 	}
 }
 
+func TestRuntimeNetworkPolicyAddsPlatformAllowedDomains(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{
+		RuntimeCallbackBaseURL: "https://Gateway.Example.com/internal/managed-agents/runtime/webhooks",
+		RuntimeAllowedDomains:  []string{"Search.Example.com", "https://api.search.test/v1"},
+	}}
+	policy := mgr.runtimeNetworkPolicy(testEnvironment(), nil, nil)
+	egress, ok := policy.Egress.Get()
+	if !ok {
+		t.Fatal("egress policy not set")
+	}
+	for _, want := range []string{"api.anthropic.com", "api.example.com", "api.search.test", "gateway.example.com", "search.example.com"} {
+		if !containsString(egress.AllowedDomains, want) {
+			t.Fatalf("allowed domains = %#v, want %s", egress.AllowedDomains, want)
+		}
+	}
+}
+
 func TestEnvironmentNetworkPolicyRequiresAllowPackageManagersFlag(t *testing.T) {
 	environment := testEnvironment()
 	policy := environmentNetworkPolicy(environment, nil)
