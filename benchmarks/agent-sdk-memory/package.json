@@ -1,0 +1,17 @@
+{
+  "name": "@sandbox0/agent-sdk-memory-benchmark",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "bench": "node ./benchmark.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.104",
+    "@openai/codex-sdk": "0.120.0"
+  },
+  "devDependencies": {}
+}
