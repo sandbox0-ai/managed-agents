@@ -52,6 +52,13 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if _, ok := envVars["PATH"]; ok {
 		t.Fatal("WarmProcesses[0].EnvVars should inherit PATH from the image")
 	}
+	network, ok := request.Spec.Network.Get()
+	if !ok {
+		t.Fatal("Network not set")
+	}
+	if network.Mode != apispec.SandboxNetworkPolicyModeBlockAll {
+		t.Fatalf("Network.Mode = %q, want block-all", network.Mode)
+	}
 	if request.Spec.ClusterId.IsSet() {
 		t.Fatalf("ClusterId should be unset, got %#v", request.Spec.ClusterId)
 	}
