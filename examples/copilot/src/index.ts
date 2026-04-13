@@ -37,6 +37,8 @@ interface CLIArgs {
 interface TurnResult {
   canContinue: boolean;
   requiresAction: boolean;
+  streamComplete: boolean;
+  lastEventID?: string;
 }
 
 function printHelp(): void {
@@ -240,13 +242,25 @@ async function sendAndStreamTurn(
     ],
   });
 
-  const lastSentEventID = sent.data?.at(-1)?.id;
-  const stream = await client.beta.sessions.events.stream(
-    sessionID,
-    {},
-    lastSentEventID ? { headers: { "Last-Event-ID": lastSentEventID } } : undefined,
-  );
-  return consumeEventStream(stream, verbose);
+  let lastEventID = sent.data?.at(-1)?.id;
+
+  for (;;) {
+    const stream = await client.beta.sessions.events.stream(
+      sessionID,
+      {},
+      lastEventID ? { headers: { "Last-Event-ID": lastEventID } } : undefined,
+    );
+    const result = await consumeEventStream(stream, verbose);
+    if (result.lastEventID) {
+      lastEventID = result.lastEventID;
+    }
+    if (result.streamComplete) {
+      return result;
+    }
+    if (verbose) {
+      output.write("\n[stream reconnect]\n");
+    }
+  }
 }
 
 async function consumeEventStream(
@@ -254,8 +268,12 @@ async function consumeEventStream(
   verbose: boolean,
 ): Promise<TurnResult> {
   let wroteAgentText = false;
+  let lastEventID: string | undefined;
 
   for await (const event of stream) {
+    if (typeof event.id === "string" && event.id) {
+      lastEventID = event.id;
+    }
     switch (event.type) {
       case "agent.message": {
         const text = event.content.map((block) => block.text).join("");
@@ -303,7 +321,7 @@ async function consumeEventStream(
         const retryStatus = event.error.retry_status.type;
         output.write(`\n[session error:${retryStatus}] ${event.error.message}\n`);
         if (retryStatus !== "retrying") {
-          return { canContinue: retryStatus === "exhausted", requiresAction: false };
+          return { canContinue: retryStatus === "exhausted", requiresAction: false, streamComplete: true, lastEventID };
         }
         break;
       }
@@ -313,17 +331,17 @@ async function consumeEventStream(
         }
         if (event.stop_reason.type === "requires_action") {
           output.write(`[requires action] ${event.stop_reason.event_ids.join(", ")}\n`);
-          return { canContinue: false, requiresAction: true };
+          return { canContinue: false, requiresAction: true, streamComplete: true, lastEventID };
         }
         if (event.stop_reason.type === "retries_exhausted") {
           output.write("[idle] retries exhausted\n");
         }
-        return { canContinue: true, requiresAction: false };
+        return { canContinue: true, requiresAction: false, streamComplete: true, lastEventID };
       }
       case "session.status_terminated":
       case "session.deleted":
         output.write(`\n[${event.type}]\n`);
-        return { canContinue: false, requiresAction: false };
+        return { canContinue: false, requiresAction: false, streamComplete: true, lastEventID };
       case "user.message":
       case "user.interrupt":
       case "user.tool_confirmation":
@@ -335,7 +353,7 @@ async function consumeEventStream(
   if (wroteAgentText) {
     output.write("\n");
   }
-  return { canContinue: true, requiresAction: false };
+  return { canContinue: true, requiresAction: false, streamComplete: false, lastEventID };
 }
 
 async function runOneShot(client: Anthropic, sessionID: string, task: string, verbose: boolean): Promise<void> {
