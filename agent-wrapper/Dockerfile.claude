@@ -1,9 +1,10 @@
-FROM ruby:3.3-jammy
+FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG GRADLE_VERSION=8.7
 ARG GO_VERSION=1.22.12
 ARG NODE_MAJOR=20
+ARG RUBY_VERSION=3.3.10
 ARG RUST_VERSION=1.77.2
 ARG TARGETARCH=amd64
 
@@ -47,6 +48,13 @@ RUN apt-get update \
 		git \
 		grep \
 		htop \
+		libffi-dev \
+		libgdbm-dev \
+		libgmp-dev \
+		libncurses-dev \
+		libreadline-dev \
+		libssl-dev \
+		libyaml-dev \
 		jq \
 		make \
 		maven \
@@ -75,6 +83,7 @@ RUN apt-get update \
 		tree \
 		unzip \
 		vim \
+		zlib1g-dev \
 		zip \
 	&& update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
 	&& update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 \
@@ -88,6 +97,16 @@ RUN apt-get update \
 	&& php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer \
 	&& curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
 	&& npm install --global yarn pnpm \
+	&& curl -fsSL "https://cache.ruby-lang.org/pub/ruby/${RUBY_VERSION%.*}/ruby-${RUBY_VERSION}.tar.gz" -o /tmp/ruby.tgz \
+	&& mkdir -p /tmp/ruby-src \
+	&& tar -xzf /tmp/ruby.tgz -C /tmp/ruby-src --strip-components=1 \
+	&& cd /tmp/ruby-src \
+	&& ./configure --disable-install-doc \
+	&& make -j"$(nproc)" \
+	&& make install \
+	&& gem update --system --no-document \
+	&& gem install bundler --no-document \
+	&& cd / \
 	&& case "${TARGETARCH}" in \
 		amd64) go_arch=amd64 ;; \
 		arm64) go_arch=arm64 ;; \
