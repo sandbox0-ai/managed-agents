@@ -68,12 +68,26 @@ Component labels.
 {{- end -}}
 
 {{/*
-In-cluster callback base URL.
+Runtime callback base URL reachable from sandbox runtimes.
 */}}
 {{- define "managed-agents.callbackBaseURL" -}}
 {{- if .Values.agentGateway.env.runtimeCallbackBaseURL -}}
 {{- .Values.agentGateway.env.runtimeCallbackBaseURL -}}
 {{- else -}}
+{{- $ingressHost := "" -}}
+{{- with .Values.agentGateway.ingress.hosts -}}
+{{- with index . 0 -}}
+{{- $ingressHost = .host -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.agentGateway.ingress.enabled $ingressHost -}}
+{{- $scheme := "http" -}}
+{{- if .Values.agentGateway.ingress.tls -}}
+{{- $scheme = "https" -}}
+{{- end -}}
+{{- printf "%s://%s" $scheme $ingressHost -}}
+{{- else -}}
 {{- printf "http://%s.%s.svc.cluster.local:%v" (include "managed-agents.componentFullname" (list . "agent-gateway")) .Release.Namespace .Values.agentGateway.service.port -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

@@ -270,6 +270,7 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 					_, _ = c.Writer.WriteString("id: " + eventID + "\n")
 					lastEventID = eventID
 				}
+				_, _ = c.Writer.WriteString("event: message\n")
 				_, _ = c.Writer.WriteString("data: ")
 				_, _ = c.Writer.Write(body)
 				_, _ = c.Writer.WriteString("\n\n")

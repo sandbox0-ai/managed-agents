@@ -43,7 +43,7 @@ agentGateway:
     databaseMaxConns: 10
     databaseMinConns: 1
     sandbox0BaseURL: https://api.sandbox0.ai
-    sandbox0Timeout: 60s
+    sandbox0Timeout: 90s
     runtimeEnabled: true
     runtimeCallbackBaseURL: ""
     claudeTemplate: managed-agent-claude

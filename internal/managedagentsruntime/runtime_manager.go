@@ -68,7 +68,7 @@ func (c Config) WithDefaults(httpPort int) Config {
 		c.SandboxTTLSeconds = c.SandboxHardTTLSeconds
 	}
 	if c.SandboxRequestTimeout <= 0 {
-		c.SandboxRequestTimeout = 60 * time.Second
+		c.SandboxRequestTimeout = 90 * time.Second
 	}
 	if strings.TrimSpace(c.SandboxBaseURL) == "" {
 		c.SandboxBaseURL = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
@@ -168,18 +168,20 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		if !cleanupPending {
 			return
 		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.cfg.SandboxRequestTimeout)
+		defer cancel()
 		if sandboxID != "" {
-			if _, err := client.DeleteSandbox(ctx, sandboxID); err != nil {
+			if _, err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil {
 				m.logger.Warn("delete sandbox after runtime claim failed", zap.Error(err), zap.String("sandbox_id", sandboxID))
 			}
 		}
 		if workspaceVolumeID != "" {
-			if _, err := client.DeleteVolumeWithOptions(ctx, workspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+			if _, err := client.DeleteVolumeWithOptions(cleanupCtx, workspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
 				m.logger.Warn("delete workspace volume after runtime claim failed", zap.Error(err), zap.String("volume_id", workspaceVolumeID))
 			}
 		}
 		if engineStateVolumeID != "" {
-			if _, err := client.DeleteVolumeWithOptions(ctx, engineStateVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+			if _, err := client.DeleteVolumeWithOptions(cleanupCtx, engineStateVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
 				m.logger.Warn("delete engine-state volume after runtime claim failed", zap.Error(err), zap.String("volume_id", engineStateVolumeID))
 			}
 		}
@@ -510,35 +512,7 @@ func (m *SDKRuntimeManager) wrapperRequestTarget(rawWrapperURL, path string) (st
 	if err != nil {
 		return "", "", err
 	}
-	if strings.TrimSpace(m.cfg.SandboxBaseURL) == "" {
-		return strings.TrimRight(wrapperURL, "/") + path, "", nil
-	}
-	baseURL, err := canonicalManagedRuntimeURL(m.cfg.SandboxBaseURL)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid sandbox base url %q", m.cfg.SandboxBaseURL)
-	}
-	baseParsed, err := url.Parse(baseURL)
-	if err != nil {
-		return "", "", fmt.Errorf("parse sandbox base url: %w", err)
-	}
-	wrapperParsed, err := url.Parse(wrapperURL)
-	if err != nil {
-		return "", "", fmt.Errorf("parse wrapper url: %w", err)
-	}
-	baseParsed.Path = joinURLPath(baseParsed.Path, path)
-	baseParsed.RawPath = ""
-	baseParsed.RawQuery = ""
-	baseParsed.Fragment = ""
-	return baseParsed.String(), wrapperParsed.Host, nil
-}
-
-func joinURLPath(basePath, suffix string) string {
-	trimmedBase := strings.TrimRight(strings.TrimSpace(basePath), "/")
-	trimmedSuffix := "/" + strings.TrimLeft(strings.TrimSpace(suffix), "/")
-	if trimmedBase == "" {
-		return trimmedSuffix
-	}
-	return trimmedBase + trimmedSuffix
+	return strings.TrimRight(wrapperURL, "/") + path, "", nil
 }
 
 func (m *SDKRuntimeManager) wrapperJSON(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, method, path string, payload any) error {

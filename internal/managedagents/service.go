@@ -27,17 +27,21 @@ type RuntimeManager interface {
 }
 
 const (
-	runtimeWebhookLeaseDuration = 2 * time.Minute
-	runtimeWebhookPollInterval  = 100 * time.Millisecond
-	runtimeWebhookMaxAttempts   = 5
+	runtimeWebhookLeaseDuration   = 2 * time.Minute
+	runtimeWebhookPollInterval    = 100 * time.Millisecond
+	runtimeWebhookMaxAttempts     = 5
+	failedCreateCleanupTimeout    = 2 * time.Minute
+	runtimeCreateIdlePauseDelay   = 30 * time.Second
+	runtimePauseBestEffortTimeout = 30 * time.Second
 )
 
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
-	repo      *Repository
-	runtime   RuntimeManager
-	logger    *zap.Logger
-	fileStore FileStore
+	repo                 *Repository
+	runtime              RuntimeManager
+	logger               *zap.Logger
+	fileStore            FileStore
+	createIdlePauseDelay time.Duration
 }
 
 type ServiceOption func(*Service)
@@ -50,12 +54,22 @@ func WithFileStore(store FileStore) ServiceOption {
 	}
 }
 
+// WithCreateIdlePauseDelay overrides the delay before pausing a newly-created idle runtime.
+func WithCreateIdlePauseDelay(delay time.Duration) ServiceOption {
+	return func(s *Service) {
+		if delay < 0 {
+			delay = 0
+		}
+		s.createIdlePauseDelay = delay
+	}
+}
+
 // NewService returns a managed-agent service.
 func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger, opts ...ServiceOption) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	service := &Service{repo: repo, runtime: runtime, logger: logger}
+	service := &Service{repo: repo, runtime: runtime, logger: logger, createIdlePauseDelay: runtimeCreateIdlePauseDelay}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(service)
@@ -147,7 +161,7 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
 				return err
 			}
-			s.pauseRuntimeBestEffort(ctx, credential, runtime, "create")
+			s.pauseRuntimeAfterCreateIdleDelay(credential, runtime)
 		}
 		created = record.toAPI(now)
 		return nil
@@ -158,6 +172,10 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 }
 
 func (s *Service) cleanupFailedCreateRuntime(ctx context.Context, credential RequestCredential, sessionID string, runtime *RuntimeRecord) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedCreateCleanupTimeout)
+	defer cancel()
+	ctx = cleanupCtx
+
 	if runtime != nil {
 		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
 			s.logger.Warn("failed to destroy runtime after create failure", zap.Error(err), zap.String("session_id", sessionID))
@@ -814,6 +832,34 @@ func (s *Service) pauseRuntimeBestEffort(ctx context.Context, credential Request
 	if err := s.runtime.PauseRuntime(ctx, credential, runtime); err != nil {
 		s.logger.Warn("failed to pause managed-agent runtime", zap.Error(err), zap.String("session_id", runtime.SessionID), zap.String("reason", reason))
 	}
+}
+
+func (s *Service) pauseRuntimeAfterCreateIdleDelay(credential RequestCredential, runtime *RuntimeRecord) {
+	if runtime == nil {
+		return
+	}
+	delay := s.createIdlePauseDelay
+	runtimeCopy := *runtime
+	go func() {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			<-timer.C
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), runtimePauseBestEffortTimeout)
+		defer cancel()
+		latestRuntime, err := s.repo.GetRuntime(ctx, runtimeCopy.SessionID)
+		if err != nil {
+			if !errors.Is(err, ErrRuntimeNotFound) {
+				s.logger.Warn("failed to check managed-agent runtime before delayed create pause", zap.Error(err), zap.String("session_id", runtimeCopy.SessionID))
+			}
+			latestRuntime = &runtimeCopy
+		}
+		if latestRuntime.ActiveRunID != nil {
+			return
+		}
+		s.pauseRuntimeBestEffort(ctx, credential, latestRuntime, "create_idle")
+	}()
 }
 
 type backgroundRuntimePauser interface {

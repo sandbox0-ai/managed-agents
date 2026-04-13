@@ -115,9 +115,21 @@ func (a *Sandbox0Authenticator) authenticateAPIKey(ctx context.Context, token, s
 	if err != nil {
 		return nil, newAuthError(http.StatusBadGateway, "failed to initialize sandbox0 client", err)
 	}
-	apiKey, err := client.GetCurrentAPIKey(ctx)
+	resp, err := client.API().APIKeysCurrentGet(ctx)
 	if err != nil {
 		return nil, a.wrapSandbox0Error(err)
+	}
+	response, ok := resp.(*apispec.SuccessCurrentAPIKeyResponse)
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "unexpected sandbox0 api key response", nil)
+	}
+	data, ok := response.Data.Get()
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "sandbox0 api key response missing data", nil)
+	}
+	apiKey, ok := data.APIKey.Get()
+	if !ok {
+		return nil, newAuthError(http.StatusBadGateway, "sandbox0 api key response missing api key", nil)
 	}
 	teamID := strings.TrimSpace(apiKey.TeamID)
 	if teamID == "" {

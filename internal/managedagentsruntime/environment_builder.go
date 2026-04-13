@@ -18,6 +18,8 @@ type environmentBuildResources struct {
 	managerVolumeIDs    map[string]string
 }
 
+const environmentBuildCleanupTimeout = 2 * time.Minute
+
 func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
 	if err != nil {
@@ -144,6 +146,15 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 }
 
 func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
+	steps := environmentBuildSteps(environment)
+	if len(steps) == 0 {
+		assets, err := createEmptyEnvironmentArtifactVolumes(ctx, client)
+		if err != nil {
+			return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
+		}
+		return assets, "no environment packages requested; created empty package volumes\n", nil
+	}
+
 	resources, err := m.createEnvironmentBuildResources(ctx, client)
 	if err != nil {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
@@ -174,7 +185,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	defer m.cleanupEnvironmentBuildResources(ctx, client, builderSandbox, resources)
 
 	var buildLog strings.Builder
-	for _, step := range environmentBuildSteps(environment) {
+	for _, step := range steps {
 		output, err := runEnvironmentBuildStep(ctx, builderSandbox, step)
 		buildLog.WriteString("== " + step.manager + " ==\n")
 		buildLog.WriteString(output)
@@ -191,6 +202,25 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), err
 	}
 	return assets, buildLog.String(), nil
+}
+
+func createEmptyEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.Client) (gatewaymanagedagents.EnvironmentArtifactAssets, error) {
+	assets := gatewaymanagedagents.EnvironmentArtifactAssets{}
+	created := make([]string, 0, len(gatewaymanagedagents.ManagedEnvironmentPackageManagers()))
+	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
+		volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{
+			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
+		})
+		if err != nil {
+			for _, volumeID := range created {
+				_, _ = client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
+			}
+			return gatewaymanagedagents.EnvironmentArtifactAssets{}, fmt.Errorf("create empty %s environment volume: %w", manager, err)
+		}
+		assets.SetVolumeIDForManager(manager, volume.ID)
+		created = append(created, volume.ID)
+	}
+	return assets, nil
 }
 
 func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context, client *sandbox0sdk.Client) (*environmentBuildResources, error) {
@@ -220,6 +250,10 @@ func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context,
 }
 
 func (m *SDKRuntimeManager) cleanupEnvironmentBuildResources(ctx context.Context, client *sandbox0sdk.Client, sandbox *sandbox0sdk.Sandbox, resources *environmentBuildResources) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), environmentBuildCleanupTimeout)
+	defer cancel()
+	ctx = cleanupCtx
+
 	if sandbox != nil {
 		if _, err := client.DeleteSandbox(ctx, sandbox.ID); err != nil {
 			m.logger.Warn("delete environment builder sandbox failed", zap.Error(err), zap.String("sandbox_id", sandbox.ID))

@@ -49,6 +49,7 @@ type AgentListOptions struct {
 type pageCursor struct {
 	CreatedAt string `json:"created_at"`
 	ID        string `json:"id"`
+	Position  int64  `json:"position,omitempty"`
 }
 
 func normalizeListOrder(order string) string {
@@ -88,6 +89,21 @@ func encodePageCursor(createdAt time.Time, id string) *string {
 		return nil
 	}
 	payload, err := json.Marshal(pageCursor{CreatedAt: createdAt.UTC().Format(time.RFC3339), ID: id})
+	if err != nil {
+		return nil
+	}
+	value := "page_" + base64.StdEncoding.EncodeToString(payload)
+	return &value
+}
+
+func encodePositionPageCursor(createdAt time.Time, id string, position int64) *string {
+	if position <= 0 {
+		return encodePageCursor(createdAt, id)
+	}
+	if strings.TrimSpace(id) == "" || createdAt.IsZero() {
+		return nil
+	}
+	payload, err := json.Marshal(pageCursor{CreatedAt: createdAt.UTC().Format(time.RFC3339), ID: id, Position: position})
 	if err != nil {
 		return nil
 	}
