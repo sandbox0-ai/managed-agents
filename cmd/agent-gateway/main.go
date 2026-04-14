@@ -111,6 +111,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("create runtime manager", zap.Error(err))
 	}
+	runtimeManager.StartManagedTemplateSync(ctx)
 	serviceOpts = append(serviceOpts, managedagents.WithFileStore(managedagentsruntime.NewVolumeFileStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout)))
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	service.StartRuntimeWebhookWorker(ctx)

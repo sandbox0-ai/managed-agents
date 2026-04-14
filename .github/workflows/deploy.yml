@@ -37,6 +37,7 @@ jobs:
       INGRESS_HOST: ${{ vars.MANAGED_AGENTS_INGRESS_HOST || '' }}
       INGRESS_TLS_SECRET_NAME: ${{ vars.MANAGED_AGENTS_INGRESS_TLS_SECRET_NAME || '' }}
       DATABASE_URL: ${{ secrets.MANAGED_AGENTS_DATABASE_URL }}
+      SANDBOX0_ADMIN_API_KEY: ${{ secrets.MANAGED_AGENTS_SANDBOX0_ADMIN_API_KEY }}
       ANTHROPIC_SKILLS_API_KEY: ${{ secrets.MANAGED_AGENTS_ANTHROPIC_SKILLS_API_KEY }}
       SMOKE_API_KEY: ${{ secrets.MANAGED_AGENTS_SMOKE_API_KEY }}
 
@@ -105,21 +106,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          kubectl -n "${KUBE_NAMESPACE}" create secret generic managed-agents-runtime \
-            --from-literal=MANAGED_AGENT_DATABASE_URL="${DATABASE_URL}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
+          secret_args=(--from-literal=MANAGED_AGENT_DATABASE_URL="${DATABASE_URL}")
           if [[ -n "${ANTHROPIC_SKILLS_API_KEY}" ]]; then
-            kubectl -n "${KUBE_NAMESPACE}" create secret generic managed-agents-runtime \
-              --from-literal=MANAGED_AGENT_DATABASE_URL="${DATABASE_URL}" \
-              --from-literal=MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY="${ANTHROPIC_SKILLS_API_KEY}" \
-              --dry-run=client -o yaml | kubectl apply -f -
+            secret_args+=(--from-literal=MANAGED_AGENT_ANTHROPIC_SKILLS_API_KEY="${ANTHROPIC_SKILLS_API_KEY}")
           fi
+          if [[ -n "${SANDBOX0_ADMIN_API_KEY}" ]]; then
+            secret_args+=(--from-literal=MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY="${SANDBOX0_ADMIN_API_KEY}")
+          fi
+
+          kubectl -n "${KUBE_NAMESPACE}" create secret generic managed-agents-runtime \
+            "${secret_args[@]}" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy chart
         shell: bash
         run: |
           set -euo pipefail
+
+          helm_extra_args=(
+            --set-string "agentGateway.env.runtimeEnabled=${RUNTIME_ENABLED}"
+            --set-string "agentGateway.env.claudeTemplate=${CLAUDE_TEMPLATE}"
+          )
+          if [[ -n "${SANDBOX0_ADMIN_API_KEY}" ]]; then
+            helm_extra_args+=(--set "agentGateway.secretKeys.sandbox0AdminAPIKey.enabled=true")
+          fi
 
           make helm-upgrade \
             HELM_RELEASE="${HELM_RELEASE}" \
@@ -133,7 +143,7 @@ jobs:
             INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME}" \
             INGRESS_HOST="${INGRESS_HOST}" \
             INGRESS_TLS_SECRET_NAME="${INGRESS_TLS_SECRET_NAME}" \
-            HELM_EXTRA_ARGS="--set-string agentGateway.env.runtimeEnabled=${RUNTIME_ENABLED} --set-string agentGateway.env.claudeTemplate=${CLAUDE_TEMPLATE}"
+            HELM_EXTRA_ARGS="${helm_extra_args[*]}"
 
       - name: Wait for rollout
         shell: bash
