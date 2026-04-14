@@ -331,6 +331,44 @@ func TestServiceCreateVaultRejectsInvalidManagedLLMMetadata(t *testing.T) {
 	}
 }
 
+func TestServiceCreateAgentRejectsReservedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+
+	key := ManagedAgentsMetadataPrefix + "future_agent_key"
+	_, err := service.CreateAgent(context.Background(), principal, CreateAgentRequest{
+		Name:  "Claude Agent",
+		Model: "claude-sonnet-4-5",
+		Metadata: map[string]string{
+			key: "enabled",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("CreateAgent error = %v, want reserved metadata rejection", err)
+	}
+}
+
+func TestServiceCreateAgentAllowsCustomMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+
+	created, err := service.CreateAgent(context.Background(), principal, CreateAgentRequest{
+		Name:  "Claude Agent",
+		Model: "claude-sonnet-4-5",
+		Metadata: map[string]string{
+			"backend.llm_host": "https://llm.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if got := created.Metadata["backend.llm_host"]; got != "https://llm.example.com" {
+		t.Fatalf("agent metadata = %#v", created.Metadata)
+	}
+}
+
 func TestServiceUpdateVaultRejectsManagedMetadataWithoutRole(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
@@ -352,6 +390,58 @@ func TestServiceUpdateVaultRejectsManagedMetadataWithoutRole(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), ManagedAgentsVaultRoleKey) {
 		t.Fatalf("UpdateVault error = %v, want managed role validation", err)
+	}
+}
+
+func TestServiceCreateCredentialRejectsReservedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	key := ManagedAgentsMetadataPrefix + "future_credential_key"
+	_, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":  "static_bearer",
+			"token": "secret-token",
+		},
+		Metadata: map[string]string{
+			key: "enabled",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("CreateCredential error = %v, want reserved metadata rejection", err)
+	}
+}
+
+func TestServiceCreateCredentialAllowsCustomMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vault_123", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	created, err := service.CreateCredential(ctx, principal, vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":  "static_bearer",
+			"token": "secret-token",
+		},
+		Metadata: map[string]string{
+			"backend.provider": "anthropic",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	if got := created.Metadata["backend.provider"]; got != "anthropic" {
+		t.Fatalf("credential metadata = %#v", created.Metadata)
 	}
 }
 
@@ -825,6 +915,64 @@ func TestCreateEnvironmentRejectsDuplicateName(t *testing.T) {
 	_, err = service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: " python "})
 	if err == nil || !strings.Contains(err.Error(), "environment already exists") {
 		t.Fatalf("CreateEnvironment duplicate error = %v, want conflict", err)
+	}
+}
+
+func TestCreateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	key := ManagedAgentsMetadataPrefix + "future_environment_key"
+	_, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "python",
+		Metadata: map[string]string{
+			key: "enabled",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("CreateEnvironment error = %v, want reserved metadata rejection", err)
+	}
+}
+
+func TestCreateEnvironmentAllowsCustomMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	created, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "python",
+		Metadata: map[string]string{
+			"backend.llm_host": "https://llm.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	if got := created.Metadata["backend.llm_host"]; got != "https://llm.example.com" {
+		t.Fatalf("environment metadata = %#v", created.Metadata)
+	}
+}
+
+func TestUpdateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: "python"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	value := "enabled"
+	key := ManagedAgentsMetadataPrefix + "future_environment_key"
+	_, err = service.UpdateEnvironment(ctx, principal, environment.ID, UpdateEnvironmentRequest{
+		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{key: &value}},
+	})
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("UpdateEnvironment error = %v, want reserved metadata rejection", err)
 	}
 }
 

@@ -359,6 +359,27 @@ func TestManagedLLMCredentialBindingUsesDualProjection(t *testing.T) {
 	}
 }
 
+func TestManagedLLMCredentialBindingAllowsVaultBaseURLDomain(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("claude", map[string]any{}, testLLMVaultCredentialsWithBaseURL("https://LLM.Proxy.Example.com/v1",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	if got := stringValue(mapValue(engine["env"])["ANTHROPIC_BASE_URL"]); got != "https://llm.proxy.example.com/v1" {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q, want canonical vault base URL", got)
+	}
+	binding, err := managedLLMCredentialBinding("sesn_123", "claude", credential)
+	if err != nil {
+		t.Fatalf("managedLLMCredentialBinding: %v", err)
+	}
+	merged := mergeManagedCredentialPolicy(apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeBlockAll}, "sesn_123", []managedCredentialBinding{*binding})
+	egress, ok := merged.Egress.Get()
+	if !ok || !containsString(egress.AllowedDomains, "llm.proxy.example.com") {
+		t.Fatalf("allowed domains = %#v, want vault LLM host", egress.AllowedDomains)
+	}
+}
+
 func TestNormalizedStoredSkillRelativePathPreservesTopLevelDirectory(t *testing.T) {
 	got := normalizedStoredSkillRelativePath("demo-skill", "demo-skill/SKILL.md")
 	if got != "demo-skill/SKILL.md" {

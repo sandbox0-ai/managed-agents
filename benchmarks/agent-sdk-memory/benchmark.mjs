@@ -2,6 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -10,6 +11,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const benchmarkRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(benchmarkRoot, "../..");
+const wrapperRoot = path.join(repoRoot, "agent-wrapper");
 
 const defaultOptions = {
   samples: 5,
@@ -144,6 +146,32 @@ function resolveClaudeCli() {
   return path.join(packageRoot("@anthropic-ai/claude-agent-sdk"), "cli.js");
 }
 
+function resolveAgentWrapperEntrypoint() {
+  const entrypoint = path.join(wrapperRoot, "src", "index.js");
+  if (!fs.existsSync(entrypoint)) {
+    throw new Error(`Could not find Sandbox0 agent-wrapper entrypoint at ${entrypoint}`);
+  }
+  const wrapperClaudeSDK = path.join(wrapperRoot, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json");
+  if (!fs.existsSync(wrapperClaudeSDK)) {
+    throw new Error(`Sandbox0 agent-wrapper dependencies are not installed. Run: cd ${wrapperRoot} && npm install`);
+  }
+  return entrypoint;
+}
+
+function localPackageVersion(root) {
+  const packageJsonPath = path.join(root, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  return packageJson.version ?? null;
+}
+
+function localInstalledPackageVersion(root, packageName) {
+  const packagePathParts = packageName.startsWith("@") ? packageName.split("/") : [packageName];
+  const packageJsonPath = path.join(root, "node_modules", ...packagePathParts, "package.json");
+  if (!fs.existsSync(packageJsonPath)) return null;
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  return packageJson.version ?? null;
+}
+
 function measureNodeEval(name, code) {
   const marker = "__SANDBOX0_RSS__";
   const stdout = runChecked(process.execPath, ["--input-type=module", "-e", `${code}\nconsole.log(${JSON.stringify(marker)} + process.memoryUsage().rss);`]);
@@ -198,6 +226,47 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function reserveLoopbackPort() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (!port) {
+          reject(new Error("Could not reserve loopback port"));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+async function waitForHTTPReady(url, { child, getStdout, getStderr, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Process exited before ${url} became ready. stdout: ${getStdout().slice(0, 500)} stderr: ${getStderr().slice(0, 500)}`);
+    }
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(500) });
+      if (response.ok) return;
+    } catch {
+      // Keep polling until the process is ready or the timeout expires.
+    }
+    await sleep(50);
+  }
+  throw new Error(`Timed out waiting for ${url}. stdout: ${getStdout().slice(0, 500)} stderr: ${getStderr().slice(0, 500)}`);
+}
+
 async function terminateProcessTree(child, timeoutMs) {
   const pids = [child.pid, ...listChildPids(child.pid)].filter(Boolean);
   for (const pid of [...pids].reverse()) {
@@ -227,7 +296,7 @@ async function terminateProcessTree(child, timeoutMs) {
   }
 }
 
-async function measureChildProcess({ name, command, args, env, warmupMs, timeoutMs, stabilityProbes, stabilityProbeIntervalMs }) {
+async function measureChildProcess({ name, command, args, cwd = repoRoot, env, readyCheck, warmupMs, timeoutMs, stabilityProbes, stabilityProbeIntervalMs }) {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox0-agent-sdk-memory-"));
   const home = path.join(tmpRoot, "home");
   const claudeConfig = path.join(tmpRoot, "claude");
@@ -236,6 +305,7 @@ async function measureChildProcess({ name, command, args, env, warmupMs, timeout
   fs.mkdirSync(claudeConfig, { recursive: true });
   fs.mkdirSync(codexHome, { recursive: true });
 
+  const extraEnv = typeof env === "function" ? env({ tmpRoot, home, claudeConfig, codexHome }) : env;
   const childEnv = {
     ...process.env,
     HOME: home,
@@ -243,11 +313,11 @@ async function measureChildProcess({ name, command, args, env, warmupMs, timeout
     CODEX_HOME: codexHome,
     NO_COLOR: "1",
     CI: "1",
-    ...env,
+    ...extraEnv,
   };
 
   const child = spawn(command, args, {
-    cwd: repoRoot,
+    cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -269,14 +339,25 @@ async function measureChildProcess({ name, command, args, env, warmupMs, timeout
     exitInfo = { error: error.message };
   });
 
-  await sleep(warmupMs);
+  let rss = { childPids: [], directRssKb: 0, treeRssKb: 0 };
+  try {
+    if (readyCheck) {
+      await readyCheck({
+        child,
+        tmpRoot,
+        getStdout: () => stdout,
+        getStderr: () => stderr,
+      });
+    }
+    await sleep(warmupMs);
 
-  const rss = child.pid
-    ? await sampleProcessTreeRss(child.pid, { stabilityProbes, stabilityProbeIntervalMs })
-    : { childPids: [], directRssKb: 0, treeRssKb: 0 };
-
-  if (child.pid) await terminateProcessTree(child, timeoutMs);
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
+    rss = child.pid
+      ? await sampleProcessTreeRss(child.pid, { stabilityProbes, stabilityProbeIntervalMs })
+      : { childPids: [], directRssKb: 0, treeRssKb: 0 };
+  } finally {
+    if (child.pid) await terminateProcessTree(child, timeoutMs);
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 
   return {
     name,
@@ -333,6 +414,7 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   const codexBinary = resolveCodexBinary();
   const claudeCli = resolveClaudeCli();
+  const agentWrapperEntrypoint = resolveAgentWrapperEntrypoint();
 
   const definitions = [
     {
@@ -402,6 +484,37 @@ async function main() {
       }),
       value: (sample) => sample.treeRssKb,
     },
+    {
+      key: "sandbox0-agent-wrapper-idle",
+      label: "Sandbox0 agent-wrapper idle",
+      primaryMetric: "process tree RSS",
+      run: async () => {
+        const port = await reserveLoopbackPort();
+        return measureChildProcess({
+          name: "sandbox0-agent-wrapper-idle",
+          command: process.execPath,
+          args: [agentWrapperEntrypoint],
+          cwd: wrapperRoot,
+          env: ({ tmpRoot }) => ({
+            PORT: String(port),
+            AGENT_WRAPPER_STATE_DIR: path.join(tmpRoot, "agent-wrapper-state"),
+            AGENT_WRAPPER_CONTROL_TOKEN: "benchmark-control-token",
+            ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || "dummy",
+          }),
+          readyCheck: ({ child, getStdout, getStderr }) => waitForHTTPReady(`http://127.0.0.1:${port}/healthz`, {
+            child,
+            getStdout,
+            getStderr,
+            timeoutMs: Math.max(options.warmupMs, 5000),
+          }),
+          warmupMs: options.warmupMs,
+          timeoutMs: options.childTimeoutMs,
+          stabilityProbes: options.stabilityProbes,
+          stabilityProbeIntervalMs: options.stabilityProbeIntervalMs,
+        });
+      },
+      value: (sample) => sample.treeRssKb,
+    },
   ];
 
   const results = [];
@@ -433,6 +546,8 @@ async function main() {
       totalMemoryKb: Math.round(os.totalmem() / 1024),
     },
     packages: {
+      "agent-wrapper": localPackageVersion(wrapperRoot),
+      "agent-wrapper/@anthropic-ai/claude-agent-sdk": localInstalledPackageVersion(wrapperRoot, "@anthropic-ai/claude-agent-sdk"),
       "@anthropic-ai/claude-agent-sdk": packageVersion("@anthropic-ai/claude-agent-sdk"),
       "@openai/codex-sdk": packageVersion("@openai/codex-sdk"),
       "@openai/codex": packageVersion("@openai/codex"),
@@ -440,6 +555,7 @@ async function main() {
     binaries: {
       codexBinary,
       claudeCli,
+      agentWrapperEntrypoint,
     },
     results,
   };

@@ -101,7 +101,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	req.BootstrapEvents = append(req.BootstrapEvents, vaultEvents...)
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
-	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
+	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
 }
 
 func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string, mcpTargets map[string]mcpServerTarget) ([]managedVaultCredentials, []map[string]any, error) {

@@ -18,7 +18,7 @@ spec:
         PORT: "${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}"
         AGENT_WRAPPER_STATE_DIR: ${MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH}
   network:
-    mode: allow-all
+    mode: block-all
   pool:
     minIdle: 1
     maxIdle: 2

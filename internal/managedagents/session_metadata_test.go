@@ -53,6 +53,15 @@ func TestValidateManagedSessionMetadataRejectsUnknownReservedKey(t *testing.T) {
 	}
 }
 
+func TestValidateManagedSessionMetadataAllowsCustomMetadata(t *testing.T) {
+	err := ValidateManagedSessionMetadata(map[string]string{
+		"backend.llm_host": "https://llm.example.com",
+	})
+	if err != nil {
+		t.Fatalf("ValidateManagedSessionMetadata error = %v, want custom metadata allowed", err)
+	}
+}
+
 func TestValidateManagedSessionMetadataPatchRejectsHardTTLUpdate(t *testing.T) {
 	newValue := "0"
 	err := validateManagedSessionMetadataPatch(map[string]string{}, MetadataPatchField{

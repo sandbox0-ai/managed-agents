@@ -35,6 +35,7 @@ type config struct {
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
 	RuntimeEnabled         bool
+	RuntimeAllowedDomains  []string
 	ClaudeTemplate         string
 	TemplateManifestPath   string
 	TemplateMainImage      string
@@ -104,6 +105,7 @@ func main() {
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
 		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
+		RuntimeAllowedDomains:  cfg.RuntimeAllowedDomains,
 	}.WithDefaults(0)
 	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
 	if err != nil {
@@ -174,6 +176,7 @@ func loadConfig() (config, error) {
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
+		RuntimeAllowedDomains:  envStringList("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS"),
 		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
 		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
 		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
@@ -240,6 +243,24 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envStringList(key string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func envInt(key string, fallback int) int {

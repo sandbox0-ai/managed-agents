@@ -61,6 +61,9 @@ func (s *Service) CreateAgent(ctx context.Context, principal Principal, req Crea
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedAgentMetadata(metadata); err != nil {
+		return nil, err
+	}
 	req.Name = name
 	req.Model = model
 	req.Description = description
@@ -157,6 +160,9 @@ func (s *Service) UpdateAgent(ctx context.Context, principal Principal, agentID 
 		if err != nil {
 			return nil, err
 		}
+		if err := ValidateManagedAgentMetadata(metadata); err != nil {
+			return nil, err
+		}
 		agent.Metadata = metadata
 	}
 	version := agent.Version + 1
@@ -205,6 +211,9 @@ func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, re
 	}
 	metadata, err := normalizeMetadataMap(req.Metadata, 0, 0, 0)
 	if err != nil {
+		return nil, err
+	}
+	if err := ValidateManagedEnvironmentMetadata(metadata); err != nil {
 		return nil, err
 	}
 	config, err := normalizeCreateEnvironmentConfig(req.Config)
@@ -281,6 +290,9 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, en
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(environment.Metadata, req.Metadata, 0, 0, 0)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedEnvironmentMetadata(metadata); err != nil {
 			return nil, err
 		}
 		environment.Metadata = metadata
@@ -440,6 +452,9 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedCredentialMetadata(metadata); err != nil {
+		return nil, err
+	}
 	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
 	if err != nil {
 		return nil, err
@@ -492,6 +507,9 @@ func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vau
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(credential.Metadata, req.Metadata, 16, 64, 512)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedCredentialMetadata(metadata); err != nil {
 			return nil, err
 		}
 		credential.Metadata = metadata

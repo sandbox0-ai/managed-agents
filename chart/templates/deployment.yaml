@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.agentGateway.env.runtimeEnabled | quote }}
             - name: MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL
               value: {{ include "managed-agents.callbackBaseURL" . | quote }}
+            - name: MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS
+              value: {{ .Values.agentGateway.env.runtimeAllowedDomains | quote }}
             - name: MANAGED_AGENT_CLAUDE_TEMPLATE
               value: {{ .Values.agentGateway.env.claudeTemplate | quote }}
             - name: MANAGED_AGENT_WRAPPER_PORT

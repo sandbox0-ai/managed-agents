@@ -39,6 +39,7 @@ type Config struct {
 	SandboxBaseURL         string
 	SandboxAdminAPIKey     string
 	RuntimeCallbackBaseURL string
+	RuntimeAllowedDomains  []string
 }
 
 // WithDefaults fills missing fields with stable local defaults.
@@ -205,7 +206,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	for _, mount := range packageMounts {
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath, nil))
 	}
-	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(runtimeNetworkPolicy(environment, engine, session.Agent)))
+	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("claim sandbox: %w", err)
