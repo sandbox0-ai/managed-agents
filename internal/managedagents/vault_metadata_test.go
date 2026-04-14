@@ -25,3 +25,12 @@ func TestValidateManagedVaultMetadataRejectsUnknownReservedKey(t *testing.T) {
 		t.Fatalf("ValidateManagedVaultMetadata error = %v, want unknown reserved key rejection", err)
 	}
 }
+
+func TestValidateManagedVaultMetadataAllowsCustomMetadata(t *testing.T) {
+	err := ValidateManagedVaultMetadata(map[string]string{
+		"backend.provider": "anthropic",
+	})
+	if err != nil {
+		t.Fatalf("ValidateManagedVaultMetadata error = %v, want custom metadata allowed", err)
+	}
+}

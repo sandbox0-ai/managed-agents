@@ -61,6 +61,9 @@ func (s *Service) CreateAgent(ctx context.Context, principal Principal, req Crea
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedAgentMetadata(metadata); err != nil {
+		return nil, err
+	}
 	req.Name = name
 	req.Model = model
 	req.Description = description
@@ -155,6 +158,9 @@ func (s *Service) UpdateAgent(ctx context.Context, principal Principal, agentID 
 	if req.Metadata.Set {
 		metadata, err := mergeAgentMetadata(agent.Metadata, req.Metadata)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedAgentMetadata(metadata); err != nil {
 			return nil, err
 		}
 		agent.Metadata = metadata
@@ -446,6 +452,9 @@ func (s *Service) CreateCredential(ctx context.Context, principal Principal, vau
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedCredentialMetadata(metadata); err != nil {
+		return nil, err
+	}
 	normalizedAuth, err := normalizeCreateCredentialAuth(req.Auth)
 	if err != nil {
 		return nil, err
@@ -498,6 +507,9 @@ func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vau
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(credential.Metadata, req.Metadata, 16, 64, 512)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedCredentialMetadata(metadata); err != nil {
 			return nil, err
 		}
 		credential.Metadata = metadata

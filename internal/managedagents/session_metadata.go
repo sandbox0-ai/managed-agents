@@ -31,7 +31,7 @@ func ManagedSessionConfigFromMetadata(metadata map[string]string) (ManagedSessio
 	return config, nil
 }
 
-// ValidateManagedSessionMetadata rejects malformed or unknown Sandbox0 managed-agents session metadata.
+// ValidateManagedSessionMetadata rejects malformed or unsupported Sandbox0 managed-agents session metadata.
 func ValidateManagedSessionMetadata(metadata map[string]string) error {
 	if err := validateManagedMetadataScope(metadata, ManagedMetadataScopeSession); err != nil {
 		return err

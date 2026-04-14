@@ -23,8 +23,8 @@ type ManagedVaultConfig struct {
 
 func ManagedVaultConfigFromMetadata(metadata map[string]string) ManagedVaultConfig {
 	return ManagedVaultConfig{
-		Role:       normalizeManagedVaultMetadataValue(metadata[ManagedAgentsVaultRoleKey]),
-		Engine:     normalizeManagedVaultMetadataValue(metadata[ManagedAgentsVaultEngineKey]),
+		Role:       normalizeManagedMetadataValue(metadata[ManagedAgentsVaultRoleKey]),
+		Engine:     normalizeManagedMetadataValue(metadata[ManagedAgentsVaultEngineKey]),
 		LLMBaseURL: strings.TrimSpace(metadata[ManagedAgentsVaultLLMBaseURLKey]),
 	}
 }
@@ -63,8 +63,4 @@ func ValidateManagedVaultMetadata(metadata map[string]string) error {
 		return fmt.Errorf("%s must use http or https", ManagedAgentsVaultLLMBaseURLKey)
 	}
 	return nil
-}
-
-func normalizeManagedVaultMetadataValue(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
 }
