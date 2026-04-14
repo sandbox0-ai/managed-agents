@@ -21,8 +21,6 @@ var packageManagerDomains = map[string][]string{
 	"pip":   {"pypi.org", "files.pythonhosted.org"},
 }
 
-var defaultRuntimeAllowedURLs = []string{managedAnthropicDefaultBaseURL}
-
 func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewaymanagedagents.Environment) (*apispec.TemplateCreateRequest, error) {
 	if m.templateRequest == nil {
 		return nil, nil
@@ -89,12 +87,7 @@ func environmentNetworkPolicyWithPlatformDomains(environment *gatewaymanagedagen
 }
 
 func (m *SDKRuntimeManager) runtimePlatformAllowedDomains() []string {
-	domains := make([]string, 0, len(defaultRuntimeAllowedURLs)+len(m.cfg.RuntimeAllowedDomains)+1)
-	for _, raw := range defaultRuntimeAllowedURLs {
-		if domain := domainFromURL(raw); domain != "" {
-			domains = append(domains, domain)
-		}
-	}
+	domains := make([]string, 0, len(m.cfg.RuntimeAllowedDomains)+1)
 	domains = append(domains, m.cfg.RuntimeAllowedDomains...)
 	if domain := domainFromURL(m.runtimeWebhookURL("")); domain != "" {
 		domains = append(domains, domain)

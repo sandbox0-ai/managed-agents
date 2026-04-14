@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	ManagedAgentsMetadataPrefix = "sandbox0.managed_agents."
-
 	ManagedAgentsVaultRoleKey       = ManagedAgentsMetadataPrefix + "role"
 	ManagedAgentsVaultEngineKey     = ManagedAgentsMetadataPrefix + "engine"
 	ManagedAgentsVaultLLMBaseURLKey = ManagedAgentsMetadataPrefix + "llm_base_url"
@@ -32,15 +30,8 @@ func ManagedVaultConfigFromMetadata(metadata map[string]string) ManagedVaultConf
 }
 
 func ValidateManagedVaultMetadata(metadata map[string]string) error {
-	for key := range metadata {
-		if !strings.HasPrefix(key, ManagedAgentsMetadataPrefix) {
-			continue
-		}
-		switch key {
-		case ManagedAgentsVaultRoleKey, ManagedAgentsVaultEngineKey, ManagedAgentsVaultLLMBaseURLKey:
-		default:
-			return fmt.Errorf("%s is not supported sandbox0 managed-agents vault metadata", key)
-		}
+	if err := validateManagedMetadataScope(metadata, ManagedMetadataScopeVault); err != nil {
+		return err
 	}
 
 	config := ManagedVaultConfigFromMetadata(metadata)

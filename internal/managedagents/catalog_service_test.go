@@ -828,6 +828,42 @@ func TestCreateEnvironmentRejectsDuplicateName(t *testing.T) {
 	}
 }
 
+func TestCreateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	_, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+		Name: "python",
+		Metadata: map[string]string{
+			ManagedAgentsVaultLLMBaseURLKey: "https://llm.example.com",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "environment metadata") {
+		t.Fatalf("CreateEnvironment error = %v, want managed metadata scope rejection", err)
+	}
+}
+
+func TestUpdateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: "python"})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	value := "0"
+	_, err = service.UpdateEnvironment(ctx, principal, environment.ID, UpdateEnvironmentRequest{
+		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{ManagedAgentsSessionHardTTLSecondsKey: &value}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "environment metadata") {
+		t.Fatalf("UpdateEnvironment error = %v, want managed metadata scope rejection", err)
+	}
+}
+
 func TestCreateEnvironmentRoundTripsAllPackageFields(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)

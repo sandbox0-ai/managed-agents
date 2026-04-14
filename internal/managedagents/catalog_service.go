@@ -207,6 +207,9 @@ func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, re
 	if err != nil {
 		return nil, err
 	}
+	if err := ValidateManagedEnvironmentMetadata(metadata); err != nil {
+		return nil, err
+	}
 	config, err := normalizeCreateEnvironmentConfig(req.Config)
 	if err != nil {
 		return nil, err
@@ -281,6 +284,9 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, en
 	if req.Metadata.Set {
 		metadata, err := mergeMetadataPatch(environment.Metadata, req.Metadata, 0, 0, 0)
 		if err != nil {
+			return nil, err
+		}
+		if err := ValidateManagedEnvironmentMetadata(metadata); err != nil {
 			return nil, err
 		}
 		environment.Metadata = metadata

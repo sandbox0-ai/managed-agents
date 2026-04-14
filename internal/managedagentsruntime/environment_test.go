@@ -51,10 +51,13 @@ func TestRuntimeNetworkPolicyAddsPlatformAllowedDomains(t *testing.T) {
 	if !ok {
 		t.Fatal("egress policy not set")
 	}
-	for _, want := range []string{"api.anthropic.com", "api.example.com", "api.search.test", "gateway.example.com", "search.example.com"} {
+	for _, want := range []string{"api.example.com", "api.search.test", "gateway.example.com", "search.example.com"} {
 		if !containsString(egress.AllowedDomains, want) {
 			t.Fatalf("allowed domains = %#v, want %s", egress.AllowedDomains, want)
 		}
+	}
+	if containsString(egress.AllowedDomains, "api.anthropic.com") {
+		t.Fatalf("allowed domains = %#v, did not expect unconditional LLM provider", egress.AllowedDomains)
 	}
 }
 

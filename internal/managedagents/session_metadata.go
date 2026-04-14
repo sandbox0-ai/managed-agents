@@ -33,15 +33,8 @@ func ManagedSessionConfigFromMetadata(metadata map[string]string) (ManagedSessio
 
 // ValidateManagedSessionMetadata rejects malformed or unknown Sandbox0 managed-agents session metadata.
 func ValidateManagedSessionMetadata(metadata map[string]string) error {
-	for key := range metadata {
-		if !strings.HasPrefix(key, ManagedAgentsMetadataPrefix) {
-			continue
-		}
-		switch key {
-		case ManagedAgentsSessionHardTTLSecondsKey:
-		default:
-			return fmt.Errorf("%s is not supported sandbox0 managed-agents session metadata", key)
-		}
+	if err := validateManagedMetadataScope(metadata, ManagedMetadataScopeSession); err != nil {
+		return err
 	}
 	_, err := ManagedSessionConfigFromMetadata(metadata)
 	return err
