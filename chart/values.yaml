@@ -65,7 +65,7 @@ agentGateway:
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_DATABASE_URL
     sandbox0AdminAPIKey:
-      enabled: false
+      enabled: true
       envName: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY
