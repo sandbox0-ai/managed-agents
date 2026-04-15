@@ -17,13 +17,16 @@ type managedLLMCredential struct {
 
 const (
 	managedAnthropicDefaultBaseURL = "https://api.anthropic.com"
+	managedOpenAIDefaultBaseURL    = "https://api.openai.com/v1"
 	managedAnthropicFakeAPIKey     = "managed-agent-sandbox0-fake-key"
 	managedAnthropicFakeAuthToken  = "managed-agent-sandbox0-fake-token"
+	managedCodexFakeAPIKey         = "managed-agent-sandbox0-fake-key"
 )
 
 func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVaultCredentials) (map[string]any, *managedLLMCredential, error) {
 	out := cloneMap(engine)
-	if normalizeManagedRuntimeMetadataValue(vendor) != gatewaymanagedagents.ManagedAgentsEngineClaude {
+	resolvedVendor := normalizeManagedRuntimeMetadataValue(vendor)
+	if resolvedVendor != gatewaymanagedagents.ManagedAgentsEngineClaude && resolvedVendor != gatewaymanagedagents.ManagedAgentsEngineCodex {
 		return out, nil, nil
 	}
 	credential, err := selectManagedLLMCredential(vendor, vaults)
@@ -32,17 +35,23 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 	}
 	env := cloneMap(mapValue(out["env"]))
 	resolvedBaseURL := resolvedManagedLLMBaseURL(vendor, credential)
+	if resolvedVendor == gatewaymanagedagents.ManagedAgentsEngineCodex {
+		if existingBaseURL := strings.TrimSpace(stringValue(out["openai_base_url"])); existingBaseURL != "" {
+			if err := validateManagedBaseURLConflict(credential, resolvedBaseURL, existingBaseURL, "engine openai_base_url"); err != nil {
+				return nil, nil, err
+			}
+		}
+		out["openai_base_url"] = resolvedBaseURL
+		env["CODEX_API_KEY"] = managedCodexFakeAPIKey
+		env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
+		out["env"] = env
+		credentialCopy := *credential
+		credentialCopy.BaseURL = resolvedBaseURL
+		return out, &credentialCopy, nil
+	}
 	if existingBaseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"])); existingBaseURL != "" {
-		canonicalExisting, err := canonicalManagedRuntimeURL(existingBaseURL)
-		if err != nil {
-			return nil, nil, fmt.Errorf("engine ANTHROPIC_BASE_URL is invalid: %w", err)
-		}
-		canonicalResolved, err := canonicalManagedRuntimeURL(resolvedBaseURL)
-		if err != nil {
+		if err := validateManagedBaseURLConflict(credential, resolvedBaseURL, existingBaseURL, "engine ANTHROPIC_BASE_URL"); err != nil {
 			return nil, nil, err
-		}
-		if canonicalExisting != canonicalResolved {
-			return nil, nil, fmt.Errorf("managed-agent llm credential %s base URL %q conflicts with engine ANTHROPIC_BASE_URL %q", credential.CredentialID, resolvedBaseURL, existingBaseURL)
 		}
 	}
 	env["ANTHROPIC_API_KEY"] = managedAnthropicFakeAPIKey
@@ -56,6 +65,21 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 	credentialCopy := *credential
 	credentialCopy.BaseURL = resolvedBaseURL
 	return out, &credentialCopy, nil
+}
+
+func validateManagedBaseURLConflict(credential *managedLLMCredential, resolvedBaseURL, existingBaseURL, field string) error {
+	canonicalExisting, err := canonicalManagedRuntimeURL(existingBaseURL)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", field, err)
+	}
+	canonicalResolved, err := canonicalManagedRuntimeURL(resolvedBaseURL)
+	if err != nil {
+		return err
+	}
+	if canonicalExisting != canonicalResolved {
+		return fmt.Errorf("managed-agent llm credential %s base URL %q conflicts with %s %q", credential.CredentialID, resolvedBaseURL, field, existingBaseURL)
+	}
+	return nil
 }
 
 func selectManagedLLMCredential(vendor string, vaults []managedVaultCredentials) (*managedLLMCredential, error) {
@@ -141,6 +165,9 @@ func resolvedManagedLLMBaseURL(vendor string, credential *managedLLMCredential) 
 	}
 	if normalizeManagedRuntimeMetadataValue(vendor) == gatewaymanagedagents.ManagedAgentsEngineClaude {
 		return managedAnthropicDefaultBaseURL
+	}
+	if normalizeManagedRuntimeMetadataValue(vendor) == gatewaymanagedagents.ManagedAgentsEngineCodex {
+		return managedOpenAIDefaultBaseURL
 	}
 	return ""
 }

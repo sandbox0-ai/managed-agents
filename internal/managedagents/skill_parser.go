@@ -15,6 +15,8 @@ const (
 var reservedSkillNames = map[string]struct{}{
 	"anthropic": {},
 	"claude":    {},
+	"codex":     {},
+	"openai":    {},
 }
 
 func parseSkillUpload(files []uploadedSkillFile, _ string) (*parsedSkillUpload, error) {

@@ -1,33 +1,11 @@
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
+import { AgentRuntime, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
 
 async function* emptyPromptStream() {}
 
-export function runtimeEnvForEngine(engine) {
-  return {
-    ...process.env,
-    ...(engine?.env ?? {}),
-  };
-}
-
-export function runtimeModelForSession(session) {
-  const engineModel = session?.engine?.model;
-  if (typeof engineModel === 'string' && engineModel.trim() !== '') {
-    return engineModel;
-  }
-  if (engineModel && typeof engineModel === 'object' && typeof engineModel.id === 'string' && engineModel.id.trim() !== '') {
-    return engineModel.id;
-  }
-  const agentModel = session?.agent?.model;
-  if (typeof agentModel === 'string' && agentModel.trim() !== '') {
-    return agentModel;
-  }
-  if (agentModel && typeof agentModel === 'object' && typeof agentModel.id === 'string' && agentModel.id.trim() !== '') {
-    return agentModel.id;
-  }
-  return undefined;
-}
+export { runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError };
 
 export function querySkillNames(session) {
   if (!Array.isArray(session?.skill_names)) {
@@ -51,8 +29,9 @@ export function allowToolUseDecision(input, toolUseID) {
   return decision;
 }
 
-export class ClaudeRuntime {
+export class ClaudeRuntime extends AgentRuntime {
   constructor() {
+    super('claude');
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
@@ -643,67 +622,6 @@ export class ClaudeRuntime {
 
     return null;
   }
-}
-
-export function sessionErrorEventForError(error) {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  return {
-    type: 'session.error',
-    error: sessionErrorDetailForMessage(message),
-  };
-}
-
-function sessionErrorDetailForMessage(message) {
-  const classified = classifyMCPError(message);
-  if (classified) {
-    return classified;
-  }
-  return {
-    type: 'unknown_error',
-    message: message || 'Claude run failed',
-  };
-}
-
-function classifyMCPError(message) {
-  const normalized = String(message ?? '').trim();
-  const lower = normalized.toLowerCase();
-  if (!lower.includes('mcp')) {
-    return null;
-  }
-  const mcpServerName = extractMCPServerName(normalized) || 'unknown';
-  if (/(401|403|unauthori[sz]ed|forbidden|authenticat|oauth|token|credential|permission denied)/i.test(normalized)) {
-    return {
-      type: 'mcp_authentication_failed_error',
-      message: normalized,
-      retry_status: { type: 'terminal' },
-      mcp_server_name: mcpServerName,
-    };
-  }
-  if (/(connect|connection|network|fetch failed|timed out|timeout|unreachable|enotfound|econnrefused|econnreset|socket|dns)/i.test(normalized)) {
-    return {
-      type: 'mcp_connection_failed_error',
-      message: normalized,
-      retry_status: { type: 'terminal' },
-      mcp_server_name: mcpServerName,
-    };
-  }
-  return null;
-}
-
-function extractMCPServerName(message) {
-  const patterns = [
-    /\bmcp__([^_\s]+)__/i,
-    /\bmcp server ["']([^"']+)["']/i,
-    /\bmcp server ([A-Za-z0-9_.-]+)/i,
-    /\bserver ["']([^"']+)["']/i,
-  ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(message);
-    if (match?.[1]) {
-      return match[1];
-    }
-  }
-  return '';
 }
 
 function buildPromptInput(events) {

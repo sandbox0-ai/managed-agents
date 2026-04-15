@@ -108,7 +108,7 @@ test('agent-warper returns action resolution state from runtime', async () => {
   await closeServer(server);
 });
 
-test('agent-warper ignores vendor-neutral bootstrap fields and stays Claude-specific', async () => {
+test('agent-warper defaults bootstrap vendor to claude', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
   const server = createServer({
     stateDir,
@@ -128,6 +128,32 @@ test('agent-warper ignores vendor-neutral bootstrap fields and stays Claude-spec
     session_id: 'sesn_789',
     vendor_session_id: null,
   });
+
+  const store = new RuntimeStore(stateDir);
+  assert.equal(store.getSession('sesn_789')?.vendor, 'claude');
+
+  await closeServer(server);
+});
+
+test('agent-warper persists codex bootstrap vendor', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
+  const server = createServer({
+    stateDir,
+    runtime: new FakeRuntime(),
+    callbackClient: { send: async () => {} },
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_codex', vendor: 'codex' }),
+  });
+  assert.equal(response.status, 200);
+
+  const store = new RuntimeStore(stateDir);
+  assert.equal(store.getSession('sesn_codex')?.vendor, 'codex');
 
   await closeServer(server);
 });

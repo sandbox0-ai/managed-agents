@@ -815,6 +815,50 @@ func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 	}
 }
 
+func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &createSessionRuntimeManager{}
+	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(-1))
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Codex Agent", Model: "gpt-5.1-codex"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	vault := buildVaultObject("vlt_codex", CreateVaultRequest{
+		DisplayName: "Codex LLM",
+		Metadata: map[string]string{
+			ManagedAgentsVaultRoleKey:       ManagedAgentsVaultRoleLLM,
+			ManagedAgentsVaultEngineKey:     ManagedAgentsEngineCodex,
+			ManagedAgentsVaultLLMBaseURLKey: "https://api.openai.com/v1",
+		},
+	}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+
+	_, err := createTestSession(ctx, service, principal, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+		VaultIDs:      []string{vault.ID},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if len(runtime.ensureCalls) != 1 || runtime.ensureCalls[0].Vendor != ManagedAgentsEngineCodex {
+		t.Fatalf("EnsureRuntime vendor calls = %#v, want codex", runtime.ensureCalls)
+	}
+	if len(runtime.bootstrapReqs) != 1 || runtime.bootstrapReqs[0].Vendor != ManagedAgentsEngineCodex {
+		t.Fatalf("BootstrapSession vendor reqs = %#v, want codex", runtime.bootstrapReqs)
+	}
+}
+
 func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
@@ -1504,6 +1548,7 @@ func createTestSession(ctx context.Context, service *Service, principal Principa
 type ensureRuntimeCall struct {
 	Credential     RequestCredential
 	SessionID      string
+	Vendor         string
 	GatewayBaseURL string
 }
 
@@ -1517,7 +1562,7 @@ type createSessionRuntimeManager struct {
 }
 
 func (m *createSessionRuntimeManager) EnsureRuntime(_ context.Context, _ Principal, credential RequestCredential, session *SessionRecord, _ map[string]any, gatewayBaseURL string) (*RuntimeRecord, error) {
-	m.ensureCalls = append(m.ensureCalls, ensureRuntimeCall{Credential: credential, SessionID: session.ID, GatewayBaseURL: gatewayBaseURL})
+	m.ensureCalls = append(m.ensureCalls, ensureRuntimeCall{Credential: credential, SessionID: session.ID, Vendor: session.Vendor, GatewayBaseURL: gatewayBaseURL})
 	m.callOrder = append(m.callOrder, "ensure")
 	runtime := &RuntimeRecord{SessionID: session.ID, Vendor: session.Vendor}
 	if m.runtime != nil {

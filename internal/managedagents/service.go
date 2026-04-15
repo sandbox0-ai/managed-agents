@@ -94,7 +94,7 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureClaudeVendor(vendor); err != nil {
+	if err := ensureSupportedVendor(vendor); err != nil {
 		return nil, err
 	}
 	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
@@ -117,6 +117,10 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	}
 	now := time.Now().UTC()
 	resources, resourceSecrets, err := s.validateSessionDependencies(ctx, principal, environmentID, vaultIDs, cloneMapSlice(params.Resources))
+	if err != nil {
+		return nil, err
+	}
+	vendor, err = s.resolveSessionVendorFromVaults(ctx, principal, vendor, vaultIDs)
 	if err != nil {
 		return nil, err
 	}

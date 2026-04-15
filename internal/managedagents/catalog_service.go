@@ -1039,7 +1039,7 @@ func (s *Service) resolveSessionAgentReference(ctx context.Context, principal Pr
 		if err != nil {
 			return "", nil, err
 		}
-		if err := ensureClaudeVendor(vendor); err != nil {
+		if err := ensureSupportedVendor(vendor); err != nil {
 			return "", nil, err
 		}
 		return vendor, agentToSnapshot(*agent), nil
@@ -1069,7 +1069,7 @@ func (s *Service) resolveSessionAgentReference(ctx context.Context, principal Pr
 		if err != nil {
 			return "", nil, err
 		}
-		if err := ensureClaudeVendor(vendor); err != nil {
+		if err := ensureSupportedVendor(vendor); err != nil {
 			return "", nil, err
 		}
 		return vendor, agentToSnapshot(*agent), nil
@@ -1078,11 +1078,43 @@ func (s *Service) resolveSessionAgentReference(ctx context.Context, principal Pr
 	}
 }
 
-func ensureClaudeVendor(vendor string) error {
-	if strings.EqualFold(strings.TrimSpace(vendor), "claude") {
+func ensureSupportedVendor(vendor string) error {
+	if IsSupportedManagedAgentsEngine(vendor) {
 		return nil
 	}
-	return errors.New("only claude managed agents are supported")
+	return errors.New("unsupported managed-agent engine")
+}
+
+func (s *Service) resolveSessionVendorFromVaults(ctx context.Context, principal Principal, fallback string, vaultIDs []string) (string, error) {
+	vendor := normalizeManagedMetadataValue(fallback)
+	if vendor == "" {
+		vendor = ManagedAgentsEngineClaude
+	}
+	selected := ""
+	for _, vaultID := range vaultIDs {
+		vault, err := s.repo.GetVault(ctx, principal.TeamID, vaultID)
+		if err != nil {
+			return "", err
+		}
+		config := ManagedVaultConfigFromMetadata(vault.Metadata)
+		if config.Role != ManagedAgentsVaultRoleLLM {
+			continue
+		}
+		if !IsSupportedManagedAgentsEngine(config.Engine) {
+			return "", fmt.Errorf("llm vault %s uses unsupported engine %q", vault.ID, config.Engine)
+		}
+		if selected != "" && selected != config.Engine {
+			return "", fmt.Errorf("session can attach exactly one %s=%q engine, got %q and %q", ManagedAgentsVaultRoleKey, ManagedAgentsVaultRoleLLM, selected, config.Engine)
+		}
+		selected = config.Engine
+	}
+	if selected != "" {
+		vendor = selected
+	}
+	if err := ensureSupportedVendor(vendor); err != nil {
+		return "", err
+	}
+	return vendor, nil
 }
 
 func (s *Service) validateSessionDependencies(ctx context.Context, principal Principal, environmentID string, vaultIDs []string, resources []map[string]any) ([]map[string]any, map[string]map[string]any, error) {
