@@ -2,6 +2,7 @@ package managedagentsruntime
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"testing"
@@ -108,6 +109,46 @@ func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 	}
 	if !reflect.DeepEqual(client.updated.Spec, request.Spec) {
 		t.Fatal("updated spec does not match manifest spec")
+	}
+}
+
+func TestSyncManagedTemplateOnceRequiresAdminKey(t *testing.T) {
+	mgr, err := NewSDKRuntimeManager(nil, (Config{
+		Enabled:           true,
+		ClaudeTemplate:    "managed-agent-claude",
+		TemplateMainImage: "example.com/wrapper:latest",
+	}).WithDefaults(0), zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)
+	}
+
+	err = mgr.syncManagedTemplateOnce(context.Background())
+	if !errors.Is(err, errManagedTemplateAdminKeyMissing) {
+		t.Fatalf("syncManagedTemplateOnce error = %v, want missing admin key", err)
+	}
+}
+
+func TestEnsureConfiguredManagedTemplateUsesManifestRequest(t *testing.T) {
+	mgr, err := NewSDKRuntimeManager(nil, (Config{
+		Enabled:           true,
+		ClaudeTemplate:    "managed-agent-claude",
+		TemplateMainImage: "example.com/wrapper:latest",
+	}).WithDefaults(0), zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)
+	}
+	client := &fakeTemplateClient{
+		getErr: &sandbox0sdk.APIError{StatusCode: http.StatusNotFound},
+	}
+
+	if err := mgr.ensureConfiguredManagedTemplate(context.Background(), client); err != nil {
+		t.Fatalf("ensureConfiguredManagedTemplate returned error: %v", err)
+	}
+	if client.created == nil {
+		t.Fatal("expected CreateTemplate to be called")
+	}
+	if client.created.TemplateID != mgr.templateRequest.TemplateID {
+		t.Fatalf("created.TemplateID = %q, want %q", client.created.TemplateID, mgr.templateRequest.TemplateID)
 	}
 }
 
