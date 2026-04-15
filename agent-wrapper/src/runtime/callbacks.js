@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { postJSON } from '../lib/http.js';
+import { logError, logWarn, safeErrorMessage } from '../lib/log.js';
 
 const managedAgentWebhookRetryDelays = [250, 500, 1000, 2000, 4000];
 
@@ -49,16 +50,14 @@ export class ProcdWebhookClient {
       try {
         return await this.sendManagedAgentWebhook(session, payload, callbackURL);
       } catch (error) {
-        console.log(JSON.stringify({
-          level: 'error',
-          msg: 'wrapper managed-agent webhook publish failed',
+        logError('wrapper managed-agent webhook publish failed', {
           session_id: session?.session_id ?? null,
           sandbox_id: session?.sandbox_id ?? null,
           has_control_token: Boolean(String(session?.control_token ?? this.controlToken ?? '').trim()),
           event_types: Array.isArray(payload?.events) ? payload.events.map((event) => event?.type ?? null) : [],
           url: callbackURL,
-          error: error instanceof Error ? error.message : String(error),
-        }));
+          error: safeErrorMessage(error),
+        });
         throw error;
       }
     }
@@ -66,14 +65,12 @@ export class ProcdWebhookClient {
     try {
       return await postJSON(publishURL, { payload }, {}, 15000);
     } catch (error) {
-      console.log(JSON.stringify({
-        level: 'error',
-        msg: 'wrapper webhook publish failed',
+      logError('wrapper webhook publish failed', {
         session_id: session.session_id ?? null,
         event_types: Array.isArray(payload?.events) ? payload.events.map((event) => event?.type ?? null) : [],
         url: publishURL,
-        error: error instanceof Error ? error.message : String(error),
-      }));
+        error: safeErrorMessage(error),
+      });
       throw error;
     }
   }
@@ -89,17 +86,15 @@ export class ProcdWebhookClient {
         if (delayMs == null || !isRetriableManagedAgentWebhookError(error)) {
           throw error;
         }
-        console.log(JSON.stringify({
-          level: 'warn',
-          msg: 'wrapper managed-agent webhook publish retrying',
+        logWarn('wrapper managed-agent webhook publish retrying', {
           session_id: session?.session_id ?? null,
           sandbox_id: session?.sandbox_id ?? null,
           event_types: Array.isArray(payload?.events) ? payload.events.map((event) => event?.type ?? null) : [],
           url: callbackURL,
           attempt: attempt + 1,
           delay_ms: delayMs,
-          error: error instanceof Error ? error.message : String(error),
-        }));
+          error: safeErrorMessage(error),
+        });
         await sleep(delayMs);
       }
     }

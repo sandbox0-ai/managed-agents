@@ -1,6 +1,7 @@
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
+import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
 import {
   AgentRuntime,
   finalStatusEventForSessionError,
@@ -137,15 +138,13 @@ export class ClaudeRuntime extends AgentRuntime {
     const hasVendorSession = typeof currentSession?.vendor_session_id === 'string' && currentSession.vendor_session_id.trim() !== '';
     const hasToolConfirmationInput = (events ?? []).some((event) => event?.type === 'user.tool_confirmation');
     if (pendingSnapshots.size === 0 && (!pendingPromises || pendingPromises.size === 0) && !(hasVendorSession && hasToolConfirmationInput)) {
-      console.log(JSON.stringify({
-        level: 'warn',
-        msg: 'claude resolve actions without pending state',
+      logWarn('claude resolve actions without pending state', {
         session_id: sessionID,
         vendor_session_id: currentSession?.vendor_session_id ?? null,
-        persisted_pending_actions: currentSession?.pending_actions ?? null,
+        ...summarizePendingActions(currentSession?.pending_actions),
         in_memory_pending_count: pendingPromises?.size ?? 0,
         input_event_types: (events ?? []).map((event) => event?.type ?? null),
-      }));
+      });
       return { resolved_count: 0, remaining_action_ids: [], resume_required: false };
     }
     let resolved = 0;
@@ -209,16 +208,14 @@ export class ClaudeRuntime extends AgentRuntime {
       remaining_action_ids: remainingActionIDs,
       resume_required: resumeRequired && remainingActionIDs.length === 0,
     };
-    console.log(JSON.stringify({
-      level: 'info',
-      msg: 'claude resolve actions',
+    logInfo('claude resolve actions', {
       session_id: sessionID,
       vendor_session_id: currentSession?.vendor_session_id ?? null,
       resolved_count: response.resolved_count,
       remaining_action_ids: response.remaining_action_ids,
       resume_required: response.resume_required,
       input_event_types: (events ?? []).map((event) => event?.type ?? null),
-    }));
+    });
     return response;
   }
 
@@ -980,12 +977,10 @@ export function resolveToolPolicy(plan, input) {
         policy: defaults.policy,
       };
     }
-    console.log(JSON.stringify({
-      level: 'warn',
-      msg: 'claude mcp tool policy missing',
+    logWarn('claude mcp tool policy missing', {
       mcp_server_name: mcp.serverName,
       tool_name: mcp.name,
-    }));
+    });
     return { kind: 'mcp', name: mcp.name, serverName: mcp.serverName, enabled: false, policy: 'always_ask' };
   }
 

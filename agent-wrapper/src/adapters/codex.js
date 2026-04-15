@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { inputEventsToPrompt } from '../lib/prompt.js';
 import { newID } from '../lib/ids.js';
+import { logInfo, logWarn } from '../lib/log.js';
 import { buildToolPlan, resolveToolPolicy } from './claude.js';
 import { CodexAppServerClient } from './codex-app-server.js';
 import { AgentRuntime, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
@@ -140,15 +141,13 @@ export class CodexRuntime extends AgentRuntime {
       pending_actions: remainingActionIDs.map((id) => pending.get(id)?.snapshot).filter(Boolean),
       updated_at: new Date().toISOString(),
     }));
-    console.log(JSON.stringify({
-      level: 'info',
-      msg: 'codex resolve actions',
+    logInfo('codex resolve actions', {
       session_id: sessionID,
       vendor_session_id: currentSession?.vendor_session_id ?? null,
       resolved_count: resolved,
       remaining_action_ids: remainingActionIDs,
       input_event_types: (events ?? []).map((event) => event?.type ?? null),
-    }));
+    });
     return { resolved_count: resolved, remaining_action_ids: remainingActionIDs, resume_required: false };
   }
 
@@ -161,6 +160,13 @@ export class CodexRuntime extends AgentRuntime {
     if (!(client instanceof EventEmitter) && typeof client.on !== 'function') {
       throw new Error('codex client must provide EventEmitter-compatible on/off methods');
     }
+    client.on?.('stderr', (line) => {
+      logWarn('codex app-server stderr', {
+        session_id: session.session_id,
+        vendor_session_id: session.vendor_session_id ?? null,
+        data: line,
+      });
+    });
     await client.start?.();
     this.clients.set(session.session_id, client);
     return client;
@@ -277,7 +283,7 @@ export class CodexRuntime extends AgentRuntime {
       case 'item/tool/call':
         return this.#handleCustomToolCall(session, run, callbackClient, sessionStore, message);
       default:
-        console.log(JSON.stringify({ level: 'warn', msg: 'unsupported codex server request', method: message.method }));
+        logWarn('unsupported codex server request', { method: message.method });
         return {};
     }
   }

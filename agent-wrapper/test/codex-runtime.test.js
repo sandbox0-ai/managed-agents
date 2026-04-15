@@ -4,14 +4,19 @@ import { EventEmitter } from 'node:events';
 import { CodexRuntime } from '../src/adapters/codex.js';
 
 class FakeCodexClient extends EventEmitter {
-  constructor({ approval = false } = {}) {
+  constructor({ approval = false, stderrLine = null } = {}) {
     super();
     this.approval = approval;
+    this.stderrLine = stderrLine;
     this.requests = [];
     this.responses = [];
   }
 
-  async start() {}
+  async start() {
+    if (this.stderrLine) {
+      this.emit('stderr', this.stderrLine);
+    }
+  }
 
   async request(method, params) {
     this.requests.push({ method, params });
@@ -158,6 +163,25 @@ test('CodexRuntime maps app-server approvals to managed-agent required actions',
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.tool_result' && event.tool_use_id === 'cmd_1'));
 });
 
+test('CodexRuntime forwards app-server stderr to redacted wrapper logs', async () => {
+  const client = new FakeCodexClient({ stderrLine: 'Authorization: Bearer secret-token api_key=sk-secret123' });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  const lines = await captureConsole(async () => {
+    await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
+  });
+
+  const stderrLog = lines.map((line) => JSON.parse(line)).find((entry) => entry.msg === 'codex app-server stderr');
+  assert(stderrLog, `missing stderr log in ${lines.join('\n')}`);
+  assert.equal(stderrLog.level, 'warn');
+  assert.equal(stderrLog.data.includes('secret-token'), false);
+  assert.equal(stderrLog.data.includes('sk-secret123'), false);
+  assert(stderrLog.data.includes('Bearer [redacted]'));
+  assert(stderrLog.data.includes('api_key=[redacted]'));
+});
+
 function codexSession(overrides = {}) {
   return {
     session_id: 'sesn_codex',
@@ -176,6 +200,18 @@ function runRequest() {
     run_id: 'run_codex',
     input_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hello' }] }],
   };
+}
+
+async function captureConsole(fn) {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (line) => lines.push(String(line));
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return lines;
 }
 
 function sessionStoreFor(getSession, setSession) {

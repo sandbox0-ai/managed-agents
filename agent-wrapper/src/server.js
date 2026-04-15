@@ -5,6 +5,7 @@ import { ProcdWebhookClient } from './runtime/callbacks.js';
 import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
 import { createDefaultRuntime, finalStatusEventForSessionError, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
+import { logError, logInfo, summarizePendingActions, safeErrorMessage } from './lib/log.js';
 
 function sessionPathname(pathname) {
   const match = pathname.match(/^\/v1\/runtime\/session\/([^/]+)$/);
@@ -102,15 +103,13 @@ export function createServer({
           return;
         }
         const body = await readJSON(req);
-        console.log(JSON.stringify({
-          level: 'info',
-          msg: 'wrapper resolving actions',
+        logInfo('wrapper resolving actions', {
           session_lookup_id: sessionID,
           stored_session_id: session.session_id ?? null,
           vendor_session_id: session.vendor_session_id ?? null,
-          pending_actions: session.pending_actions ?? null,
+          ...summarizePendingActions(session.pending_actions),
           input_event_types: (body.events ?? []).map((event) => event?.type ?? null),
-        }));
+        });
         const resolution = await runtime.resolveActions(session.session_id, body.events ?? [], {
           getSession: () => store.getSession(session.session_id),
           persistSession: (updater) => store.upsertSession(session.session_id, updater),
@@ -130,18 +129,16 @@ export function createServer({
           writeJSON(res, 400, { error: 'run_id is required' });
           return;
         }
-        console.log(JSON.stringify({
-          level: 'info',
-          msg: 'wrapper accepted run',
+        logInfo('wrapper accepted run', {
           session_id: body.session_id,
           run_id: body.run_id,
           sandbox_id: session.sandbox_id ?? null,
           callback_url: session.callback_url ?? null,
           has_control_token: Boolean(session.control_token),
           vendor_session_id: session.vendor_session_id ?? null,
-          pending_actions: session.pending_actions ?? null,
+          ...summarizePendingActions(session.pending_actions),
           input_event_types: (body.input_events ?? []).map((event) => event?.type ?? null),
-        }));
+        });
         store.upsertSession(session.session_id, (current) => ({
           ...current,
           active_run_id: body.run_id,
@@ -155,16 +152,14 @@ export function createServer({
           try {
             await runtime.startRun(store.getSession(session.session_id), body, callbackClient, sessionStore);
           } catch (error) {
-            console.log(JSON.stringify({
-              level: 'error',
-              msg: 'wrapper run failed',
+            logError('wrapper run failed', {
               session_id: body.session_id,
               run_id: body.run_id,
               sandbox_id: session.sandbox_id ?? null,
               callback_url: session.callback_url ?? null,
               has_control_token: Boolean(session.control_token),
-              error: error instanceof Error ? error.message : String(error),
-            }));
+              error: safeErrorMessage(error),
+            });
             const latest = store.getSession(session.session_id);
             const errorEvent = sessionErrorEventForError(error);
             await callbackClient.send(latest ?? session, {
