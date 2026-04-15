@@ -4,7 +4,9 @@ import {
   allowToolUseDecision,
   buildToolPlan,
   ClaudeRuntime,
+  finalStatusEventForSessionError,
   mcpServersFromAgent,
+  providerErrorEventForText,
   querySkillNames,
   resolveToolPolicy,
   runtimeEnvForEngine,
@@ -326,6 +328,56 @@ test('sessionErrorEventForError classifies MCP auth and connection failures', ()
       mcp_server_name: 'search',
     },
   });
+});
+
+test('sessionErrorEventForError keeps fallback errors contract-shaped', () => {
+  assert.deepEqual(sessionErrorEventForError('something unexpected'), {
+    type: 'session.error',
+    error: {
+      type: 'unknown_error',
+      message: 'something unexpected',
+      retry_status: { type: 'terminal' },
+    },
+  });
+});
+
+test('sessionErrorEventForError classifies provider model failures', () => {
+  assert.deepEqual(sessionErrorEventForError('API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}'), {
+    type: 'session.error',
+    error: {
+      type: 'model_rate_limited_error',
+      message: 'API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}',
+      retry_status: { type: 'exhausted' },
+    },
+  });
+  assert.deepEqual(sessionErrorEventForError('API Error: 529 overloaded'), {
+    type: 'session.error',
+    error: {
+      type: 'model_overloaded_error',
+      message: 'API Error: 529 overloaded',
+      retry_status: { type: 'exhausted' },
+    },
+  });
+  assert.deepEqual(sessionErrorEventForError('API Error: 402 out of credits'), {
+    type: 'session.error',
+    error: {
+      type: 'billing_error',
+      message: 'API Error: 402 out of credits',
+      retry_status: { type: 'terminal' },
+    },
+  });
+});
+
+test('providerErrorEventForText detects SDK assistant-text API errors', () => {
+  const event = providerErrorEventForText('API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}');
+
+  assert.equal(event.type, 'session.error');
+  assert.equal(event.error.type, 'model_rate_limited_error');
+  assert.deepEqual(finalStatusEventForSessionError(event), {
+    type: 'session.status_idle',
+    stop_reason: { type: 'retries_exhausted' },
+  });
+  assert.equal(providerErrorEventForText('I can explain what a rate limit is.'), null);
 });
 
 test('querySkillNames trims and filters preload skill names', () => {

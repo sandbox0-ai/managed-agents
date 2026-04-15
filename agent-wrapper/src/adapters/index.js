@@ -2,7 +2,14 @@ import { ClaudeRuntime } from './claude.js';
 import { CodexRuntime } from './codex.js';
 import { RuntimeRouter } from './runtime.js';
 
-export { AgentRuntime, RuntimeRouter, normalizeVendor, sessionErrorEventForError } from './runtime.js';
+export {
+  AgentRuntime,
+  RuntimeRouter,
+  finalStatusEventForSessionError,
+  normalizeVendor,
+  providerErrorEventForText,
+  sessionErrorEventForError,
+} from './runtime.js';
 export { ClaudeRuntime } from './claude.js';
 export { CodexRuntime } from './codex.js';
 

@@ -4,7 +4,7 @@ import { RuntimeStore } from './runtime/store.js';
 import { ProcdWebhookClient } from './runtime/callbacks.js';
 import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
-import { createDefaultRuntime, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
+import { createDefaultRuntime, finalStatusEventForSessionError, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
 
 function sessionPathname(pathname) {
   const match = pathname.match(/^\/v1\/runtime\/session\/([^/]+)$/);
@@ -166,13 +166,14 @@ export function createServer({
               error: error instanceof Error ? error.message : String(error),
             }));
             const latest = store.getSession(session.session_id);
+            const errorEvent = sessionErrorEventForError(error);
             await callbackClient.send(latest ?? session, {
               session_id: latest?.session_id ?? session.session_id,
               run_id: body.run_id,
               vendor_session_id: latest?.vendor_session_id,
               events: [
-                sessionErrorEventForError(error),
-                { type: 'session.status_terminated' },
+                errorEvent,
+                finalStatusEventForSessionError(errorEvent),
               ],
             }).catch(() => {});
           } finally {
