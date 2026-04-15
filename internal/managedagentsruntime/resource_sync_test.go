@@ -162,9 +162,13 @@ func testLLMVaultCredentials(credentials ...gatewaymanagedagents.StoredCredentia
 }
 
 func testLLMVaultCredentialsWithBaseURL(baseURL string, credentials ...gatewaymanagedagents.StoredCredential) []managedVaultCredentials {
+	return testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineClaude, baseURL, credentials...)
+}
+
+func testLLMVaultCredentialsForEngineWithBaseURL(engine, baseURL string, credentials ...gatewaymanagedagents.StoredCredential) []managedVaultCredentials {
 	metadata := map[string]string{
 		gatewaymanagedagents.ManagedAgentsVaultRoleKey:   gatewaymanagedagents.ManagedAgentsVaultRoleLLM,
-		gatewaymanagedagents.ManagedAgentsVaultEngineKey: gatewaymanagedagents.ManagedAgentsEngineClaude,
+		gatewaymanagedagents.ManagedAgentsVaultEngineKey: engine,
 	}
 	if baseURL != "" {
 		metadata[gatewaymanagedagents.ManagedAgentsVaultLLMBaseURLKey] = baseURL
@@ -324,6 +328,55 @@ func TestApplyManagedLLMEnvDefaultsAnthropicBaseURL(t *testing.T) {
 	env := mapValue(engine["env"])
 	if got := stringValue(env["ANTHROPIC_BASE_URL"]); got != managedAnthropicDefaultBaseURL {
 		t.Fatalf("ANTHROPIC_BASE_URL = %q, want default anthropic URL", got)
+	}
+}
+
+func TestApplyManagedLLMEnvInjectsCodexCredential(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.openai.com/v1",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	if credential == nil {
+		t.Fatal("expected managed llm credential")
+	}
+	env := mapValue(engine["env"])
+	if got := stringValue(env["CODEX_API_KEY"]); got != managedCodexFakeAPIKey {
+		t.Fatalf("CODEX_API_KEY = %q, want fake key", got)
+	}
+	if got := stringValue(env["OPENAI_API_KEY"]); got != managedCodexFakeAPIKey {
+		t.Fatalf("OPENAI_API_KEY = %q, want fake key", got)
+	}
+	if got := stringValue(engine["openai_base_url"]); got != "https://api.openai.com/v1" {
+		t.Fatalf("openai_base_url = %q, want OpenAI base URL", got)
+	}
+	if credential.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("credential base URL = %q, want OpenAI base URL", credential.BaseURL)
+	}
+}
+
+func TestApplyManagedLLMEnvDefaultsCodexBaseURL(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	if credential == nil || credential.BaseURL != managedOpenAIDefaultBaseURL {
+		t.Fatalf("credential base URL = %#v, want default OpenAI URL", credential)
+	}
+	if got := stringValue(engine["openai_base_url"]); got != managedOpenAIDefaultBaseURL {
+		t.Fatalf("openai_base_url = %q, want default OpenAI URL", got)
+	}
+}
+
+func TestApplyManagedLLMEnvRejectsConflictingCodexBaseURL(t *testing.T) {
+	_, _, err := applyManagedLLMEnv("codex", map[string]any{"openai_base_url": "https://proxy.example.com/v1"}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.openai.com/v1",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err == nil || !strings.Contains(err.Error(), "conflicts with engine openai_base_url") {
+		t.Fatalf("applyManagedLLMEnv error = %v, want base URL conflict", err)
 	}
 }
 

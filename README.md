@@ -8,7 +8,7 @@ Use the official Anthropic SDK and point it at the Sandbox0 Managed Agents API:
 - Agent engine: configured by vault metadata
 - LLM host and token: configured by an LLM vault and its `static_bearer` credential
 
-For Claude agents, Sandbox0 expects an Anthropic-compatible LLM API. The LLM vault is identified by these reserved metadata keys:
+For Claude Code agents, Sandbox0 expects an Anthropic-compatible LLM API. The LLM vault is identified by these reserved metadata keys:
 
 ```json
 {
@@ -19,6 +19,18 @@ For Claude agents, Sandbox0 expects an Anthropic-compatible LLM API. The LLM vau
 ```
 
 The credential in that vault should be an unbound `static_bearer` credential. Do not set `mcp_server_url` for the LLM credential.
+
+For Codex agents, use the same external Managed Agents API and select the Codex runtime through LLM vault metadata:
+
+```json
+{
+  "sandbox0.managed_agents.role": "llm",
+  "sandbox0.managed_agents.engine": "codex",
+  "sandbox0.managed_agents.llm_base_url": "https://api.openai.com/v1"
+}
+```
+
+The Codex runtime launches `codex app-server` inside the per-session sandbox. Its `CODEX_HOME` is stored under the session engine-state volume, so Codex thread state remains session-scoped.
 
 ## Copy-paste demo
 
@@ -88,7 +100,6 @@ const llmVault = await client.beta.vaults.create({
   display_name: `Claude LLM ${suffix}`,
   metadata: {
     'sandbox0.managed_agents.role': 'llm',
-    // Only the Claude engine is supported today. Codex is reserved for future OpenAI-compatible support.
     'sandbox0.managed_agents.engine': 'claude',
     'sandbox0.managed_agents.llm_base_url': llmBaseURL,
   },
@@ -159,6 +170,6 @@ ANTHROPIC_MODEL='glm-4.7' \
 node demo.mjs
 ```
 
-The provider must implement the Anthropic API shape. OpenAI-compatible providers are not supported through the Claude engine; Codex/OpenAI-compatible engine support will be added separately.
+The provider must implement the Anthropic API shape when `sandbox0.managed_agents.engine` is `claude`. Use `engine=codex` for OpenAI-compatible Codex app-server sessions.
 
 In TypeScript, the official SDK types may still require `mcp_server_url` for `static_bearer`. The runtime request should still omit it for the LLM vault credential; cast that `auth` object if needed.

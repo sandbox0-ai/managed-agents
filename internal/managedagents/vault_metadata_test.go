@@ -16,6 +16,17 @@ func TestValidateManagedVaultMetadataAcceptsLLMVault(t *testing.T) {
 	}
 }
 
+func TestValidateManagedVaultMetadataAcceptsCodexLLMVault(t *testing.T) {
+	err := ValidateManagedVaultMetadata(map[string]string{
+		ManagedAgentsVaultRoleKey:       ManagedAgentsVaultRoleLLM,
+		ManagedAgentsVaultEngineKey:     ManagedAgentsEngineCodex,
+		ManagedAgentsVaultLLMBaseURLKey: "https://api.openai.com/v1",
+	})
+	if err != nil {
+		t.Fatalf("ValidateManagedVaultMetadata: %v", err)
+	}
+}
+
 func TestValidateManagedVaultMetadataRejectsUnknownReservedKey(t *testing.T) {
 	key := ManagedAgentsMetadataPrefix + "provider"
 	err := ValidateManagedVaultMetadata(map[string]string{

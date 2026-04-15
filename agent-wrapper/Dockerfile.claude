@@ -4,6 +4,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG GRADLE_VERSION=8.7
 ARG GO_VERSION=1.22.12
 ARG NODE_MAJOR=20
+ARG CODEX_NPM_VERSION=latest
 ARG RUBY_VERSION=3.3.10
 ARG RUST_VERSION=1.77.2
 ARG TARGETARCH=amd64
@@ -96,7 +97,7 @@ RUN apt-get update \
 	&& curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php \
 	&& php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer \
 	&& curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
-	&& npm install --global yarn pnpm \
+	&& npm install --global yarn pnpm "@openai/codex@${CODEX_NPM_VERSION}" \
 	&& curl -fsSL "https://cache.ruby-lang.org/pub/ruby/${RUBY_VERSION%.*}/ruby-${RUBY_VERSION}.tar.gz" -o /tmp/ruby.tgz \
 	&& mkdir -p /tmp/ruby-src \
 	&& tar -xzf /tmp/ruby.tgz -C /tmp/ruby-src --strip-components=1 \

@@ -32,7 +32,7 @@ func normalizeAgentModel(input any, vendorHint string) (string, map[string]any, 
 		return "", nil, errors.New("model must be a string or object")
 	}
 	vendor, model := normalizeModelConfig(input, vendorHint)
-	if err := ensureClaudeVendor(vendor); err != nil {
+	if err := ensureSupportedVendor(vendor); err != nil {
 		return "", nil, err
 	}
 	if err := validateAllowedFields(model, []string{"id", "speed"}); err != nil {

@@ -4,7 +4,7 @@ import { RuntimeStore } from './runtime/store.js';
 import { ProcdWebhookClient } from './runtime/callbacks.js';
 import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
-import { ClaudeRuntime, sessionErrorEventForError } from './adapters/claude.js';
+import { createDefaultRuntime, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
 
 function sessionPathname(pathname) {
   const match = pathname.match(/^\/v1\/runtime\/session\/([^/]+)$/);
@@ -31,7 +31,7 @@ function authorized(req, token) {
 
 export function createServer({
   stateDir = process.env.AGENT_WRAPPER_STATE_DIR ?? '/var/lib/agent-wrapper',
-  runtime = new ClaudeRuntime(),
+  runtime = createDefaultRuntime(),
   callbackClient = new ProcdWebhookClient(),
 } = {}) {
   const store = new RuntimeStore(stateDir);
@@ -60,6 +60,7 @@ export function createServer({
         const session = {
           ...(current ?? {}),
           session_id: body.session_id,
+          vendor: normalizeVendor(body.vendor ?? current?.vendor ?? process.env.AGENT_WRAPPER_DEFAULT_VENDOR),
           sandbox_id: body.sandbox_id ?? current?.sandbox_id ?? null,
           callback_url: body.callback_url ?? current?.callback_url ?? null,
           control_token: body.control_token ?? current?.control_token ?? null,
@@ -86,8 +87,9 @@ export function createServer({
       }
 
       if (req.method === 'DELETE' && sessionPathname(url.pathname)) {
-        runtime.deleteSession(sessionPathname(url.pathname));
-        store.deleteSession(sessionPathname(url.pathname));
+        const sessionID = sessionPathname(url.pathname);
+        await runtime.deleteSession(sessionID, store.getSession(sessionID));
+        store.deleteSession(sessionID);
         writeJSON(res, 200, { deleted: true });
         return;
       }
@@ -109,7 +111,7 @@ export function createServer({
           pending_actions: session.pending_actions ?? null,
           input_event_types: (body.events ?? []).map((event) => event?.type ?? null),
         }));
-        const resolution = runtime.resolveActions(session.session_id, body.events ?? [], {
+        const resolution = await runtime.resolveActions(session.session_id, body.events ?? [], {
           getSession: () => store.getSession(session.session_id),
           persistSession: (updater) => store.upsertSession(session.session_id, updater),
         });

@@ -13,6 +13,7 @@ const (
 
 	ManagedAgentsVaultRoleLLM = "llm"
 	ManagedAgentsEngineClaude = "claude"
+	ManagedAgentsEngineCodex  = "codex"
 )
 
 type ManagedVaultConfig struct {
@@ -48,8 +49,8 @@ func ValidateManagedVaultMetadata(metadata map[string]string) error {
 	if config.Engine == "" {
 		return fmt.Errorf("%s is required when %s is %q", ManagedAgentsVaultEngineKey, ManagedAgentsVaultRoleKey, ManagedAgentsVaultRoleLLM)
 	}
-	if config.Engine != ManagedAgentsEngineClaude {
-		return fmt.Errorf("%s must be %q", ManagedAgentsVaultEngineKey, ManagedAgentsEngineClaude)
+	if !IsSupportedManagedAgentsEngine(config.Engine) {
+		return fmt.Errorf("%s must be one of %q or %q", ManagedAgentsVaultEngineKey, ManagedAgentsEngineClaude, ManagedAgentsEngineCodex)
 	}
 	if config.LLMBaseURL == "" {
 		return nil
@@ -63,4 +64,13 @@ func ValidateManagedVaultMetadata(metadata map[string]string) error {
 		return fmt.Errorf("%s must use http or https", ManagedAgentsVaultLLMBaseURLKey)
 	}
 	return nil
+}
+
+func IsSupportedManagedAgentsEngine(engine string) bool {
+	switch normalizeManagedMetadataValue(engine) {
+	case ManagedAgentsEngineClaude, ManagedAgentsEngineCodex:
+		return true
+	default:
+		return false
+	}
 }
