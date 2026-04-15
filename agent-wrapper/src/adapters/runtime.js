@@ -121,10 +121,35 @@ export function runtimeModelForSession(session) {
 
 export function sessionErrorEventForError(error, fallbackMessage = 'Managed agent run failed') {
   const message = error instanceof Error ? error.message : String(error ?? '');
+  return sessionErrorEventForMessage(message, fallbackMessage);
+}
+
+export function sessionErrorEventForMessage(message, fallbackMessage = 'Managed agent run failed') {
+  const normalized = String(message ?? '').trim() || fallbackMessage;
   return {
     type: 'session.error',
-    error: sessionErrorDetailForMessage(message || fallbackMessage),
+    error: sessionErrorDetailForMessage(normalized),
   };
+}
+
+export function providerErrorEventForText(text) {
+  const normalized = String(text ?? '').trim();
+  if (!looksLikeProviderErrorMessage(normalized)) {
+    return null;
+  }
+  const error = classifyModelError(normalized, { requireProviderSignal: true });
+  return error ? { type: 'session.error', error } : null;
+}
+
+export function finalStatusEventForSessionError(event) {
+  const retryStatus = event?.error?.retry_status?.type;
+  if (retryStatus === 'exhausted') {
+    return {
+      type: 'session.status_idle',
+      stop_reason: { type: 'retries_exhausted' },
+    };
+  }
+  return { type: 'session.status_terminated' };
 }
 
 function sessionErrorDetailForMessage(message) {
@@ -132,10 +157,84 @@ function sessionErrorDetailForMessage(message) {
   if (classified) {
     return classified;
   }
+  const modelError = classifyModelError(message);
+  if (modelError) {
+    return modelError;
+  }
   return {
     type: 'unknown_error',
     message: message || 'Managed agent run failed',
+    retry_status: { type: 'terminal' },
   };
+}
+
+function classifyModelError(message, { requireProviderSignal = false } = {}) {
+  const normalized = String(message ?? '').trim();
+  if (!normalized) {
+    return null;
+  }
+  if (requireProviderSignal && !looksLikeProviderErrorMessage(normalized)) {
+    return null;
+  }
+  if (isBillingError(normalized)) {
+    return {
+      type: 'billing_error',
+      message: normalized,
+      retry_status: { type: 'terminal' },
+    };
+  }
+  if (isRateLimitError(normalized)) {
+    return {
+      type: 'model_rate_limited_error',
+      message: normalized,
+      retry_status: { type: 'exhausted' },
+    };
+  }
+  if (isOverloadError(normalized)) {
+    return {
+      type: 'model_overloaded_error',
+      message: normalized,
+      retry_status: { type: 'exhausted' },
+    };
+  }
+  if (looksLikeProviderErrorMessage(normalized)) {
+    return {
+      type: 'model_request_failed_error',
+      message: normalized,
+      retry_status: { type: isRetriableModelRequestFailure(normalized) ? 'exhausted' : 'terminal' },
+    };
+  }
+  return null;
+}
+
+function looksLikeProviderErrorMessage(message) {
+  const normalized = String(message ?? '').trim();
+  if (!normalized) {
+    return false;
+  }
+  return /\b(api|model|provider|anthropic|openai)\s+error\b/i.test(normalized)
+    || /\bhttp\s+(?:status\s+)?(?:4\d\d|5\d\d)\b/i.test(normalized)
+    || /\bstatus\s*(?:code)?\s*[:=]\s*(?:4\d\d|5\d\d)\b/i.test(normalized)
+    || /"error"\s*:\s*\{/i.test(normalized)
+    || (/\b(?:400|401|402|403|408|409|429|500|502|503|504|529)\b/.test(normalized)
+      && /\b(error|request[_ -]?id|rate[-_\s]?limit|overload|quota|billing|credit|capacity)\b/i.test(normalized));
+}
+
+function isBillingError(message) {
+  return /\b(402|billing|payment required|out of credits|credit balance|spend limit|insufficient[_ -]?quota|quota exceeded)\b/i.test(message);
+}
+
+function isRateLimitError(message) {
+  return /\b(429|too many requests|rate[-_\s]?limit(?:ed)?|resource exhausted)\b/i.test(message)
+    || /["']code["']\s*:\s*["']?1302["']?/i.test(message);
+}
+
+function isOverloadError(message) {
+  return /\b(529|overload(?:ed)?|capacity|temporarily unavailable)\b/i.test(message);
+}
+
+function isRetriableModelRequestFailure(message) {
+  return /\b(408|409|500|502|503|504|timeout|timed out|temporarily unavailable|connection reset|econnreset|econnrefused|network)\b/i.test(message);
 }
 
 function classifyMCPError(message) {

@@ -78,6 +78,54 @@ test('agent-warper bootstraps a session and starts a run', async () => {
   await closeServer(server);
 });
 
+test('agent-warper reports model rate limits as exhausted turn errors', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
+  const callbacks = [];
+  const runtime = new FakeRuntime();
+  runtime.startRun = async () => {
+    throw new Error('API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}');
+  };
+  const server = createServer({
+    stateDir,
+    runtime,
+    callbackClient: { send: async (_session, payload) => callbacks.push(payload) },
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  let response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_rate_limit', vendor: 'claude' }),
+  });
+  assert.equal(response.status, 200);
+
+  response = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_rate_limit', run_id: 'run_rate_limit', input_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }] }),
+  });
+  assert.equal(response.status, 202);
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(callbacks.at(-1).events, [
+    {
+      type: 'session.error',
+      error: {
+        type: 'model_rate_limited_error',
+        message: 'API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}',
+        retry_status: { type: 'exhausted' },
+      },
+    },
+    {
+      type: 'session.status_idle',
+      stop_reason: { type: 'retries_exhausted' },
+    },
+  ]);
+
+  await closeServer(server);
+});
+
 test('agent-warper returns action resolution state from runtime', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
   const runtime = new FakeRuntime();

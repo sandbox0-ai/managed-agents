@@ -1,11 +1,24 @@
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
-import { AgentRuntime, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
+import {
+  AgentRuntime,
+  finalStatusEventForSessionError,
+  providerErrorEventForText,
+  runtimeEnvForEngine,
+  runtimeModelForSession,
+  sessionErrorEventForError,
+} from './runtime.js';
 
 async function* emptyPromptStream() {}
 
-export { runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError };
+export {
+  finalStatusEventForSessionError,
+  providerErrorEventForText,
+  runtimeEnvForEngine,
+  runtimeModelForSession,
+  sessionErrorEventForError,
+};
 
 export function querySkillNames(session) {
   if (!Array.isArray(session?.skill_names)) {
@@ -35,6 +48,7 @@ export class ClaudeRuntime extends AgentRuntime {
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
+    this.deferredRunErrors = new Map();
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
@@ -96,6 +110,7 @@ export class ClaudeRuntime extends AgentRuntime {
     } finally {
       this.pendingActions.delete(session.session_id);
       this.emittedToolUses.delete(session.session_id);
+      this.deferredRunErrors.delete(run.run_id);
       this.activeRuns.delete(run.run_id);
     }
   }
@@ -532,6 +547,12 @@ export class ClaudeRuntime extends AgentRuntime {
       const events = [];
       for (const block of message.message.content) {
         if (block?.type === 'text' && typeof block.text === 'string') {
+          const errorEvent = providerErrorEventForText(block.text);
+          if (errorEvent) {
+            this.deferredRunErrors.set(run.run_id, errorEvent);
+            events.push(errorEvent);
+            continue;
+          }
           events.push({
             type: 'agent.message',
             content: [{ type: 'text', text: block.text }],
@@ -582,6 +603,20 @@ export class ClaudeRuntime extends AgentRuntime {
       const usageDelta = buildUsageDelta(message.usage);
       const modelRequestEnd = buildModelRequestEndEvent(modelRequestStartID, message.usage, message.subtype !== 'success');
       if (message.subtype === 'success') {
+        const deferredError = this.deferredRunErrors.get(run.run_id);
+        if (deferredError) {
+          this.deferredRunErrors.delete(run.run_id);
+          return {
+            session_id: session.session_id,
+            run_id: run.run_id,
+            vendor_session_id: message.session_id,
+            usage_delta: usageDelta,
+            events: [
+              buildModelRequestEndEvent(modelRequestStartID, message.usage, true),
+              finalStatusEventForSessionError(deferredError),
+            ],
+          };
+        }
         if (message.stop_reason === 'tool_deferred') {
           return {
             session_id: session.session_id,
@@ -605,6 +640,7 @@ export class ClaudeRuntime extends AgentRuntime {
           ],
         };
       }
+      const errorEvent = sessionErrorEventForError((message.errors ?? []).join('; ') || message.subtype || 'Claude run failed');
       return {
         session_id: session.session_id,
         run_id: run.run_id,
@@ -612,10 +648,8 @@ export class ClaudeRuntime extends AgentRuntime {
         usage_delta: usageDelta,
         events: [
           modelRequestEnd,
-          sessionErrorEventForError((message.errors ?? []).join('; ') || message.subtype || 'Claude run failed'),
-          {
-            type: 'session.status_terminated',
-          },
+          errorEvent,
+          finalStatusEventForSessionError(errorEvent),
         ],
       };
     }
