@@ -216,7 +216,7 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 			if directory == "" {
 				return nil, fmt.Errorf("custom skill %s@%s is missing directory", skillID, version)
 			}
-			if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, workingDirectory, directory, stored.Files); err != nil {
+			if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, m.cfg.WorkspaceMountPath, workingDirectory, directory, stored.Files); err != nil {
 				return nil, fmt.Errorf("materialize custom skill %s@%s: %w", skillID, version, err)
 			}
 			preloadSet[directory] = struct{}{}
@@ -679,9 +679,9 @@ func managedLLMCredentialBinding(sessionID, vendor string, credential *managedLL
 	}, nil
 }
 
-func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, workingDirectory, directory string, files []gatewaymanagedagents.StoredSkillFile) error {
+func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, workspaceMountPath, workingDirectory, directory string, files []gatewaymanagedagents.StoredSkillFile) error {
 	for _, file := range files {
-		targetPath := skillFileTargetPath(workingDirectory, directory, file.Path)
+		targetPath := skillFileTargetPath(workspaceMountPath, workingDirectory, directory, file.Path)
 		if targetPath == "" {
 			return errors.New("stored skill file path is invalid")
 		}
@@ -707,16 +707,42 @@ func skillDirectoryName(stored *gatewaymanagedagents.StoredSkillVersion, fallbac
 	return sanitizeName(fallback)
 }
 
-func skillFileTargetPath(workingDirectory, directory, storedPath string) string {
-	base := cleanMountPath(path.Join(strings.TrimSpace(workingDirectory), ".claude", "skills"))
-	if base == "" {
+func skillFileTargetPath(workspaceMountPath, workingDirectory, directory, storedPath string) string {
+	containerBase := cleanMountPath(path.Join(strings.TrimSpace(workingDirectory), ".claude", "skills"))
+	if containerBase == "" {
+		return ""
+	}
+	volumeBase := workspaceMountedPathToVolumePath(workspaceMountPath, containerBase)
+	if volumeBase == "" {
 		return ""
 	}
 	relative := normalizedStoredSkillRelativePath(directory, storedPath)
 	if relative == "" {
 		return ""
 	}
-	return cleanMountPath(path.Join(base, relative))
+	return cleanMountPath(path.Join(volumeBase, relative))
+}
+
+func workspaceMountedPathToVolumePath(workspaceMountPath, containerPath string) string {
+	mountPath := cleanMountPath(workspaceMountPath)
+	if mountPath == "" {
+		mountPath = "/workspace"
+	}
+	targetPath := cleanMountPath(containerPath)
+	if targetPath == "" {
+		return ""
+	}
+	if mountPath == "/" {
+		return targetPath
+	}
+	if targetPath == mountPath {
+		return "/"
+	}
+	prefix := strings.TrimRight(mountPath, "/") + "/"
+	if !strings.HasPrefix(targetPath, prefix) {
+		return ""
+	}
+	return cleanMountPath("/" + strings.TrimPrefix(targetPath, prefix))
 }
 
 func normalizedStoredSkillRelativePath(directory, storedPath string) string {

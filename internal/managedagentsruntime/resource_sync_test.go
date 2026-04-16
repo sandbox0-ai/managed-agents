@@ -448,9 +448,30 @@ func TestNormalizedStoredSkillRelativePathPrefixesDirectoryWhenUploadWasFlat(t *
 }
 
 func TestSkillFileTargetPathPlacesFilesUnderProjectSkillsDirectory(t *testing.T) {
-	got := skillFileTargetPath("/workspace", "demo-skill", "docs/guide.md")
-	if got != "/workspace/.claude/skills/demo-skill/docs/guide.md" {
+	got := skillFileTargetPath("/workspace", "/workspace", "demo-skill", "docs/guide.md")
+	if got != "/.claude/skills/demo-skill/docs/guide.md" {
 		t.Fatalf("target path = %q", got)
+	}
+}
+
+func TestSkillFileTargetPathUsesWorkspaceRelativeVolumePath(t *testing.T) {
+	got := skillFileTargetPath("/workspace", "/workspace/project", "demo-skill", "SKILL.md")
+	if got != "/project/.claude/skills/demo-skill/SKILL.md" {
+		t.Fatalf("target path = %q", got)
+	}
+}
+
+func TestSkillFileTargetPathRejectsWorkingDirectoryOutsideWorkspaceMount(t *testing.T) {
+	got := skillFileTargetPath("/workspace", "/tmp/project", "demo-skill", "SKILL.md")
+	if got != "" {
+		t.Fatalf("target path = %q, want empty", got)
+	}
+}
+
+func TestWorkspaceMountedPathToVolumePathRejectsSiblingPrefix(t *testing.T) {
+	got := workspaceMountedPathToVolumePath("/workspace", "/workspace-other/.claude")
+	if got != "" {
+		t.Fatalf("volume path = %q, want empty", got)
 	}
 }
 
