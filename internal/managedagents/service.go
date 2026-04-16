@@ -38,10 +38,11 @@ const (
 
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
-	repo      *Repository
-	runtime   RuntimeManager
-	logger    *zap.Logger
-	fileStore FileStore
+	repo          *Repository
+	runtime       RuntimeManager
+	logger        *zap.Logger
+	fileStore     FileStore
+	observability *Observability
 }
 
 type ServiceOption func(*Service)
@@ -51,6 +52,12 @@ func WithFileStore(store FileStore) ServiceOption {
 		if store != nil {
 			s.fileStore = store
 		}
+	}
+}
+
+func WithObservability(observability *Observability) ServiceOption {
+	return func(s *Service) {
+		s.observability = observability
 	}
 }
 
@@ -68,10 +75,11 @@ func NewService(repo *Repository, runtime RuntimeManager, logger *zap.Logger, op
 	return service
 }
 
-func (s *Service) CreateSession(ctx context.Context, principal Principal, credential RequestCredential, params CreateSessionParams, gatewayBaseURL string) (*Session, error) {
+func (s *Service) CreateSession(ctx context.Context, principal Principal, credential RequestCredential, params CreateSessionParams, gatewayBaseURL string) (created *Session, err error) {
 	if strings.TrimSpace(principal.TeamID) == "" {
 		return nil, errors.New("team id is required")
 	}
+	operationStarted := time.Now()
 	environmentID, err := normalizeRequiredText(params.EnvironmentID, "environment_id", 128)
 	if err != nil {
 		return nil, err
@@ -87,13 +95,23 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	if err := ensureSupportedVendor(vendor); err != nil {
 		return nil, err
 	}
+	ctx, op := s.observability.StartOperation(ctx, "session_create", vendor,
+		zap.String("team_id", principal.TeamID),
+		zap.String("environment_id", environmentID),
+	)
+	defer func() { op.End(err) }()
+	op.ObservePhase("request_validate_and_resolve_agent", time.Since(operationStarted), nil)
+	phaseStarted := time.Now()
 	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 	if err != nil {
+		op.ObservePhase("load_environment", time.Since(phaseStarted), err)
 		return nil, err
 	}
 	if err := ensureEnvironmentUsable(environment); err != nil {
+		op.ObservePhase("load_environment", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("load_environment", time.Since(phaseStarted), nil)
 	title, err := normalizeOptionalText(params.Title, "title", 500)
 	if err != nil {
 		return nil, err
@@ -106,18 +124,36 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 		return nil, err
 	}
 	now := time.Now().UTC()
+	phaseStarted = time.Now()
 	resources, resourceSecrets, err := s.validateSessionDependencies(ctx, principal, environmentID, vaultIDs, cloneMapSlice(params.Resources))
 	if err != nil {
+		op.ObservePhase("validate_dependencies", time.Since(phaseStarted), err,
+			zap.Int("vault_count", len(vaultIDs)),
+			zap.Int("resource_count", len(params.Resources)),
+		)
 		return nil, err
 	}
+	op.ObservePhase("validate_dependencies", time.Since(phaseStarted), nil,
+		zap.Int("vault_count", len(vaultIDs)),
+		zap.Int("resource_count", len(params.Resources)),
+	)
+	phaseStarted = time.Now()
 	vendor, err = s.resolveSessionVendorFromVaults(ctx, principal, vendor, vaultIDs)
 	if err != nil {
+		op.ObservePhase("resolve_vendor_from_vaults", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("resolve_vendor_from_vaults", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
 	if err != nil {
+		op.ObservePhase("ensure_environment_artifact_record", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("ensure_environment_artifact_record", time.Since(phaseStarted), nil,
+		zap.String("environment_artifact_id", artifact.ID),
+		zap.String("environment_artifact_status", artifact.Status),
+	)
 	record := &SessionRecord{
 		ID:                    NewID("sesn"),
 		TeamID:                strings.TrimSpace(principal.TeamID),
@@ -135,26 +171,62 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
-	var created *Session
+	lockStarted := time.Now()
 	if err := s.repo.WithSessionLock(ctx, record.ID, func(ctx context.Context) error {
+		op.ObservePhase("acquire_session_lock", time.Since(lockStarted), nil,
+			zap.String("session_id", record.ID),
+		)
+		phaseStarted := time.Now()
 		if err := s.repo.CreateSession(ctx, record, nil); err != nil {
+			op.ObservePhase("create_session_record", time.Since(phaseStarted), err,
+				zap.String("session_id", record.ID),
+			)
 			return err
 		}
+		op.ObservePhase("create_session_record", time.Since(phaseStarted), nil,
+			zap.String("session_id", record.ID),
+		)
+		phaseStarted = time.Now()
 		for resourceID, secret := range resourceSecrets {
 			if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
+				op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), err,
+					zap.String("session_id", record.ID),
+					zap.Int("resource_secret_count", len(resourceSecrets)),
+				)
 				return err
 			}
 		}
+		op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), nil,
+			zap.String("session_id", record.ID),
+			zap.Int("resource_secret_count", len(resourceSecrets)),
+		)
+		phaseStarted = time.Now()
 		runtime, runtimeErr := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
 		if runtimeErr != nil {
+			op.ObservePhase("ensure_runtime", time.Since(phaseStarted), runtimeErr,
+				zap.String("session_id", record.ID),
+			)
 			s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
 			return runtimeErr
 		}
+		op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
+			zap.String("session_id", record.ID),
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
 		if runtime != nil {
+			phaseStarted = time.Now()
 			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+				op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
+					zap.String("session_id", record.ID),
+					zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+				)
 				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
 				return err
 			}
+			op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
+				zap.String("session_id", record.ID),
+				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+			)
 		}
 		created = record.toAPI(now)
 		return nil
@@ -356,7 +428,8 @@ func (s *Service) SendEvents(ctx context.Context, principal Principal, credentia
 	return events, err
 }
 
-func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params SendEventsParams, gatewayBaseURL string) ([]map[string]any, error) {
+func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, credential RequestCredential, sessionID string, params SendEventsParams, gatewayBaseURL string) (events []map[string]any, err error) {
+	operationStarted := time.Now()
 	record, engine, err := s.repo.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -364,34 +437,67 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	if err := ensureSessionAccess(record, principal); err != nil {
 		return nil, err
 	}
+	ctx, op := s.observability.StartOperation(ctx, "session_send_events", record.Vendor,
+		zap.String("team_id", record.TeamID),
+		zap.String("session_id", sessionID),
+		zap.Int("input_event_count", len(params.Events)),
+	)
+	defer func() { op.End(err) }()
+	op.ObservePhase("load_session", time.Since(operationStarted), nil,
+		zap.String("session_id", sessionID),
+	)
 	if record.ArchivedAt != nil {
 		return nil, fmt.Errorf("%w: archived sessions cannot accept new events", ErrSessionArchived)
 	}
 	processedAt := time.Now().UTC()
+	phaseStarted := time.Now()
 	inputEventMaps := inputEventsToMaps(params.Events)
 	stampedEvents := stampEvents(inputEventMaps, processedAt)
 	if err := validateInputEvents(stampedEvents); err != nil {
+		op.ObservePhase("validate_input_events", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("validate_input_events", time.Since(phaseStarted), nil)
 	var runtime *RuntimeRecord
+	phaseStarted = time.Now()
 	if existingRuntime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
 		runtime = existingRuntime
 	} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
+		op.ObservePhase("load_runtime", time.Since(phaseStarted), runtimeErr)
 		return nil, runtimeErr
 	}
+	op.ObservePhase("load_runtime", time.Since(phaseStarted), nil,
+		zap.Bool("runtime_present", runtime != nil),
+		zap.Bool("runtime_active_run", runtime != nil && runtime.ActiveRunID != nil),
+		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+	)
+	phaseStarted = time.Now()
 	requiredActionIDs, err := s.latestRequiredActionIDs(ctx, sessionID)
 	if err != nil {
+		op.ObservePhase("load_required_actions", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("load_required_actions", time.Since(phaseStarted), nil,
+		zap.Int("required_action_count", len(requiredActionIDs)),
+	)
 	if runtime != nil && runtime.ActiveRunID != nil && !containsInterruptEvent(stampedEvents) && !(len(requiredActionIDs) > 0 && containsOnlyActionResolutionEvents(stampedEvents)) {
 		queuedEvents := queueEvents(stampedEvents)
+		phaseStarted = time.Now()
 		runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, queuedEvents)
 		if err != nil {
+			op.ObservePhase("resolve_file_backed_input_events", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("resolve_file_backed_input_events", time.Since(phaseStarted), nil)
+		phaseStarted = time.Now()
 		if err := s.repo.AppendEvents(ctx, sessionID, queuedEvents); err != nil {
+			op.ObservePhase("append_queued_events", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("append_queued_events", time.Since(phaseStarted), nil,
+			zap.Int("event_count", len(queuedEvents)),
+		)
+		phaseStarted = time.Now()
 		if err := s.repo.CreateRuntimeInputEventBatch(ctx, &runtimeInputEventBatch{
 			ID:                 NewID("srunq"),
 			SessionID:          sessionID,
@@ -400,28 +506,46 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 			CreatedAt:          processedAt,
 			UpdatedAt:          processedAt,
 		}); err != nil {
+			op.ObservePhase("create_runtime_input_batch", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("create_runtime_input_batch", time.Since(phaseStarted), nil)
 		return queuedEvents, nil
 	}
+	phaseStarted = time.Now()
 	runtimeInputEvents, err := s.resolveFileBackedInputEvents(ctx, principal, credential, stampedEvents)
 	if err != nil {
+		op.ObservePhase("resolve_file_backed_input_events", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("resolve_file_backed_input_events", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	if err := s.repo.AppendEvents(ctx, sessionID, stampedEvents); err != nil {
+		op.ObservePhase("append_events", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("append_events", time.Since(phaseStarted), nil,
+		zap.Int("event_count", len(stampedEvents)),
+	)
 	if runtime != nil && runtime.ActiveRunID != nil && strings.TrimSpace(runtime.SandboxID) == "" &&
 		(containsInterruptEvent(stampedEvents) || (len(requiredActionIDs) > 0 && containsOnlyActionResolutionEvents(stampedEvents))) {
+		phaseStarted = time.Now()
 		runtime, err = s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
 		if err != nil {
+			op.ObservePhase("ensure_runtime_for_action", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("ensure_runtime_for_action", time.Since(phaseStarted), nil,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
 	}
 	if runtime != nil && containsInterruptEvent(stampedEvents) && runtime.ActiveRunID != nil {
+		phaseStarted = time.Now()
 		if err := s.runtime.InterruptRun(ctx, credential, runtime, *runtime.ActiveRunID); err != nil {
+			op.ObservePhase("interrupt_run", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("interrupt_run", time.Since(phaseStarted), nil)
 		idleEvent := stampEvent(map[string]any{
 			"type":        "session.status_idle",
 			"stop_reason": map[string]any{"type": "end_turn"},
@@ -449,13 +573,23 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		if err := ensureResolvesRequiredActions(requiredActionIDs, stampedEvents); err != nil {
 			return nil, err
 		}
+		phaseStarted = time.Now()
 		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+			op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), err,
+				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+			)
 			return nil, err
 		}
+		op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), nil,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
+		phaseStarted = time.Now()
 		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(runtimeInputEvents)})
 		if err != nil {
+			op.ObservePhase("resolve_actions", time.Since(phaseStarted), err)
 			return nil, err
 		}
+		op.ObservePhase("resolve_actions", time.Since(phaseStarted), nil)
 		var nextEvent map[string]any
 		if resolution != nil && len(resolution.RemainingActionIDs) > 0 {
 			nextEvent = stampEvent(map[string]any{
@@ -482,7 +616,11 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 			if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 				return nil, err
 			}
+			phaseStarted = time.Now()
 			if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
+				op.ObservePhase("start_run_after_action_resolution", time.Since(phaseStarted), err,
+					zap.String("run_id", runID),
+				)
 				runtime.ActiveRunID = nil
 				runtime.UpdatedAt = time.Now().UTC()
 				_ = s.repo.UpsertRuntime(ctx, runtime)
@@ -495,6 +633,9 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 				_ = s.repo.UpdateSession(ctx, record, engine)
 				return nil, err
 			}
+			op.ObservePhase("start_run_after_action_resolution", time.Since(phaseStarted), nil,
+				zap.String("run_id", runID),
+			)
 			return stampedEvents, nil
 		}
 		if err := s.repo.AppendEvents(ctx, sessionID, []map[string]any{nextEvent}); err != nil {
@@ -506,14 +647,26 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		}
 		return stampedEvents, nil
 	}
+	phaseStarted = time.Now()
 	runtime, err = s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
 	if err != nil {
+		op.ObservePhase("ensure_runtime", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+	)
 	bootstrapReq := bootstrapRequestFor(record, engine, runtime)
+	phaseStarted = time.Now()
 	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapReq); err != nil {
+		op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
 		return nil, err
 	}
+	op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+	)
 	runID := NewID("srun")
 	runtime.ActiveRunID = &runID
 	runtime.UpdatedAt = processedAt
@@ -528,7 +681,11 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	if err := s.repo.UpdateSession(ctx, record, engine); err != nil {
 		return nil, err
 	}
+	phaseStarted = time.Now()
 	if err := s.runtime.StartRun(ctx, credential, runtime, &WrapperRunRequest{SessionID: sessionID, RunID: runID, InputEvents: inputEventsFromMaps(runtimeInputEvents)}); err != nil {
+		op.ObservePhase("start_run", time.Since(phaseStarted), err,
+			zap.String("run_id", runID),
+		)
 		runtime.ActiveRunID = nil
 		runtime.UpdatedAt = time.Now().UTC()
 		_ = s.repo.UpsertRuntime(ctx, runtime)
@@ -541,6 +698,9 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		_ = s.repo.UpdateSession(ctx, record, engine)
 		return nil, err
 	}
+	op.ObservePhase("start_run", time.Since(phaseStarted), nil,
+		zap.String("run_id", runID),
+	)
 	return stampedEvents, nil
 }
 
@@ -832,6 +992,13 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 		Engine:           cloneMap(engine),
 	}
 	return req
+}
+
+func runtimeSandboxIDForLog(runtime *RuntimeRecord) string {
+	if runtime == nil {
+		return ""
+	}
+	return runtime.SandboxID
 }
 
 type sandboxWebhookEnvelope struct {

@@ -46,62 +46,128 @@ type managedProjectedHeader struct {
 	valueTemplate string
 }
 
-func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
+func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
+	ctx, op := m.observability.StartOperation(ctx, "runtime_sync_bootstrap_state", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
 	record, _, err := m.repo.GetSession(ctx, req.SessionID)
 	if err != nil {
+		op.ObservePhase("load_session", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("load_session", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
 	if err != nil {
+		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	environment, err := m.repo.GetEnvironment(ctx, record.TeamID, record.EnvironmentID)
 	if err != nil {
+		op.ObservePhase("load_environment", time.Since(phaseStarted), err)
 		return fmt.Errorf("resolve environment: %w", err)
 	}
+	op.ObservePhase("load_environment", time.Since(phaseStarted), nil)
 	req.Environment = environmentSnapshot(environment)
 	if strings.TrimSpace(record.EnvironmentArtifactID) != "" {
+		phaseStarted = time.Now()
 		artifact, err := m.repo.GetEnvironmentArtifact(ctx, record.TeamID, record.EnvironmentArtifactID)
 		if err != nil {
+			op.ObservePhase("load_environment_artifact", time.Since(phaseStarted), err)
 			return fmt.Errorf("resolve environment artifact: %w", err)
 		}
 		req.EnvironmentArtifact = gatewaymanagedagents.EnvironmentArtifactSnapshotForRuntime(artifact)
+		op.ObservePhase("load_environment_artifact", time.Since(phaseStarted), nil,
+			zap.String("environment_artifact_id", artifact.ID),
+			zap.String("environment_artifact_status", artifact.Status),
+		)
 	}
+	phaseStarted = time.Now()
 	if err := m.materializeFileResources(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.Resources); err != nil {
+		op.ObservePhase("materialize_file_resources", time.Since(phaseStarted), err,
+			zap.Int("resource_count", len(req.Resources)),
+		)
 		return err
 	}
+	op.ObservePhase("materialize_file_resources", time.Since(phaseStarted), nil,
+		zap.Int("resource_count", len(req.Resources)),
+	)
+	phaseStarted = time.Now()
 	githubBindings, err := m.syncGitHubCredentialSources(ctx, client, req.SessionID, req.Resources)
 	if err != nil {
+		op.ObservePhase("sync_github_credential_sources", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("sync_github_credential_sources", time.Since(phaseStarted), nil,
+		zap.Int("binding_count", len(githubBindings)),
+	)
 	mcpTargets := sessionAgentMCPServerTargets(req.Agent)
+	phaseStarted = time.Now()
 	vaultCredentials, bootstrapEvents, err := m.loadActiveVaultCredentials(ctx, record.TeamID, req.VaultIDs, mcpTargets)
 	if err != nil {
+		op.ObservePhase("load_vault_credentials", time.Since(phaseStarted), err,
+			zap.Int("vault_count", len(req.VaultIDs)),
+		)
 		return err
 	}
+	op.ObservePhase("load_vault_credentials", time.Since(phaseStarted), nil,
+		zap.Int("vault_count", len(req.VaultIDs)),
+		zap.Int("bootstrap_event_count", len(bootstrapEvents)),
+	)
 	var llmCredential *managedLLMCredential
+	phaseStarted = time.Now()
 	req.Engine, llmCredential, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
 	if err != nil {
+		op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), nil,
+		zap.Bool("has_llm_credential", llmCredential != nil),
+	)
+	phaseStarted = time.Now()
 	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
 	if err != nil {
+		op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), err)
 		return err
 	}
 	req.SkillNames = skillNames
+	op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), nil,
+		zap.Int("skill_count", len(skillNames)),
+	)
+	phaseStarted = time.Now()
 	llmBindings, err := m.syncManagedLLMCredentialSource(ctx, client, req.SessionID, req.Vendor, llmCredential)
 	if err != nil {
+		op.ObservePhase("sync_llm_credential_source", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("sync_llm_credential_source", time.Since(phaseStarted), nil,
+		zap.Int("binding_count", len(llmBindings)),
+	)
+	phaseStarted = time.Now()
 	vaultBindings, vaultEvents, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, mcpTargets, flattenVaultCredentials(vaultCredentials))
 	if err != nil {
+		op.ObservePhase("sync_vault_credential_sources", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("sync_vault_credential_sources", time.Since(phaseStarted), nil,
+		zap.Int("binding_count", len(vaultBindings)),
+		zap.Int("bootstrap_event_count", len(vaultEvents)),
+	)
 	req.BootstrapEvents = append(req.BootstrapEvents, bootstrapEvents...)
 	req.BootstrapEvents = append(req.BootstrapEvents, vaultEvents...)
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
-	return m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
+	phaseStarted = time.Now()
+	err = m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
+	op.ObservePhase("sync_sandbox_network_policy", time.Since(phaseStarted), err,
+		zap.Int("binding_count", len(bindings)),
+	)
+	return err
 }
 
 func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, teamID string, vaultIDs []string, mcpTargets map[string]mcpServerTarget) ([]managedVaultCredentials, []map[string]any, error) {
