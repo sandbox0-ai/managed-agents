@@ -805,6 +805,40 @@ func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRollsBackSessionWhenRuntimeEnsureFails(t *testing.T) {
+	repo := newTestRepository(t)
+	ensureErr := errors.New("ensure runtime failed")
+	runtime := &createSessionRuntimeManager{ensureErr: ensureErr}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	_, err := service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	}, "http://gateway.test")
+	if !errors.Is(err, ensureErr) {
+		t.Fatalf("CreateSession error = %v, want %v", err, ensureErr)
+	}
+	sessions, _, err := repo.ListSessions(ctx, principal.TeamID, SessionListOptions{Limit: 10, IncludeArchived: true})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions len = %d, want rollback to leave none", len(sessions))
+	}
+}
+
 func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{}
@@ -1557,6 +1591,8 @@ type ensureRuntimeCall struct {
 
 type createSessionRuntimeManager struct {
 	runtime       *RuntimeRecord
+	ensureErr     error
+	bootstrapErr  error
 	ensureCalls   []ensureRuntimeCall
 	bootstrapReqs []*WrapperSessionBootstrapRequest
 	callOrder     []string
@@ -1565,6 +1601,9 @@ type createSessionRuntimeManager struct {
 func (m *createSessionRuntimeManager) EnsureRuntime(_ context.Context, _ Principal, credential RequestCredential, session *SessionRecord, _ map[string]any, gatewayBaseURL string) (*RuntimeRecord, error) {
 	m.ensureCalls = append(m.ensureCalls, ensureRuntimeCall{Credential: credential, SessionID: session.ID, Vendor: session.Vendor, GatewayBaseURL: gatewayBaseURL})
 	m.callOrder = append(m.callOrder, "ensure")
+	if m.ensureErr != nil {
+		return nil, m.ensureErr
+	}
 	runtime := &RuntimeRecord{SessionID: session.ID, Vendor: session.Vendor}
 	if m.runtime != nil {
 		cloned := *m.runtime
@@ -1582,7 +1621,7 @@ func (m *createSessionRuntimeManager) EnsureRuntime(_ context.Context, _ Princip
 func (m *createSessionRuntimeManager) BootstrapSession(_ context.Context, _ RequestCredential, _ *RuntimeRecord, req *WrapperSessionBootstrapRequest) error {
 	m.bootstrapReqs = append(m.bootstrapReqs, req)
 	m.callOrder = append(m.callOrder, "bootstrap")
-	return nil
+	return m.bootstrapErr
 }
 
 func (m *createSessionRuntimeManager) StartRun(context.Context, RequestCredential, *RuntimeRecord, *WrapperRunRequest) error {

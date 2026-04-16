@@ -83,6 +83,33 @@ func (r *Repository) WithSessionLock(ctx context.Context, sessionID string, fn f
 	return fn(context.WithValue(ctx, repositoryDBContextKey{}, conn))
 }
 
+func (r *Repository) WithTransaction(ctx context.Context, fn func(context.Context) error) error {
+	if _, ok := ctx.Value(repositoryDBContextKey{}).(pgx.Tx); ok {
+		return fn(ctx)
+	}
+	tx, err := r.db(ctx).Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin managed-agent transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+	if err := fn(context.WithValue(ctx, repositoryDBContextKey{}, tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit managed-agent transaction: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 func (r *Repository) CreateSession(ctx context.Context, record *SessionRecord, engine map[string]any) error {
 	agentJSON, err := json.Marshal(record.Agent)
 	if err != nil {
