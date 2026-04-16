@@ -21,7 +21,7 @@ import (
 
 const (
 	DefaultSandboxTTLSeconds     = 0
-	DefaultSandboxHardTTLSeconds = 3600
+	DefaultSandboxHardTTLSeconds = 86400
 	defaultTemplateID            = "managed-agents"
 )
 
@@ -266,40 +266,6 @@ func (m *SDKRuntimeManager) InterruptRun(ctx context.Context, credential gateway
 	return m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/interrupt", nil)
 }
 
-func (m *SDKRuntimeManager) PauseRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
-	if err != nil {
-		return err
-	}
-	_, err = client.PauseSandbox(ctx, runtime.SandboxID)
-	return err
-}
-
-func (m *SDKRuntimeManager) ResumeRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
-	if err != nil {
-		return err
-	}
-	_, err = client.ResumeSandbox(ctx, runtime.SandboxID)
-	return err
-}
-
-func (m *SDKRuntimeManager) CanPauseRuntimeInBackground() bool {
-	return strings.TrimSpace(m.cfg.SandboxAdminAPIKey) != ""
-}
-
-func (m *SDKRuntimeManager) PauseRuntimeInBackground(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	if !m.CanPauseRuntimeInBackground() {
-		return nil
-	}
-	client, err := m.adminSandboxClientForRuntime(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	_, err = client.PauseSandbox(ctx, runtime.SandboxID)
-	return err
-}
-
 func (m *SDKRuntimeManager) DeleteWrapperSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, sessionID string) error {
 	return m.wrapperJSON(ctx, credential, runtime, http.MethodDelete, "/v1/runtime/session/"+url.PathEscape(sessionID), nil)
 }
@@ -337,20 +303,6 @@ func (m *SDKRuntimeManager) sandboxClientForRuntime(ctx context.Context, credent
 		return m.newSandboxClient(m.cfg.SandboxAdminAPIKey, teamID)
 	}
 	return m.newSandboxClient(credential.Token, teamID)
-}
-
-func (m *SDKRuntimeManager) adminSandboxClientForRuntime(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) (*sandbox0sdk.Client, error) {
-	if strings.TrimSpace(m.cfg.SandboxAdminAPIKey) == "" {
-		return nil, errors.New("sandbox admin api key is required")
-	}
-	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" {
-		return nil, errors.New("runtime sandbox id is required")
-	}
-	teamID, err := m.teamIDForRuntime(ctx, runtime)
-	if err != nil {
-		return nil, err
-	}
-	return m.newSandboxClient(m.cfg.SandboxAdminAPIKey, teamID)
 }
 
 func (m *SDKRuntimeManager) templateClient(ctx context.Context, credential gatewaymanagedagents.RequestCredential, fallbackTeamID string) (*sandbox0sdk.Client, error) {
