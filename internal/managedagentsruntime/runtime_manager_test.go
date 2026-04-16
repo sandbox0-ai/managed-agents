@@ -12,6 +12,10 @@ import (
 
 func TestConfigWithDefaults(t *testing.T) {
 	cfg := (Config{}).WithDefaults(8443)
+	wantDefaultHardTTLSeconds := int((24 * time.Hour) / time.Second)
+	if DefaultSandboxHardTTLSeconds != wantDefaultHardTTLSeconds {
+		t.Fatalf("DefaultSandboxHardTTLSeconds = %d, want %d", DefaultSandboxHardTTLSeconds, wantDefaultHardTTLSeconds)
+	}
 	if cfg.TemplateID != "managed-agents" {
 		t.Fatalf("TemplateID = %q", cfg.TemplateID)
 	}

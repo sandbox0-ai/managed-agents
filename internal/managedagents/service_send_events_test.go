@@ -10,15 +10,11 @@ import (
 )
 
 type recordingRuntimeManager struct {
-	resolveResponse        *WrapperResolveActionsResponse
-	bootstrapReqs          []*WrapperSessionBootstrapRequest
-	startRunReqs           []*WrapperRunRequest
-	resolveReqs            []*WrapperResolveActionsRequest
-	interruptRunIDs        []string
-	pauseReqs              []*RuntimeRecord
-	resumeReqs             []*RuntimeRecord
-	backgroundPauseEnabled bool
-	backgroundPauseReqs    []*RuntimeRecord
+	resolveResponse *WrapperResolveActionsResponse
+	bootstrapReqs   []*WrapperSessionBootstrapRequest
+	startRunReqs    []*WrapperRunRequest
+	resolveReqs     []*WrapperResolveActionsRequest
+	interruptRunIDs []string
 }
 
 func (m *recordingRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
@@ -48,30 +44,11 @@ func (m *recordingRuntimeManager) InterruptRun(_ context.Context, _ RequestCrede
 	return nil
 }
 
-func (m *recordingRuntimeManager) PauseRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
-	m.pauseReqs = append(m.pauseReqs, runtime)
-	return nil
-}
-
-func (m *recordingRuntimeManager) ResumeRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
-	m.resumeReqs = append(m.resumeReqs, runtime)
-	return nil
-}
-
 func (m *recordingRuntimeManager) DeleteWrapperSession(context.Context, RequestCredential, *RuntimeRecord, string) error {
 	return nil
 }
 
 func (m *recordingRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
-	return nil
-}
-
-func (m *recordingRuntimeManager) CanPauseRuntimeInBackground() bool {
-	return m.backgroundPauseEnabled
-}
-
-func (m *recordingRuntimeManager) PauseRuntimeInBackground(_ context.Context, runtime *RuntimeRecord) error {
-	m.backgroundPauseReqs = append(m.backgroundPauseReqs, runtime)
 	return nil
 }
 
@@ -122,9 +99,6 @@ func TestSendEventsInterruptClearsActiveRunAndMarksIdle(t *testing.T) {
 	}
 	if len(runtimeManager.interruptRunIDs) != 1 || runtimeManager.interruptRunIDs[0] != activeRunID {
 		t.Fatalf("interruptRunIDs = %#v, want %q", runtimeManager.interruptRunIDs, activeRunID)
-	}
-	if len(runtimeManager.pauseReqs) != 1 {
-		t.Fatalf("pause calls = %d, want 1", len(runtimeManager.pauseReqs))
 	}
 	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
 	if err != nil {
@@ -386,9 +360,6 @@ func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
 	}
 	if len(runtime.resolveReqs) != 1 {
 		t.Fatalf("resolve calls = %d, want 1", len(runtime.resolveReqs))
-	}
-	if len(runtime.resumeReqs) != 1 {
-		t.Fatalf("resume calls = %d, want 1", len(runtime.resumeReqs))
 	}
 	if len(runtime.bootstrapReqs) != 1 {
 		t.Fatalf("bootstrap calls = %d, want 1", len(runtime.bootstrapReqs))

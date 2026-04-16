@@ -746,7 +746,7 @@ func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
 	}
 }
 
-func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
+func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
 		Vendor:            "claude",
@@ -756,8 +756,8 @@ func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 		WorkspaceVolumeID: "vol_workspace",
 		ControlToken:      "ctl_123",
 		RuntimeGeneration: 1,
-	}, pauseCh: make(chan *RuntimeRecord, 1)}
-	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(0))
+	}}
+	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
 	credential := RequestCredential{Token: "token_123"}
 	ctx := context.Background()
@@ -800,16 +800,7 @@ func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 	if runtime.bootstrapReqs[0].EnvironmentID != environment.ID {
 		t.Fatalf("BootstrapSession environment_id = %q, want %q", runtime.bootstrapReqs[0].EnvironmentID, environment.ID)
 	}
-	var paused *RuntimeRecord
-	select {
-	case paused = <-runtime.pauseCh:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for delayed create pause")
-	}
-	if paused.SandboxID != "sbx_create" {
-		t.Fatalf("PauseRuntime sandbox_id = %q, want sbx_create", paused.SandboxID)
-	}
-	if !reflect.DeepEqual(runtime.callOrder, []string{"ensure", "bootstrap", "pause"}) {
+	if !reflect.DeepEqual(runtime.callOrder, []string{"ensure", "bootstrap"}) {
 		t.Fatalf("call order = %#v", runtime.callOrder)
 	}
 }
@@ -817,7 +808,7 @@ func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{}
-	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(-1))
+	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -855,63 +846,6 @@ func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 	}
 	if len(runtime.bootstrapReqs) != 1 || runtime.bootstrapReqs[0].Vendor != ManagedAgentsEngineCodex {
 		t.Fatalf("BootstrapSession vendor reqs = %#v, want codex", runtime.bootstrapReqs)
-	}
-}
-
-func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
-	repo := newTestRepository(t)
-	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
-		Vendor:            "claude",
-		RegionID:          "test-region",
-		SandboxID:         "sbx_create",
-		WrapperURL:        "https://wrapper.example.test",
-		WorkspaceVolumeID: "vol_workspace",
-		ControlToken:      "ctl_123",
-		RuntimeGeneration: 1,
-	}, pauseCh: make(chan *RuntimeRecord, 1)}
-	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(100*time.Millisecond))
-	principal := Principal{TeamID: "team_123", UserID: "user_123"}
-	credential := RequestCredential{Token: "token_123"}
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
-	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
-		t.Fatalf("CreateEnvironment: %v", err)
-	}
-	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
-	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
-		t.Fatalf("CreateAgent: %v", err)
-	}
-
-	session, err := service.CreateSession(ctx, principal, credential, CreateSessionParams{
-		Agent:         "agent_123",
-		EnvironmentID: environment.ID,
-	}, "http://gateway.test")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	activeRunID := "srun_active"
-	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:         session.ID,
-		Vendor:            "claude",
-		RegionID:          "test-region",
-		SandboxID:         "sbx_create",
-		WrapperURL:        "https://wrapper.example.test",
-		WorkspaceVolumeID: "vol_workspace",
-		ControlToken:      "ctl_123",
-		RuntimeGeneration: 1,
-		ActiveRunID:       &activeRunID,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}); err != nil {
-		t.Fatalf("UpsertRuntime: %v", err)
-	}
-
-	select {
-	case paused := <-runtime.pauseCh:
-		t.Fatalf("unexpected delayed create pause for active runtime: %#v", paused)
-	case <-time.After(250 * time.Millisecond):
 	}
 }
 
@@ -1410,12 +1344,6 @@ func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
 	if len(runtime.bootstrapReqs[0].VaultIDs) != 1 || runtime.bootstrapReqs[0].VaultIDs[0] != "vlt_b" {
 		t.Fatalf("bootstrap vault_ids = %#v, want [vlt_b]", runtime.bootstrapReqs[0].VaultIDs)
 	}
-	if len(runtime.resumeReqs) != 1 {
-		t.Fatalf("resume calls = %d, want 1", len(runtime.resumeReqs))
-	}
-	if len(runtime.pauseReqs) != 1 {
-		t.Fatalf("pause calls = %d, want 1", len(runtime.pauseReqs))
-	}
 }
 
 func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
@@ -1640,8 +1568,6 @@ type createSessionRuntimeManager struct {
 	runtime       *RuntimeRecord
 	ensureCalls   []ensureRuntimeCall
 	bootstrapReqs []*WrapperSessionBootstrapRequest
-	pauseCalls    []*RuntimeRecord
-	pauseCh       chan *RuntimeRecord
 	callOrder     []string
 }
 
@@ -1680,19 +1606,6 @@ func (m *createSessionRuntimeManager) InterruptRun(context.Context, RequestCrede
 	return nil
 }
 
-func (m *createSessionRuntimeManager) PauseRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
-	m.pauseCalls = append(m.pauseCalls, runtime)
-	m.callOrder = append(m.callOrder, "pause")
-	if m.pauseCh != nil {
-		m.pauseCh <- runtime
-	}
-	return nil
-}
-
-func (m *createSessionRuntimeManager) ResumeRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
-	return nil
-}
-
 func (m *createSessionRuntimeManager) DeleteWrapperSession(context.Context, RequestCredential, *RuntimeRecord, string) error {
 	return nil
 }
@@ -1721,14 +1634,6 @@ func (noopRuntimeManager) InterruptRun(context.Context, RequestCredential, *Runt
 	return nil
 }
 
-func (noopRuntimeManager) PauseRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
-	return nil
-}
-
-func (noopRuntimeManager) ResumeRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
-	return nil
-}
-
 func (noopRuntimeManager) DeleteWrapperSession(context.Context, RequestCredential, *RuntimeRecord, string) error {
 	return nil
 }
@@ -1739,8 +1644,6 @@ func (noopRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *Ru
 
 type updateSessionRuntimeManager struct {
 	bootstrapReqs []*WrapperSessionBootstrapRequest
-	resumeReqs    []*RuntimeRecord
-	pauseReqs     []*RuntimeRecord
 }
 
 func (m *updateSessionRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
@@ -1761,16 +1664,6 @@ func (m *updateSessionRuntimeManager) ResolveActions(context.Context, RequestCre
 }
 
 func (m *updateSessionRuntimeManager) InterruptRun(context.Context, RequestCredential, *RuntimeRecord, string) error {
-	return nil
-}
-
-func (m *updateSessionRuntimeManager) PauseRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
-	m.pauseReqs = append(m.pauseReqs, runtime)
-	return nil
-}
-
-func (m *updateSessionRuntimeManager) ResumeRuntime(_ context.Context, _ RequestCredential, runtime *RuntimeRecord) error {
-	m.resumeReqs = append(m.resumeReqs, runtime)
 	return nil
 }
 

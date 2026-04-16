@@ -12,7 +12,7 @@ import (
 
 func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	repo := newTestRepository(t)
-	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	runtimeManager := &recordingRuntimeManager{}
 	service := NewService(repo, runtimeManager, nil)
 	now := time.Date(2026, 4, 10, 6, 0, 0, 0, time.UTC)
 	record := &SessionRecord{
@@ -72,9 +72,6 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	if len(eventsBeforeProcessing) != 0 {
 		t.Fatalf("events before processing = %d, want 0", len(eventsBeforeProcessing))
 	}
-	if len(runtimeManager.backgroundPauseReqs) != 0 {
-		t.Fatalf("background pause calls before processing = %d, want 0", len(runtimeManager.backgroundPauseReqs))
-	}
 	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
 	if err != nil || !processed {
 		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
@@ -106,14 +103,11 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	if updatedSession.Status != "idle" {
 		t.Fatalf("session status = %q, want idle", updatedSession.Status)
 	}
-	if len(runtimeManager.backgroundPauseReqs) != 1 {
-		t.Fatalf("background pause calls = %d, want 1", len(runtimeManager.backgroundPauseReqs))
-	}
 }
 
-func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T) {
+func TestHandleSandboxWebhookKeepsRequiresActionRunActive(t *testing.T) {
 	repo := newTestRepository(t)
-	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	runtimeManager := &recordingRuntimeManager{}
 	service := NewService(repo, runtimeManager, nil)
 	now := time.Date(2026, 4, 10, 6, 30, 0, 0, time.UTC)
 	record := &SessionRecord{
@@ -177,14 +171,11 @@ func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T)
 	if updatedRuntime.ActiveRunID == nil || *updatedRuntime.ActiveRunID != activeRunID {
 		t.Fatalf("active_run_id = %v, want %q", updatedRuntime.ActiveRunID, activeRunID)
 	}
-	if len(runtimeManager.backgroundPauseReqs) != 1 {
-		t.Fatalf("background pause calls = %d, want 1", len(runtimeManager.backgroundPauseReqs))
-	}
 }
 
 func TestHandleSandboxWebhookSkipsStaleRun(t *testing.T) {
 	repo := newTestRepository(t)
-	runtimeManager := &recordingRuntimeManager{backgroundPauseEnabled: true}
+	runtimeManager := &recordingRuntimeManager{}
 	service := NewService(repo, runtimeManager, nil)
 	now := time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
 	record := &SessionRecord{
@@ -253,9 +244,6 @@ func TestHandleSandboxWebhookSkipsStaleRun(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("events len = %d, want 0", len(events))
-	}
-	if len(runtimeManager.backgroundPauseReqs) != 0 {
-		t.Fatalf("background pause calls = %d, want 0", len(runtimeManager.backgroundPauseReqs))
 	}
 }
 
