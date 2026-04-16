@@ -64,8 +64,6 @@ spec:
               value: {{ .Values.agentGateway.env.workspaceMountPath | quote }}
             - name: MANAGED_AGENT_SANDBOX_TTL_SECONDS
               value: {{ .Values.agentGateway.env.sandboxTTLSeconds | quote }}
-            - name: MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS
-              value: {{ .Values.agentGateway.env.sandboxHardTTLSeconds | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MANIFEST_PATH
               value: {{ .Values.agentGateway.env.templateManifestPath | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MAIN_IMAGE

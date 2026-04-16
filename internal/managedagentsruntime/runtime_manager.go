@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	DefaultSandboxTTLSeconds     = 0
-	DefaultSandboxHardTTLSeconds = 86400
-	defaultTemplateID            = "managed-agents"
+	DefaultSandboxTTLSeconds = 180
+	defaultTemplateID        = "managed-agents"
 )
 
 // Config configures sandbox-backed managed-agent runtimes.
@@ -34,7 +33,6 @@ type Config struct {
 	WrapperPort            int
 	WorkspaceMountPath     string
 	SandboxTTLSeconds      int
-	SandboxHardTTLSeconds  int
 	SandboxRequestTimeout  time.Duration
 	SandboxBaseURL         string
 	SandboxAdminAPIKey     string
@@ -62,12 +60,6 @@ func (c Config) WithDefaults(httpPort int) Config {
 	}
 	if c.SandboxTTLSeconds <= 0 {
 		c.SandboxTTLSeconds = DefaultSandboxTTLSeconds
-	}
-	if c.SandboxHardTTLSeconds <= 0 {
-		c.SandboxHardTTLSeconds = DefaultSandboxHardTTLSeconds
-	}
-	if c.SandboxHardTTLSeconds > 0 && c.SandboxTTLSeconds > c.SandboxHardTTLSeconds {
-		c.SandboxTTLSeconds = c.SandboxHardTTLSeconds
 	}
 	if c.SandboxRequestTimeout <= 0 {
 		c.SandboxRequestTimeout = 90 * time.Second
@@ -115,8 +107,15 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if strings.TrimSpace(gatewayBaseURL) == "" {
 		return nil, errors.New("gateway base url is required")
 	}
+	var existingRuntime *gatewaymanagedagents.RuntimeRecord
 	if runtime, err := m.repo.GetRuntime(ctx, session.ID); err == nil {
-		return m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
+		if strings.TrimSpace(runtime.SandboxID) != "" {
+			if err := m.configureRuntimeSandboxLifecycle(ctx, credential, runtime); err != nil {
+				m.logger.Warn("configure existing runtime sandbox lifecycle failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+			}
+			return m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
+		}
+		existingRuntime = runtime
 	} else if !errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
 		return nil, err
 	}
@@ -147,15 +146,19 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	if err != nil {
 		return nil, fmt.Errorf("resolve environment artifact: %w", err)
 	}
-	sandboxTTLSeconds, sandboxHardTTLSeconds, err := m.sandboxTTLsForSession(session)
-	if err != nil {
-		return nil, err
+	workspaceVolumeID := ""
+	createdWorkspaceVolume := false
+	if existingRuntime != nil {
+		workspaceVolumeID = strings.TrimSpace(existingRuntime.WorkspaceVolumeID)
 	}
-	workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("create workspace volume: %w", err)
+	if workspaceVolumeID == "" {
+		workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
+		if err != nil {
+			return nil, fmt.Errorf("create workspace volume: %w", err)
+		}
+		workspaceVolumeID = workspaceVolume.ID
+		createdWorkspaceVolume = true
 	}
-	workspaceVolumeID := workspaceVolume.ID
 	sandboxID := ""
 	cleanupPending := true
 	defer func() {
@@ -169,7 +172,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 				m.logger.Warn("delete sandbox after runtime claim failed", zap.Error(err), zap.String("sandbox_id", sandboxID))
 			}
 		}
-		if workspaceVolumeID != "" {
+		if createdWorkspaceVolume && workspaceVolumeID != "" {
 			if _, err := client.DeleteVolumeWithOptions(cleanupCtx, workspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
 				m.logger.Warn("delete workspace volume after runtime claim failed", zap.Error(err), zap.String("volume_id", workspaceVolumeID))
 			}
@@ -179,8 +182,9 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	claimOpts := []sandbox0sdk.SandboxOption{
 		sandbox0sdk.WithSandboxBootstrapMount(workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
 		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
-		sandbox0sdk.WithSandboxTTL(int32(sandboxTTLSeconds)),
-		sandbox0sdk.WithSandboxHardTTL(int32(sandboxHardTTLSeconds)),
+		sandbox0sdk.WithSandboxTTL(int32(m.sandboxTTLSeconds())),
+		sandbox0sdk.WithSandboxHardTTL(0),
+		sandbox0sdk.WithSandboxAutoResume(true),
 		sandbox0sdk.WithSandboxWebhook(m.runtimeWebhookURL(gatewayBaseURL), controlToken),
 		sandbox0sdk.WithSandboxEnvVars(map[string]string{
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
@@ -204,6 +208,25 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		return nil, err
 	}
 	now := time.Now().UTC()
+	runtimeGeneration := int64(1)
+	createdAt := now
+	vendorSessionID := ""
+	var activeRunID *string
+	if existingRuntime != nil {
+		runtimeGeneration = existingRuntime.RuntimeGeneration + 1
+		if runtimeGeneration <= 1 {
+			runtimeGeneration = 2
+		}
+		createdAt = existingRuntime.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = now
+		}
+		vendorSessionID = existingRuntime.VendorSessionID
+		activeRunID = existingRuntime.ActiveRunID
+		if strings.TrimSpace(existingRuntime.RegionID) != "" {
+			regionID = existingRuntime.RegionID
+		}
+	}
 	runtime := &gatewaymanagedagents.RuntimeRecord{
 		SessionID:         session.ID,
 		Vendor:            session.Vendor,
@@ -212,8 +235,10 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		WrapperURL:        publicURL,
 		WorkspaceVolumeID: workspaceVolumeID,
 		ControlToken:      controlToken,
-		RuntimeGeneration: 1,
-		CreatedAt:         now,
+		VendorSessionID:   vendorSessionID,
+		RuntimeGeneration: runtimeGeneration,
+		ActiveRunID:       activeRunID,
+		CreatedAt:         createdAt,
 		UpdatedAt:         now,
 	}
 	if err := m.repo.UpsertRuntime(ctx, runtime); err != nil {
@@ -251,6 +276,9 @@ func (m *SDKRuntimeManager) runtimeWebhookURL(requestBaseURL string) string {
 }
 
 func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperRunRequest) error {
+	if err := m.RefreshRuntimeTTL(ctx, credential, runtime); err != nil {
+		m.logger.Warn("refresh runtime ttl before run failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+	}
 	return m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs", req)
 }
 
@@ -271,17 +299,15 @@ func (m *SDKRuntimeManager) DeleteWrapperSession(ctx context.Context, credential
 }
 
 func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	teamID, err := m.teamIDForRuntime(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	client, err := m.newSandboxClient(credential.Token, teamID)
+	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
 	if err != nil {
 		return err
 	}
 	m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID)
-	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
-		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+	if strings.TrimSpace(runtime.SandboxID) != "" {
+		if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
+			m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+		}
 	}
 	if runtime.WorkspaceVolumeID != "" {
 		if _, err := client.DeleteVolumeWithOptions(ctx, runtime.WorkspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
@@ -291,18 +317,83 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	return nil
 }
 
-func (m *SDKRuntimeManager) sandboxClientForRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) (*sandbox0sdk.Client, error) {
+func (m *SDKRuntimeManager) DeleteRuntimeSandbox(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) error {
 	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" {
-		return nil, errors.New("runtime sandbox id is required")
+		return nil
+	}
+	client, err := m.sandboxClientForRuntime(ctx, gatewaymanagedagents.RequestCredential{}, runtime)
+	if err != nil {
+		return err
+	}
+	m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID)
+	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
+		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+		return err
+	}
+	return nil
+}
+
+func (m *SDKRuntimeManager) RefreshRuntimeTTL(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
+	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" {
+		return nil
+	}
+	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
+	if err != nil {
+		return err
+	}
+	if err := m.configureRuntimeSandboxLifecycleWithClient(ctx, client, runtime); err != nil {
+		return err
+	}
+	_, err = client.RefreshSandbox(ctx, runtime.SandboxID, &apispec.SandboxRefreshRequest{
+		Duration: apispec.NewOptInt32(int32(m.sandboxTTLSeconds())),
+	})
+	if err != nil {
+		return fmt.Errorf("refresh sandbox ttl: %w", err)
+	}
+	return nil
+}
+
+func (m *SDKRuntimeManager) configureRuntimeSandboxLifecycle(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
+	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" {
+		return nil
+	}
+	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
+	if err != nil {
+		return err
+	}
+	return m.configureRuntimeSandboxLifecycleWithClient(ctx, client, runtime)
+}
+
+func (m *SDKRuntimeManager) configureRuntimeSandboxLifecycleWithClient(ctx context.Context, client *sandbox0sdk.Client, runtime *gatewaymanagedagents.RuntimeRecord) error {
+	_, err := client.UpdateSandbox(ctx, runtime.SandboxID, apispec.SandboxUpdateRequest{
+		Config: apispec.NewOptSandboxUpdateConfig(apispec.SandboxUpdateConfig{
+			TTL:        apispec.NewOptInt32(int32(m.sandboxTTLSeconds())),
+			HardTTL:    apispec.NewOptInt32(0),
+			AutoResume: apispec.NewOptBool(true),
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("update sandbox lifecycle: %w", err)
+	}
+	return nil
+}
+
+func (m *SDKRuntimeManager) sandboxClientForRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) (*sandbox0sdk.Client, error) {
+	if runtime == nil || strings.TrimSpace(runtime.SessionID) == "" {
+		return nil, errors.New("runtime session id is required")
 	}
 	teamID, err := m.teamIDForRuntime(ctx, runtime)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(credential.Token) == "" && strings.TrimSpace(m.cfg.SandboxAdminAPIKey) != "" {
-		return m.newSandboxClient(m.cfg.SandboxAdminAPIKey, teamID)
+	token := strings.TrimSpace(credential.Token)
+	if token == "" {
+		token = strings.TrimSpace(m.cfg.SandboxAdminAPIKey)
 	}
-	return m.newSandboxClient(credential.Token, teamID)
+	if token == "" {
+		return nil, errors.New("request credential is required")
+	}
+	return m.newSandboxClient(token, teamID)
 }
 
 func (m *SDKRuntimeManager) templateClient(ctx context.Context, credential gatewaymanagedagents.RequestCredential, fallbackTeamID string) (*sandbox0sdk.Client, error) {
@@ -345,28 +436,11 @@ func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *apispec
 	return m.templateForVendor(vendor)
 }
 
-func (m *SDKRuntimeManager) sandboxTTLsForSession(session *gatewaymanagedagents.SessionRecord) (int, int, error) {
-	ttlSeconds := m.cfg.SandboxTTLSeconds
-	if ttlSeconds <= 0 {
-		ttlSeconds = DefaultSandboxTTLSeconds
+func (m *SDKRuntimeManager) sandboxTTLSeconds() int {
+	if m.cfg.SandboxTTLSeconds > 0 {
+		return m.cfg.SandboxTTLSeconds
 	}
-	hardTTLSeconds := m.cfg.SandboxHardTTLSeconds
-	if hardTTLSeconds <= 0 {
-		hardTTLSeconds = DefaultSandboxHardTTLSeconds
-	}
-	if session != nil {
-		config, err := gatewaymanagedagents.ManagedSessionConfigFromMetadata(session.Metadata)
-		if err != nil {
-			return 0, 0, err
-		}
-		if config.SandboxHardTTLSeconds != nil {
-			hardTTLSeconds = *config.SandboxHardTTLSeconds
-		}
-	}
-	if hardTTLSeconds > 0 && ttlSeconds > hardTTLSeconds {
-		ttlSeconds = hardTTLSeconds
-	}
-	return ttlSeconds, hardTTLSeconds, nil
+	return DefaultSandboxTTLSeconds
 }
 
 func sortedMapKeys(in map[string]any) []string {
@@ -379,6 +453,20 @@ func sortedMapKeys(in map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func runtimeSessionID(runtime *gatewaymanagedagents.RuntimeRecord) string {
+	if runtime == nil {
+		return ""
+	}
+	return runtime.SessionID
+}
+
+func runtimeSandboxID(runtime *gatewaymanagedagents.RuntimeRecord) string {
+	if runtime == nil {
+		return ""
+	}
+	return runtime.SandboxID
 }
 
 func (m *SDKRuntimeManager) teamIDForRuntime(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) (string, error) {
@@ -395,6 +483,9 @@ func (m *SDKRuntimeManager) teamIDForRuntime(ctx context.Context, runtime *gatew
 func (m *SDKRuntimeManager) ensureWrapperEndpoint(ctx context.Context, token string, runtime *gatewaymanagedagents.RuntimeRecord) (*gatewaymanagedagents.RuntimeRecord, error) {
 	if strings.TrimSpace(runtime.WrapperURL) != "" {
 		return runtime, nil
+	}
+	if strings.TrimSpace(runtime.SandboxID) == "" {
+		return nil, errors.New("runtime sandbox id is required")
 	}
 	teamID, err := m.teamIDForRuntime(ctx, runtime)
 	if err != nil {

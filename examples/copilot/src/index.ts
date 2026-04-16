@@ -25,7 +25,6 @@ interface Config {
   vaultID?: string;
   llmAPIKey?: string;
   llmBaseURL?: string;
-  hardTTLSeconds?: string;
   verbose: boolean;
 }
 
@@ -108,7 +107,6 @@ function readConfig(): Config {
     vaultID,
     llmAPIKey,
     llmBaseURL,
-    hardTTLSeconds: optionalEnv("MANAGED_AGENTS_HARD_TTL_SECONDS"),
     verbose: optionalEnv("MANAGED_AGENTS_VERBOSE") === "1",
   };
 }
@@ -211,9 +209,6 @@ async function createSession(
     demo: "copilot",
     source: "managed-agents-examples",
   };
-  if (config.hardTTLSeconds) {
-    metadata["sandbox0.managed_agents.hard_ttl_seconds"] = config.hardTTLSeconds;
-  }
 
   const session = await client.beta.sessions.create({
     agent: agentID,

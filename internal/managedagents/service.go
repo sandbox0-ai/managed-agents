@@ -266,8 +266,10 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 			if runtime.ActiveRunID != nil {
 				return nil, errors.New("vault_ids cannot be updated while a run is active")
 			}
-			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
-				return nil, err
+			if strings.TrimSpace(runtime.SandboxID) != "" {
+				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+					return nil, err
+				}
 			}
 		} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
 			return nil, runtimeErr
@@ -311,8 +313,10 @@ func (s *Service) deleteSessionLocked(ctx context.Context, principal Principal, 
 		return nil, err
 	}
 	if runtime != nil {
-		if err := s.runtime.DeleteWrapperSession(ctx, credential, runtime, sessionID); err != nil {
-			s.logger.Warn("failed to delete wrapper session", zap.Error(err), zap.String("session_id", sessionID))
+		if strings.TrimSpace(runtime.SandboxID) != "" && strings.TrimSpace(runtime.WrapperURL) != "" {
+			if err := s.runtime.DeleteWrapperSession(ctx, credential, runtime, sessionID); err != nil {
+				s.logger.Warn("failed to delete wrapper session", zap.Error(err), zap.String("session_id", sessionID))
+			}
 		}
 		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
 			s.logger.Warn("failed to destroy runtime", zap.Error(err), zap.String("session_id", sessionID))
@@ -406,6 +410,13 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	}
 	if err := s.repo.AppendEvents(ctx, sessionID, stampedEvents); err != nil {
 		return nil, err
+	}
+	if runtime != nil && runtime.ActiveRunID != nil && strings.TrimSpace(runtime.SandboxID) == "" &&
+		(containsInterruptEvent(stampedEvents) || (len(requiredActionIDs) > 0 && containsOnlyActionResolutionEvents(stampedEvents))) {
+		runtime, err = s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if runtime != nil && containsInterruptEvent(stampedEvents) && runtime.ActiveRunID != nil {
 		if err := s.runtime.InterruptRun(ctx, credential, runtime, *runtime.ActiveRunID); err != nil {

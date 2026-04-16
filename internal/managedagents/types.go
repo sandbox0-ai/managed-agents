@@ -331,6 +331,7 @@ type RuntimeRecord struct {
 	VendorSessionID   string
 	RuntimeGeneration int64
 	ActiveRunID       *string
+	SandboxDeletedAt  *time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

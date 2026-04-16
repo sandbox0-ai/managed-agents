@@ -601,13 +601,13 @@ func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
 func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
 	err := r.db(ctx).QueryRow(ctx, `
-		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id,
-			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
+		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
+			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE session_id = $1
 	`, strings.TrimSpace(sessionID)).Scan(
 		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.CreatedAt, &runtime.UpdatedAt,
+		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -621,13 +621,13 @@ func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*Runtime
 func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
 	err := r.db(ctx).QueryRow(ctx, `
-		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id,
-			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
+		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
+			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE sandbox_id = $1
 	`, strings.TrimSpace(sandboxID)).Scan(
 		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.CreatedAt, &runtime.UpdatedAt,
+		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -638,13 +638,80 @@ func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string
 	return &runtime, nil
 }
 
+func (r *Repository) ListRunningRuntimes(ctx context.Context, limit int) ([]*RuntimeRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.db(ctx).Query(ctx, `
+		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+		FROM managed_agent_session_runtimes r
+		JOIN managed_agent_sessions s ON s.id = r.session_id
+		WHERE s.deleted_at IS NULL
+			AND s.status = 'running'
+			AND r.sandbox_id IS NOT NULL
+			AND r.sandbox_id <> ''
+		ORDER BY s.updated_at ASC, r.session_id ASC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list running managed-agent runtimes: %w", err)
+	}
+	defer rows.Close()
+	return scanRuntimeRows(rows)
+}
+
+func (r *Repository) ListIdleRuntimesForSandboxDeletion(ctx context.Context, cutoff time.Time, limit int) ([]*RuntimeRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.db(ctx).Query(ctx, `
+		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+		FROM managed_agent_session_runtimes r
+		JOIN managed_agent_sessions s ON s.id = r.session_id
+		WHERE s.deleted_at IS NULL
+			AND s.status IN ('idle', 'terminated')
+			AND s.updated_at < $1
+			AND r.sandbox_id IS NOT NULL
+			AND r.sandbox_id <> ''
+		ORDER BY s.updated_at ASC, r.session_id ASC
+		LIMIT $2
+	`, cutoff.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list idle managed-agent runtimes for sandbox deletion: %w", err)
+	}
+	defer rows.Close()
+	return scanRuntimeRows(rows)
+}
+
+func (r *Repository) MarkRuntimeSandboxDeleted(ctx context.Context, sessionID, sandboxID string, deletedAt time.Time) error {
+	result, err := r.db(ctx).Exec(ctx, `
+		UPDATE managed_agent_session_runtimes
+		SET sandbox_id = NULL,
+			wrapper_url = '',
+			callback_token = '',
+			sandbox_deleted_at = $3,
+			updated_at = $3
+		WHERE session_id = $1
+			AND sandbox_id = $2
+	`, strings.TrimSpace(sessionID), strings.TrimSpace(sandboxID), deletedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("mark managed-agent runtime sandbox deleted: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrRuntimeNotFound
+	}
+	return nil
+}
+
 func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) error {
 	_, err := r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_runtimes (
 			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id,
-			callback_token, vendor_session_id, runtime_generation, active_run_id, created_at, updated_at
+			callback_token, vendor_session_id, runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (session_id) DO UPDATE SET
 			vendor = EXCLUDED.vendor,
 			region_id = EXCLUDED.region_id,
@@ -655,13 +722,32 @@ func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) 
 			vendor_session_id = EXCLUDED.vendor_session_id,
 			runtime_generation = EXCLUDED.runtime_generation,
 			active_run_id = EXCLUDED.active_run_id,
+			sandbox_deleted_at = EXCLUDED.sandbox_deleted_at,
 			updated_at = EXCLUDED.updated_at
-	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, runtime.SandboxID, runtime.WrapperURL, runtime.WorkspaceVolumeID,
-		runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.CreatedAt, runtime.UpdatedAt)
+	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, nullableString(runtime.SandboxID), runtime.WrapperURL, runtime.WorkspaceVolumeID,
+		runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.SandboxDeletedAt, runtime.CreatedAt, runtime.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert managed-agent runtime: %w", err)
 	}
 	return nil
+}
+
+func scanRuntimeRows(rows pgx.Rows) ([]*RuntimeRecord, error) {
+	var runtimes []*RuntimeRecord
+	for rows.Next() {
+		var runtime RuntimeRecord
+		if err := rows.Scan(
+			&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
+			&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan managed-agent runtime: %w", err)
+		}
+		runtimes = append(runtimes, &runtime)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate managed-agent runtimes: %w", err)
+	}
+	return runtimes, nil
 }
 
 func (r *Repository) CreateRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) (bool, error) {
