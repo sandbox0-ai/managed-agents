@@ -173,63 +173,65 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	}
 	lockStarted := time.Now()
 	if err := s.repo.WithSessionLock(ctx, record.ID, func(ctx context.Context) error {
-		op.ObservePhase("acquire_session_lock", time.Since(lockStarted), nil,
-			zap.String("session_id", record.ID),
-		)
-		phaseStarted := time.Now()
-		if err := s.repo.CreateSession(ctx, record, nil); err != nil {
-			op.ObservePhase("create_session_record", time.Since(phaseStarted), err,
+		return s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+			op.ObservePhase("acquire_session_lock", time.Since(lockStarted), nil,
 				zap.String("session_id", record.ID),
 			)
-			return err
-		}
-		op.ObservePhase("create_session_record", time.Since(phaseStarted), nil,
-			zap.String("session_id", record.ID),
-		)
-		phaseStarted = time.Now()
-		for resourceID, secret := range resourceSecrets {
-			if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
-				op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), err,
+			phaseStarted := time.Now()
+			if err := s.repo.CreateSession(ctx, record, nil); err != nil {
+				op.ObservePhase("create_session_record", time.Since(phaseStarted), err,
 					zap.String("session_id", record.ID),
-					zap.Int("resource_secret_count", len(resourceSecrets)),
 				)
 				return err
 			}
-		}
-		op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), nil,
-			zap.String("session_id", record.ID),
-			zap.Int("resource_secret_count", len(resourceSecrets)),
-		)
-		phaseStarted = time.Now()
-		runtime, runtimeErr := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
-		if runtimeErr != nil {
-			op.ObservePhase("ensure_runtime", time.Since(phaseStarted), runtimeErr,
+			op.ObservePhase("create_session_record", time.Since(phaseStarted), nil,
 				zap.String("session_id", record.ID),
 			)
-			s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-			return runtimeErr
-		}
-		op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
-			zap.String("session_id", record.ID),
-			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-		)
-		if runtime != nil {
 			phaseStarted = time.Now()
-			if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
-				op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
+			for resourceID, secret := range resourceSecrets {
+				if err := s.repo.UpsertSessionResourceSecret(ctx, record.ID, resourceID, secret); err != nil {
+					op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), err,
+						zap.String("session_id", record.ID),
+						zap.Int("resource_secret_count", len(resourceSecrets)),
+					)
+					return err
+				}
+			}
+			op.ObservePhase("persist_resource_secrets", time.Since(phaseStarted), nil,
+				zap.String("session_id", record.ID),
+				zap.Int("resource_secret_count", len(resourceSecrets)),
+			)
+			phaseStarted = time.Now()
+			runtime, runtimeErr := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
+			if runtimeErr != nil {
+				op.ObservePhase("ensure_runtime", time.Since(phaseStarted), runtimeErr,
 					zap.String("session_id", record.ID),
-					zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 				)
 				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-				return err
+				return runtimeErr
 			}
-			op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
+			op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
 				zap.String("session_id", record.ID),
 				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 			)
-		}
-		created = record.toAPI(now)
-		return nil
+			if runtime != nil {
+				phaseStarted = time.Now()
+				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+					op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
+						zap.String("session_id", record.ID),
+						zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+					)
+					s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
+					return err
+				}
+				op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
+					zap.String("session_id", record.ID),
+					zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+				)
+			}
+			created = record.toAPI(now)
+			return nil
+		})
 	}); err != nil {
 		return nil, err
 	}
