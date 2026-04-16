@@ -121,7 +121,7 @@ jobs:
           - image_name: agent-wrapper-claude
             tag_prefix: wrapper-
             latest_tag: wrapper-latest
-            dockerfile: ./agent-wrapper/Dockerfile.claude
+            dockerfile: ./agent-wrapper/Dockerfile.wrapper
             context: ./agent-wrapper
             target: ""
             needs_sdk_go: false
