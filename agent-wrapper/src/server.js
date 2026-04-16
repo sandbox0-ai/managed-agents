@@ -5,6 +5,7 @@ import { ProcdWebhookClient } from './runtime/callbacks.js';
 import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
 import { createDefaultRuntime, finalStatusEventForSessionError, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
+import { agentWrapperStateDir } from './adapters/runtime.js';
 import { logError, logInfo, summarizePendingActions, safeErrorMessage } from './lib/log.js';
 
 function sessionPathname(pathname) {
@@ -31,7 +32,7 @@ function authorized(req, token) {
 }
 
 export function createServer({
-  stateDir = process.env.AGENT_WRAPPER_STATE_DIR ?? '/var/lib/agent-wrapper',
+  stateDir = agentWrapperStateDir(),
   runtime = createDefaultRuntime(),
   callbackClient = new ProcdWebhookClient(),
 } = {}) {

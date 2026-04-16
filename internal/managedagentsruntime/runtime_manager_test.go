@@ -21,6 +21,12 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.WrapperPort != 8080 {
 		t.Fatalf("WrapperPort = %d, want 8080", cfg.WrapperPort)
 	}
+	if cfg.WorkspaceMountPath != "/workspace" {
+		t.Fatalf("WorkspaceMountPath = %q, want /workspace", cfg.WorkspaceMountPath)
+	}
+	if cfg.EngineStateMountPath != "/workspace/.sandbox0/agent-wrapper" {
+		t.Fatalf("EngineStateMountPath = %q, want workspace state directory", cfg.EngineStateMountPath)
+	}
 	if cfg.TemplateMainImage == "" {
 		t.Fatal("TemplateMainImage should not be empty")
 	}
@@ -29,6 +35,49 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
 		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
+	}
+}
+
+func TestConfigWithDefaultsKeepsEngineStateInsideWorkspace(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		state     string
+		want      string
+	}{
+		{
+			name:      "legacy path moves under default workspace",
+			workspace: "/workspace",
+			state:     "/var/lib/agent-wrapper",
+			want:      "/workspace/.sandbox0/agent-wrapper",
+		},
+		{
+			name:      "empty path uses custom workspace",
+			workspace: "/home/agent/work",
+			state:     "",
+			want:      "/home/agent/work/.sandbox0/agent-wrapper",
+		},
+		{
+			name:      "custom workspace child is preserved",
+			workspace: "/workspace",
+			state:     "/workspace/.agent-state",
+			want:      "/workspace/.agent-state",
+		},
+		{
+			name:      "workspace root is replaced with state subdir",
+			workspace: "/workspace",
+			state:     "/workspace",
+			want:      "/workspace/.sandbox0/agent-wrapper",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := (Config{WorkspaceMountPath: tt.workspace, EngineStateMountPath: tt.state}).WithDefaults(0)
+			if cfg.EngineStateMountPath != tt.want {
+				t.Fatalf("EngineStateMountPath = %q, want %q", cfg.EngineStateMountPath, tt.want)
+			}
+		})
 	}
 }
 

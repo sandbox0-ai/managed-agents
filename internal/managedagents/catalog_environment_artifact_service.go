@@ -3,7 +3,10 @@ package managedagents
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func (s *Service) ensureEnvironmentArtifactRecord(ctx context.Context, teamID string, environment *Environment) (*EnvironmentArtifact, error) {
@@ -51,4 +54,39 @@ func ensureEnvironmentUsable(environment *Environment) error {
 		return errors.New("archived environments cannot create new sessions")
 	}
 	return nil
+}
+
+func (s *Service) prebuildEnvironmentArtifact(ctx context.Context, credential RequestCredential, teamID string, environment *Environment, artifact *EnvironmentArtifact) {
+	prebuilder, ok := s.runtime.(EnvironmentArtifactPrebuilder)
+	if !ok || prebuilder == nil || environment == nil || artifact == nil {
+		return
+	}
+	switch strings.TrimSpace(artifact.Status) {
+	case EnvironmentArtifactStatusPending, EnvironmentArtifactStatusFailed:
+	default:
+		return
+	}
+	environmentSnapshot := cloneEnvironmentForPrebuild(environment)
+	environmentID := environment.ID
+	artifactID := artifact.ID
+	prebuildCtx := context.WithoutCancel(ctx)
+	go func() {
+		if err := prebuilder.PrebuildEnvironmentArtifact(prebuildCtx, credential, teamID, environmentSnapshot); err != nil {
+			s.logger.Warn("prebuild environment artifact failed", zap.Error(err), zap.String("team_id", teamID), zap.String("environment_id", environmentID), zap.String("artifact_id", artifactID))
+		}
+	}()
+}
+
+func cloneEnvironmentForPrebuild(environment *Environment) *Environment {
+	if environment == nil {
+		return nil
+	}
+	clone := *environment
+	clone.Metadata = cloneStringMap(environment.Metadata)
+	clone.Config = environmentConfigFromMap(environmentConfigToMap(environment.Config))
+	if environment.ArchivedAt != nil {
+		archivedAt := *environment.ArchivedAt
+		clone.ArchivedAt = &archivedAt
+	}
+	return &clone
 }

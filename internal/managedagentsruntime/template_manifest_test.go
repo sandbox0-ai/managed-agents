@@ -50,6 +50,9 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if envVars["PORT"] != "8080" {
 		t.Fatalf("WarmProcesses[0].EnvVars[PORT] = %q, want 8080", envVars["PORT"])
 	}
+	if envVars["AGENT_WRAPPER_STATE_DIR"] != "/workspace/.sandbox0/agent-wrapper" {
+		t.Fatalf("WarmProcesses[0].EnvVars[AGENT_WRAPPER_STATE_DIR] = %q, want workspace state directory", envVars["AGENT_WRAPPER_STATE_DIR"])
+	}
 	if _, ok := envVars["PATH"]; ok {
 		t.Fatal("WarmProcesses[0].EnvVars should inherit PATH from the image")
 	}
