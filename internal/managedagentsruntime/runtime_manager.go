@@ -483,7 +483,11 @@ func (m *SDKRuntimeManager) RefreshRuntimeTTL(ctx context.Context, credential ga
 		return err
 	}
 	if err := m.configureRuntimeSandboxLifecycleWithClient(ctx, client, runtime); err != nil {
-		return err
+		m.logger.Warn("configure runtime sandbox lifecycle before ttl refresh failed",
+			zap.Error(err),
+			zap.String("session_id", runtimeSessionID(runtime)),
+			zap.String("sandbox_id", runtimeSandboxID(runtime)),
+		)
 	}
 	_, err = client.RefreshSandbox(ctx, runtime.SandboxID, &apispec.SandboxRefreshRequest{
 		Duration: apispec.NewOptInt32(int32(m.sandboxTTLSeconds())),
