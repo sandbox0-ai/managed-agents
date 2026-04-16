@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -17,9 +19,7 @@ ENV LANG=C.UTF-8 \
 	LC_ALL=C.UTF-8 \
 	CARGO_HOME=/usr/local/cargo \
 	RUSTUP_HOME=/usr/local/rustup \
-	PATH=/usr/local/go/bin:/usr/local/cargo/bin:/opt/gradle/bin:${PATH} \
-	AGENT_WRAPPER_DEFAULT_VENDOR=claude \
-	NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt
+	PATH=/usr/local/go/bin:/usr/local/cargo/bin:/opt/gradle/bin:${PATH}
 
 RUN sed -i \
 		-e "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
@@ -133,11 +133,3 @@ RUN sed -i \
 	&& unzip -q /tmp/gradle.zip -d /opt/gradle \
 	&& ln -sf "/opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
 	&& rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache /root/.npm
-
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
-COPY src ./src
-
-EXPOSE 8080
-CMD ["node", "src/index.js"]

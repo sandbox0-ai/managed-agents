@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+
+ARG WRAPPER_BASE_IMAGE=sandbox0ai/managed-agents:wrapper-base-latest
+
+FROM ${WRAPPER_BASE_IMAGE}
+
+ENV AGENT_WRAPPER_DEFAULT_VENDOR=claude \
+	NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt
+
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev \
+	&& npm cache clean --force
+COPY src ./src
+
+EXPOSE 8080
+CMD ["node", "src/index.js"]
