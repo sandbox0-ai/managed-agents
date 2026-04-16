@@ -204,8 +204,8 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	claimOpts := []sandbox0sdk.SandboxOption{
 		sandbox0sdk.WithSandboxBootstrapMount(resources.workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
 		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
-		sandbox0sdk.WithSandboxTTL(int32(m.cfg.SandboxTTLSeconds)),
-		sandbox0sdk.WithSandboxHardTTL(int32(m.cfg.SandboxHardTTLSeconds)),
+		sandbox0sdk.WithSandboxTTL(0),
+		sandbox0sdk.WithSandboxHardTTL(0),
 		sandbox0sdk.WithSandboxNetworkPolicy(builderNetworkPolicy(environment)),
 	}
 	for _, manager := range stepManagers(steps) {

@@ -12,10 +12,6 @@ import (
 
 func TestConfigWithDefaults(t *testing.T) {
 	cfg := (Config{}).WithDefaults(8443)
-	wantDefaultHardTTLSeconds := int((24 * time.Hour) / time.Second)
-	if DefaultSandboxHardTTLSeconds != wantDefaultHardTTLSeconds {
-		t.Fatalf("DefaultSandboxHardTTLSeconds = %d, want %d", DefaultSandboxHardTTLSeconds, wantDefaultHardTTLSeconds)
-	}
 	if cfg.TemplateID != "managed-agents" {
 		t.Fatalf("TemplateID = %q", cfg.TemplateID)
 	}
@@ -33,9 +29,6 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 	if cfg.SandboxTTLSeconds != DefaultSandboxTTLSeconds {
 		t.Fatalf("SandboxTTLSeconds = %d, want %d", cfg.SandboxTTLSeconds, DefaultSandboxTTLSeconds)
-	}
-	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
-		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
 	}
 }
 
@@ -71,60 +64,15 @@ func TestRuntimeStateMountPathUsesWorkspace(t *testing.T) {
 	}
 }
 
-func TestConfigWithDefaultsLeavesHardTTLConfigurable(t *testing.T) {
-	cfg := (Config{SandboxTTLSeconds: 90000, SandboxHardTTLSeconds: 90000}).WithDefaults(0)
-	if cfg.SandboxHardTTLSeconds != 90000 {
-		t.Fatalf("SandboxHardTTLSeconds = %d, want 90000", cfg.SandboxHardTTLSeconds)
-	}
-	if cfg.SandboxTTLSeconds != 90000 {
-		t.Fatalf("SandboxTTLSeconds = %d, want 90000", cfg.SandboxTTLSeconds)
+func TestSandboxTTLSecondsUsesRuntimeDefault(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{}}
+	if got := mgr.sandboxTTLSeconds(); got != DefaultSandboxTTLSeconds {
+		t.Fatalf("sandboxTTLSeconds = %d, want %d", got, DefaultSandboxTTLSeconds)
 	}
 
-	cfg = (Config{SandboxTTLSeconds: 90000, SandboxHardTTLSeconds: 60}).WithDefaults(0)
-	if cfg.SandboxTTLSeconds != 60 {
-		t.Fatalf("SandboxTTLSeconds = %d, want 60", cfg.SandboxTTLSeconds)
-	}
-}
-
-func TestSandboxTTLsForSessionUsesMetadataHardTTL(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600, SandboxHardTTLSeconds: 0}}
-	ttl, hardTTL, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
-		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "900"},
-	})
-	if err != nil {
-		t.Fatalf("sandboxTTLsForSession: %v", err)
-	}
-	if ttl != 900 {
-		t.Fatalf("ttl = %d, want 900", ttl)
-	}
-	if hardTTL != 900 {
-		t.Fatalf("hardTTL = %d, want 900", hardTTL)
-	}
-}
-
-func TestSandboxTTLsForSessionMetadataZeroOverridesConfiguredHardTTL(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600, SandboxHardTTLSeconds: 86400}}
-	ttl, hardTTL, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
-		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "0"},
-	})
-	if err != nil {
-		t.Fatalf("sandboxTTLsForSession: %v", err)
-	}
-	if ttl != 3600 {
-		t.Fatalf("ttl = %d, want 3600", ttl)
-	}
-	if hardTTL != 0 {
-		t.Fatalf("hardTTL = %d, want 0", hardTTL)
-	}
-}
-
-func TestSandboxTTLsForSessionRejectsInvalidMetadataHardTTL(t *testing.T) {
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxTTLSeconds: 3600}}
-	_, _, err := mgr.sandboxTTLsForSession(&gatewaymanagedagents.SessionRecord{
-		Metadata: map[string]string{gatewaymanagedagents.ManagedAgentsSessionHardTTLSecondsKey: "forever"},
-	})
-	if err == nil {
-		t.Fatal("sandboxTTLsForSession error = nil, want invalid hard_ttl rejection")
+	mgr.cfg.SandboxTTLSeconds = 60
+	if got := mgr.sandboxTTLSeconds(); got != 60 {
+		t.Fatalf("sandboxTTLSeconds = %d, want 60", got)
 	}
 }
 

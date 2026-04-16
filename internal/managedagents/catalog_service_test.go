@@ -667,7 +667,7 @@ func TestCreateSessionRejectsEmptyVaultID(t *testing.T) {
 	}
 }
 
-func TestCreateSessionRejectsInvalidHardTTLMetadata(t *testing.T) {
+func TestCreateSessionRejectsLegacyHardTTLMetadata(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{}
 	service := NewService(repo, runtime, nil)
@@ -688,11 +688,11 @@ func TestCreateSessionRejectsInvalidHardTTLMetadata(t *testing.T) {
 		Agent:         "agent_123",
 		EnvironmentID: environment.ID,
 		Metadata: map[string]string{
-			ManagedAgentsSessionHardTTLSecondsKey: "-1",
+			ManagedAgentsMetadataPrefix + "hard_ttl_seconds": "3600",
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), ManagedAgentsSessionHardTTLSecondsKey) {
-		t.Fatalf("CreateSession error = %v, want hard_ttl metadata rejection", err)
+	if err == nil || !strings.Contains(err.Error(), ManagedAgentsMetadataPrefix+"hard_ttl_seconds") {
+		t.Fatalf("CreateSession error = %v, want legacy hard TTL metadata rejection", err)
 	}
 	if len(runtime.ensureCalls) != 0 {
 		t.Fatalf("EnsureRuntime calls = %d, want 0", len(runtime.ensureCalls))
@@ -1407,7 +1407,7 @@ func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 	}
 }
 
-func TestUpdateSessionRejectsHardTTLMetadataChange(t *testing.T) {
+func TestUpdateSessionRejectsLegacyHardTTLMetadata(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	principal := Principal{TeamID: "team_123"}
@@ -1426,27 +1426,18 @@ func TestUpdateSessionRejectsHardTTLMetadataChange(t *testing.T) {
 	session, err := createTestSession(ctx, service, principal, CreateSessionParams{
 		Agent:         "agent_123",
 		EnvironmentID: environment.ID,
-		Metadata: map[string]string{
-			ManagedAgentsSessionHardTTLSecondsKey: "3600",
-		},
 	})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	newValue := "0"
+	key := ManagedAgentsMetadataPrefix + "hard_ttl_seconds"
+	newValue := "3600"
 	_, err = service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
-		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{ManagedAgentsSessionHardTTLSecondsKey: &newValue}},
+		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{key: &newValue}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot be changed") {
-		t.Fatalf("UpdateSession error = %v, want immutable hard_ttl rejection", err)
-	}
-	stored, _, err := repo.GetSession(ctx, session.ID)
-	if err != nil {
-		t.Fatalf("GetSession: %v", err)
-	}
-	if got := stored.Metadata[ManagedAgentsSessionHardTTLSecondsKey]; got != "3600" {
-		t.Fatalf("stored hard_ttl metadata = %q, want 3600", got)
+	if err == nil || !strings.Contains(err.Error(), key) {
+		t.Fatalf("UpdateSession error = %v, want legacy hard TTL metadata rejection", err)
 	}
 }
 

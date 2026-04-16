@@ -117,11 +117,6 @@ const session = await client.beta.sessions.create({
   agent: agent.id,
   environment_id: environment.id,
   title: `Sandbox0 SDK demo ${suffix}`,
-  metadata: {
-    // Optional hard TTL. Managed Agents disables soft TTL; this defaults to 86400 seconds.
-    // Set this to "0" only if the session should have no hard cost cap.
-    'sandbox0.managed_agents.hard_ttl_seconds': '86400',
-  },
   vault_ids: [llmVault.id],
 });
 

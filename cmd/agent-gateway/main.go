@@ -42,7 +42,6 @@ type config struct {
 	WrapperPort            int
 	WorkspaceMountPath     string
 	SandboxTTLSeconds      int
-	SandboxHardTTLSeconds  int
 }
 
 const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
@@ -98,7 +97,6 @@ func main() {
 		WrapperPort:            cfg.WrapperPort,
 		WorkspaceMountPath:     cfg.WorkspaceMountPath,
 		SandboxTTLSeconds:      cfg.SandboxTTLSeconds,
-		SandboxHardTTLSeconds:  cfg.SandboxHardTTLSeconds,
 		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
 		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
@@ -110,6 +108,7 @@ func main() {
 		logger.Fatal("create runtime manager", zap.Error(err))
 	}
 	runtimeManager.StartManagedTemplateSync(ctx)
+	runtimeManager.StartRuntimeLifecycleWorker(ctx)
 	serviceOpts = append(serviceOpts, managedagents.WithFileStore(managedagentsruntime.NewVolumeFileStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout)))
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	service.StartRuntimeWebhookWorker(ctx)
@@ -182,7 +181,6 @@ func loadConfig() (config, error) {
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
 		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
-		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", managedagentsruntime.DefaultSandboxHardTTLSeconds),
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")

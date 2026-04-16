@@ -53,8 +53,7 @@ agentGateway:
     claudeTemplate: ""
     wrapperPort: 8080
     workspaceMountPath: /workspace
-    sandboxTTLSeconds: 0
-    sandboxHardTTLSeconds: 3600
+    sandboxTTLSeconds: 180
     templateManifestPath: ""
     templateMainImage: sandbox0ai/managed-agents:wrapper-latest
   extraEnv: []
