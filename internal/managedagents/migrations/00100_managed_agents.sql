@@ -132,7 +132,6 @@ CREATE TABLE IF NOT EXISTS managed_agent_session_runtimes (
     region_id TEXT NOT NULL,
     sandbox_id TEXT NOT NULL,
     workspace_volume_id TEXT NOT NULL,
-    engine_state_volume_id TEXT NOT NULL,
     callback_token TEXT NOT NULL,
     vendor_session_id TEXT,
     runtime_generation BIGINT NOT NULL DEFAULT 1,

@@ -1,9 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
 import {
   AgentRuntime,
+  agentWrapperStateDir,
   finalStatusEventForSessionError,
   providerErrorEventForText,
   runtimeEnvForEngine,
@@ -20,6 +23,15 @@ export {
   runtimeModelForSession,
   sessionErrorEventForError,
 };
+
+export function runtimeEnvForClaudeEngine(engine) {
+  const env = runtimeEnvForEngine(engine);
+  if (!env.CLAUDE_CONFIG_DIR) {
+    env.CLAUDE_CONFIG_DIR = path.join(agentWrapperStateDir(env), 'claude');
+  }
+  fs.mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true });
+  return env;
+}
 
 export function querySkillNames(session) {
   if (!Array.isArray(session?.skill_names)) {
@@ -239,7 +251,7 @@ export class ClaudeRuntime extends AgentRuntime {
       tools: toolPlan.builtinSDKTools,
       settings: engine.settings,
       extraArgs: engine.extra_args,
-      env: runtimeEnvForEngine(engine),
+      env: runtimeEnvForClaudeEngine(engine),
       persistSession: true,
       canUseTool: async (toolName, input, options) => this.#handlePermissionRequest(
         session,

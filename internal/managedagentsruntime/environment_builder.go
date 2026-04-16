@@ -2,6 +2,7 @@ package managedagentsruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,9 +14,8 @@ import (
 )
 
 type environmentBuildResources struct {
-	workspaceVolumeID   string
-	engineStateVolumeID string
-	managerVolumeIDs    map[string]string
+	workspaceVolumeID string
+	managerVolumeIDs  map[string]string
 }
 
 const environmentBuildCleanupTimeout = 2 * time.Minute
@@ -26,6 +26,46 @@ func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context,
 		return nil, err
 	}
 	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest, templateClient)
+}
+
+func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) error {
+	if !m.cfg.Enabled || environment == nil {
+		return nil
+	}
+	if m.repo == nil {
+		return errors.New("managed-agent repository is required")
+	}
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return errors.New("team id is required")
+	}
+	buildCredential := credential
+	if strings.TrimSpace(buildCredential.Token) == "" {
+		buildCredential.Token = strings.TrimSpace(m.cfg.SandboxAdminAPIKey)
+	}
+	if strings.TrimSpace(buildCredential.Token) == "" {
+		return nil
+	}
+	templateClient, err := m.templateClient(ctx, buildCredential, teamID)
+	if err != nil {
+		return err
+	}
+	templateRequest, err := m.templateRequestForEnvironment(environment)
+	if err != nil {
+		return fmt.Errorf("prepare environment template: %w", err)
+	}
+	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
+		return fmt.Errorf("ensure managed template: %w", err)
+	}
+	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, &gatewaymanagedagents.SessionRecord{
+		TeamID:        teamID,
+		EnvironmentID: environment.ID,
+	}, environment)
+	if err != nil {
+		return fmt.Errorf("resolve environment artifact: %w", err)
+	}
+	_, err = m.ensureEnvironmentArtifactReady(ctx, buildCredential, artifact, environment, templateRequest, templateClient)
+	return err
 }
 
 func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifact, error) {
@@ -163,7 +203,6 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 
 	claimOpts := []sandbox0sdk.SandboxOption{
 		sandbox0sdk.WithSandboxBootstrapMount(resources.workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
-		sandbox0sdk.WithSandboxBootstrapMount(resources.engineStateVolumeID, m.cfg.EngineStateMountPath, nil),
 		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
 		sandbox0sdk.WithSandboxTTL(int32(m.cfg.SandboxTTLSeconds)),
 		sandbox0sdk.WithSandboxHardTTL(int32(m.cfg.SandboxHardTTLSeconds)),
@@ -211,15 +250,9 @@ func (m *SDKRuntimeManager) createEnvironmentBuildResources(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("create builder workspace volume: %w", err)
 	}
-	engineState, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
-	if err != nil {
-		_, _ = client.DeleteVolumeWithOptions(ctx, workspace.ID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
-		return nil, fmt.Errorf("create builder engine-state volume: %w", err)
-	}
 	resources := &environmentBuildResources{
-		workspaceVolumeID:   workspace.ID,
-		engineStateVolumeID: engineState.ID,
-		managerVolumeIDs:    make(map[string]string, len(managers)),
+		workspaceVolumeID: workspace.ID,
+		managerVolumeIDs:  make(map[string]string, len(managers)),
 	}
 	for _, manager := range managers {
 		volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
@@ -245,10 +278,7 @@ func (m *SDKRuntimeManager) cleanupEnvironmentBuildResources(ctx context.Context
 	if resources == nil {
 		return
 	}
-	for _, volumeID := range append([]string{resources.workspaceVolumeID, resources.engineStateVolumeID}, mapValues(resources.managerVolumeIDs)...) {
-		if strings.TrimSpace(volumeID) == "" {
-			continue
-		}
+	for _, volumeID := range uniqueVolumeIDs(append([]string{resources.workspaceVolumeID}, mapValues(resources.managerVolumeIDs)...)...) {
 		if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
 			m.logger.Warn("delete environment builder volume failed", zap.Error(err), zap.String("volume_id", volumeID))
 		}

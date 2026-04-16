@@ -601,12 +601,12 @@ func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
 func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
 	err := r.db(ctx).QueryRow(ctx, `
-		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id, engine_state_volume_id,
+		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id,
 			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE session_id = $1
 	`, strings.TrimSpace(sessionID)).Scan(
-		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID, &runtime.EngineStateVolumeID,
+		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
 		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.CreatedAt, &runtime.UpdatedAt,
 	)
 	if err != nil {
@@ -621,12 +621,12 @@ func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*Runtime
 func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string) (*RuntimeRecord, error) {
 	var runtime RuntimeRecord
 	err := r.db(ctx).QueryRow(ctx, `
-		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id, engine_state_volume_id,
+		SELECT session_id, vendor, region_id, sandbox_id, COALESCE(wrapper_url, ''), workspace_volume_id,
 			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE sandbox_id = $1
 	`, strings.TrimSpace(sandboxID)).Scan(
-		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID, &runtime.EngineStateVolumeID,
+		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
 		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.CreatedAt, &runtime.UpdatedAt,
 	)
 	if err != nil {
@@ -641,23 +641,22 @@ func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string
 func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) error {
 	_, err := r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_runtimes (
-			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id, engine_state_volume_id,
+			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id,
 			callback_token, vendor_session_id, runtime_generation, active_run_id, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (session_id) DO UPDATE SET
 			vendor = EXCLUDED.vendor,
 			region_id = EXCLUDED.region_id,
 			sandbox_id = EXCLUDED.sandbox_id,
 			wrapper_url = EXCLUDED.wrapper_url,
 			workspace_volume_id = EXCLUDED.workspace_volume_id,
-			engine_state_volume_id = EXCLUDED.engine_state_volume_id,
 			callback_token = EXCLUDED.callback_token,
 			vendor_session_id = EXCLUDED.vendor_session_id,
 			runtime_generation = EXCLUDED.runtime_generation,
 			active_run_id = EXCLUDED.active_run_id,
 			updated_at = EXCLUDED.updated_at
-	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, runtime.SandboxID, runtime.WrapperURL, runtime.WorkspaceVolumeID, runtime.EngineStateVolumeID,
+	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, runtime.SandboxID, runtime.WrapperURL, runtime.WorkspaceVolumeID,
 		runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.CreatedAt, runtime.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert managed-agent runtime: %w", err)

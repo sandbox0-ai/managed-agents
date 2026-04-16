@@ -749,14 +749,13 @@ func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
 func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
 	}, pauseCh: make(chan *RuntimeRecord, 1)}
 	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(0))
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
@@ -862,14 +861,13 @@ func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
 	}, pauseCh: make(chan *RuntimeRecord, 1)}
 	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(100*time.Millisecond))
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
@@ -895,18 +893,17 @@ func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
 	}
 	activeRunID := "srun_active"
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -949,14 +946,14 @@ func TestCreateEnvironmentRejectsDuplicateName(t *testing.T) {
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
-	first, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: "python"})
+	first, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{Name: "python"})
 	if err != nil {
 		t.Fatalf("CreateEnvironment first: %v", err)
 	}
 	if first == nil {
 		t.Fatal("expected first environment")
 	}
-	_, err = service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: " python "})
+	_, err = service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{Name: " python "})
 	if err == nil || !strings.Contains(err.Error(), "environment already exists") {
 		t.Fatalf("CreateEnvironment duplicate error = %v, want conflict", err)
 	}
@@ -969,7 +966,7 @@ func TestCreateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
 	ctx := context.Background()
 
 	key := ManagedAgentsMetadataPrefix + "future_environment_key"
-	_, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+	_, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{
 		Name: "python",
 		Metadata: map[string]string{
 			key: "enabled",
@@ -986,7 +983,7 @@ func TestCreateEnvironmentAllowsCustomMetadata(t *testing.T) {
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
-	created, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+	created, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{
 		Name: "python",
 		Metadata: map[string]string{
 			"backend.llm_host": "https://llm.example.com",
@@ -1000,19 +997,72 @@ func TestCreateEnvironmentAllowsCustomMetadata(t *testing.T) {
 	}
 }
 
+func TestCreateAndUpdateEnvironmentStartArtifactPrebuild(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &prebuildRuntimeManager{calls: make(chan prebuildEnvironmentCall, 2)}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	created, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_create"}, CreateEnvironmentRequest{
+		Name: "python",
+		Config: map[string]any{
+			"type": "cloud",
+			"packages": map[string]any{
+				"type": "packages",
+				"pip":  []any{"ruff==0.9.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	createCall := waitPrebuildEnvironmentCall(t, runtime.calls)
+	if createCall.Credential.Token != "token_create" {
+		t.Fatalf("create prebuild credential = %#v", createCall.Credential)
+	}
+	if createCall.TeamID != principal.TeamID || createCall.EnvironmentID != created.ID {
+		t.Fatalf("create prebuild call = %#v", createCall)
+	}
+	if !reflect.DeepEqual(createCall.PipPackages, []string{"ruff==0.9.0"}) {
+		t.Fatalf("create prebuild pip packages = %#v", createCall.PipPackages)
+	}
+
+	updated, err := service.UpdateEnvironment(ctx, principal, RequestCredential{Token: "token_update"}, created.ID, UpdateEnvironmentRequest{
+		Config: map[string]any{
+			"packages": map[string]any{
+				"pip": []any{"ruff==0.10.0"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateEnvironment: %v", err)
+	}
+	updateCall := waitPrebuildEnvironmentCall(t, runtime.calls)
+	if updateCall.Credential.Token != "token_update" {
+		t.Fatalf("update prebuild credential = %#v", updateCall.Credential)
+	}
+	if updateCall.TeamID != principal.TeamID || updateCall.EnvironmentID != updated.ID {
+		t.Fatalf("update prebuild call = %#v", updateCall)
+	}
+	if !reflect.DeepEqual(updateCall.PipPackages, []string{"ruff==0.10.0"}) {
+		t.Fatalf("update prebuild pip packages = %#v", updateCall.PipPackages)
+	}
+}
+
 func TestUpdateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
-	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{Name: "python"})
+	environment, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{Name: "python"})
 	if err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 	value := "enabled"
 	key := ManagedAgentsMetadataPrefix + "future_environment_key"
-	_, err = service.UpdateEnvironment(ctx, principal, environment.ID, UpdateEnvironmentRequest{
+	_, err = service.UpdateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, environment.ID, UpdateEnvironmentRequest{
 		Metadata: MetadataPatchField{Set: true, Values: map[string]*string{key: &value}},
 	})
 	if err == nil || !strings.Contains(err.Error(), key) {
@@ -1026,7 +1076,7 @@ func TestCreateEnvironmentRoundTripsAllPackageFields(t *testing.T) {
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
-	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+	environment, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{
 		Name: "toolbox",
 		Config: map[string]any{
 			"type":       "cloud",
@@ -1077,7 +1127,7 @@ func TestEnvironmentLifecycleFlow(t *testing.T) {
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
-	created, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+	created, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{
 		Name: "python",
 		Config: map[string]any{
 			"type":       "cloud",
@@ -1108,7 +1158,7 @@ func TestEnvironmentLifecycleFlow(t *testing.T) {
 	}
 
 	name := "python tools"
-	updated, err := service.UpdateEnvironment(ctx, principal, created.ID, UpdateEnvironmentRequest{
+	updated, err := service.UpdateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, created.ID, UpdateEnvironmentRequest{
 		Name: &name,
 		Config: map[string]any{
 			"packages": map[string]any{
@@ -1169,7 +1219,7 @@ func TestEnvironmentUpdateOnlyAffectsNewSessionsAndReusesArtifactsForStableConfi
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	environment, err := service.CreateEnvironment(ctx, principal, CreateEnvironmentRequest{
+	environment, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, CreateEnvironmentRequest{
 		Name: "python",
 		Config: map[string]any{
 			"type":       "cloud",
@@ -1218,7 +1268,7 @@ func TestEnvironmentUpdateOnlyAffectsNewSessionsAndReusesArtifactsForStableConfi
 		t.Fatalf("artifact ids = %q and %q, want identical artifact reuse", storedFirst.EnvironmentArtifactID, storedSecond.EnvironmentArtifactID)
 	}
 
-	updated, err := service.UpdateEnvironment(ctx, principal, environment.ID, UpdateEnvironmentRequest{
+	updated, err := service.UpdateEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, environment.ID, UpdateEnvironmentRequest{
 		Config: map[string]any{
 			"packages": map[string]any{
 				"pip": []any{"ruff==0.10.0"},
@@ -1325,16 +1375,15 @@ func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -1405,17 +1454,16 @@ func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 	}
 	activeRunID := "srun_123"
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -1543,6 +1591,42 @@ type noopRuntimeManager struct{}
 
 func createTestSession(ctx context.Context, service *Service, principal Principal, params CreateSessionParams) (*Session, error) {
 	return service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, params, "http://gateway.test")
+}
+
+type prebuildEnvironmentCall struct {
+	Credential    RequestCredential
+	TeamID        string
+	EnvironmentID string
+	PipPackages   []string
+}
+
+type prebuildRuntimeManager struct {
+	noopRuntimeManager
+	calls chan prebuildEnvironmentCall
+}
+
+func (m *prebuildRuntimeManager) PrebuildEnvironmentArtifact(_ context.Context, credential RequestCredential, teamID string, environment *Environment) error {
+	call := prebuildEnvironmentCall{
+		Credential: credential,
+		TeamID:     teamID,
+	}
+	if environment != nil {
+		call.EnvironmentID = environment.ID
+		call.PipPackages = append([]string(nil), environment.Config.Packages.Pip...)
+	}
+	m.calls <- call
+	return nil
+}
+
+func waitPrebuildEnvironmentCall(t *testing.T, calls <-chan prebuildEnvironmentCall) prebuildEnvironmentCall {
+	t.Helper()
+	select {
+	case call := <-calls:
+		return call
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for environment artifact prebuild")
+		return prebuildEnvironmentCall{}
+	}
 }
 
 type ensureRuntimeCall struct {

@@ -43,8 +43,8 @@ func loadTemplateRequest(cfg Config) (*apispec.TemplateCreateRequest, error) {
 			return strconv.Itoa(cfg.WrapperPort)
 		case "MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH":
 			return strings.TrimSpace(cfg.WorkspaceMountPath)
-		case "MANAGED_AGENT_TEMPLATE_ENGINE_STATE_MOUNT_PATH":
-			return strings.TrimSpace(cfg.EngineStateMountPath)
+		case "MANAGED_AGENT_TEMPLATE_WORKSPACE_STATE_PATH":
+			return runtimeStateMountPath(cfg.WorkspaceMountPath)
 		default:
 			return os.Getenv(name)
 		}

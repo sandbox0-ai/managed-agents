@@ -6,7 +6,7 @@ import { newID } from '../lib/ids.js';
 import { logInfo, logWarn } from '../lib/log.js';
 import { buildToolPlan, resolveToolPolicy } from './claude.js';
 import { CodexAppServerClient } from './codex-app-server.js';
-import { AgentRuntime, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
+import { AgentRuntime, agentWrapperStateDir, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
 
 export class CodexRuntime extends AgentRuntime {
   constructor({ clientFactory } = {}) {
@@ -394,7 +394,7 @@ function codexClientOptions(session) {
   const engine = session.engine ?? {};
   const env = runtimeEnvForEngine(engine);
   if (!env.CODEX_HOME) {
-    env.CODEX_HOME = path.join(process.env.AGENT_WRAPPER_STATE_DIR ?? '/var/lib/agent-wrapper', 'codex');
+    env.CODEX_HOME = path.join(agentWrapperStateDir(env), 'codex');
   }
   fs.mkdirSync(env.CODEX_HOME, { recursive: true });
   return {

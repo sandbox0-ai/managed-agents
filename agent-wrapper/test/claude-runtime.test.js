@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   allowToolUseDecision,
   buildToolPlan,
@@ -9,6 +12,7 @@ import {
   providerErrorEventForText,
   querySkillNames,
   resolveToolPolicy,
+  runtimeEnvForClaudeEngine,
   runtimeEnvForEngine,
   runtimeModelForSession,
   sessionErrorEventForError,
@@ -171,6 +175,47 @@ test('runtimeEnvForEngine preserves base process environment', () => {
   assert.equal(merged.PATH, '/custom/bin');
   assert.equal(merged.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
   assert.equal(merged.HOME, process.env.HOME);
+});
+
+test('runtimeEnvForClaudeEngine stores Claude config under wrapper state dir', () => {
+  const previousStateDir = process.env.AGENT_WRAPPER_STATE_DIR;
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-wrapper-state-'));
+  try {
+    process.env.AGENT_WRAPPER_STATE_DIR = stateDir;
+    const env = runtimeEnvForClaudeEngine({
+      env: {
+        ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+      },
+    });
+
+    assert.equal(env.CLAUDE_CONFIG_DIR, path.join(stateDir, 'claude'));
+    assert.equal(fs.existsSync(env.CLAUDE_CONFIG_DIR), true);
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
+  } finally {
+    if (previousStateDir === undefined) {
+      delete process.env.AGENT_WRAPPER_STATE_DIR;
+    } else {
+      process.env.AGENT_WRAPPER_STATE_DIR = previousStateDir;
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('runtimeEnvForClaudeEngine preserves explicit Claude config dir', () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-'));
+  fs.rmSync(configDir, { recursive: true, force: true });
+  try {
+    const env = runtimeEnvForClaudeEngine({
+      env: {
+        CLAUDE_CONFIG_DIR: configDir,
+      },
+    });
+
+    assert.equal(env.CLAUDE_CONFIG_DIR, configDir);
+    assert.equal(fs.existsSync(configDir), true);
+  } finally {
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
 });
 
 test('runtimeModelForSession falls back to agent model when engine model is unset', () => {

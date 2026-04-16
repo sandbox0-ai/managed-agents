@@ -26,6 +26,11 @@ type RuntimeManager interface {
 	DestroyRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
 }
 
+// EnvironmentArtifactPrebuilder optionally moves environment package builds off the session cold-start path.
+type EnvironmentArtifactPrebuilder interface {
+	PrebuildEnvironmentArtifact(ctx context.Context, credential RequestCredential, teamID string, environment *Environment) error
+}
+
 const (
 	runtimeWebhookLeaseDuration   = 2 * time.Minute
 	runtimeWebhookPollInterval    = 100 * time.Millisecond

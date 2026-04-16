@@ -200,7 +200,7 @@ func (s *Service) ListAgentVersions(ctx context.Context, principal Principal, ag
 	return s.repo.ListAgentVersions(ctx, principal.TeamID, agentID, limit, page)
 }
 
-func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, req CreateEnvironmentRequest) (*Environment, error) {
+func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, credential RequestCredential, req CreateEnvironmentRequest) (*Environment, error) {
 	name, err := normalizeRequiredText(req.Name, "name", 256)
 	if err != nil {
 		return nil, err
@@ -236,9 +236,11 @@ func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, re
 	if err := s.repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
 		return nil, err
 	}
-	if _, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment); err != nil {
+	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment)
+	if err != nil {
 		return nil, err
 	}
+	s.prebuildEnvironmentArtifact(ctx, credential, principal.TeamID, &environment, artifact)
 	return &environment, nil
 }
 
@@ -250,7 +252,7 @@ func (s *Service) GetEnvironment(ctx context.Context, principal Principal, envir
 	return s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 }
 
-func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, environmentID string, req UpdateEnvironmentRequest) (*Environment, error) {
+func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, credential RequestCredential, environmentID string, req UpdateEnvironmentRequest) (*Environment, error) {
 	environment, err := s.repo.GetEnvironment(ctx, principal.TeamID, environmentID)
 	if err != nil {
 		return nil, err
@@ -302,9 +304,11 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, en
 	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, parseTimestampPointer(environment.ArchivedAt), now); err != nil {
 		return nil, err
 	}
-	if _, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment); err != nil {
+	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
+	if err != nil {
 		return nil, err
 	}
+	s.prebuildEnvironmentArtifact(ctx, credential, principal.TeamID, environment, artifact)
 	return environment, nil
 }
 

@@ -21,6 +21,9 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.WrapperPort != 8080 {
 		t.Fatalf("WrapperPort = %d, want 8080", cfg.WrapperPort)
 	}
+	if cfg.WorkspaceMountPath != "/workspace" {
+		t.Fatalf("WorkspaceMountPath = %q, want /workspace", cfg.WorkspaceMountPath)
+	}
 	if cfg.TemplateMainImage == "" {
 		t.Fatal("TemplateMainImage should not be empty")
 	}
@@ -29,6 +32,38 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 	if cfg.SandboxHardTTLSeconds != DefaultSandboxHardTTLSeconds {
 		t.Fatalf("SandboxHardTTLSeconds = %d, want %d", cfg.SandboxHardTTLSeconds, DefaultSandboxHardTTLSeconds)
+	}
+}
+
+func TestRuntimeStateMountPathUsesWorkspace(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		want      string
+	}{
+		{
+			name:      "default workspace",
+			workspace: "/workspace",
+			want:      "/workspace/.sandbox0/agent-wrapper",
+		},
+		{
+			name:      "custom workspace",
+			workspace: "/home/agent/work",
+			want:      "/home/agent/work/.sandbox0/agent-wrapper",
+		},
+		{
+			name:      "empty workspace falls back",
+			workspace: "",
+			want:      "/workspace/.sandbox0/agent-wrapper",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runtimeStateMountPath(tt.workspace); got != tt.want {
+				t.Fatalf("runtimeStateMountPath(%q) = %q, want %q", tt.workspace, got, tt.want)
+			}
+		})
 	}
 }
 

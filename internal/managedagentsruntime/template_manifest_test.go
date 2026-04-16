@@ -14,11 +14,10 @@ import (
 
 func TestLoadTemplateRequest(t *testing.T) {
 	request, err := loadTemplateRequest((Config{
-		TemplateID:           "managed-agents",
-		TemplateMainImage:    "example.com/wrapper:latest",
-		WrapperPort:          8080,
-		WorkspaceMountPath:   "/workspace",
-		EngineStateMountPath: "/var/lib/agent-wrapper",
+		TemplateID:         "managed-agents",
+		TemplateMainImage:  "example.com/wrapper:latest",
+		WrapperPort:        8080,
+		WorkspaceMountPath: "/workspace",
 	}).WithDefaults(0))
 	if err != nil {
 		t.Fatalf("loadTemplateRequest returned error: %v", err)
@@ -49,6 +48,9 @@ func TestLoadTemplateRequest(t *testing.T) {
 	}
 	if envVars["PORT"] != "8080" {
 		t.Fatalf("WarmProcesses[0].EnvVars[PORT] = %q, want 8080", envVars["PORT"])
+	}
+	if envVars["AGENT_WRAPPER_STATE_DIR"] != "/workspace/.sandbox0/agent-wrapper" {
+		t.Fatalf("WarmProcesses[0].EnvVars[AGENT_WRAPPER_STATE_DIR] = %q, want workspace state directory", envVars["AGENT_WRAPPER_STATE_DIR"])
 	}
 	if _, ok := envVars["PATH"]; ok {
 		t.Fatal("WarmProcesses[0].EnvVars should inherit PATH from the image")

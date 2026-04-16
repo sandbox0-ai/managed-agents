@@ -170,7 +170,7 @@ func (h *Handler) ListAgentVersions(c *gin.Context) {
 }
 
 func (h *Handler) CreateEnvironment(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -184,7 +184,7 @@ func (h *Handler) CreateEnvironment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	environment, err := h.service.CreateEnvironment(c.Request.Context(), principal, params)
+	environment, err := h.service.CreateEnvironment(c.Request.Context(), principal, credential, params)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
@@ -242,7 +242,7 @@ func (h *Handler) GetEnvironment(c *gin.Context) {
 }
 
 func (h *Handler) UpdateEnvironment(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -256,7 +256,7 @@ func (h *Handler) UpdateEnvironment(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request_error", "invalid request body")
 		return
 	}
-	environment, err := h.service.UpdateEnvironment(c.Request.Context(), principal, c.Param("environment_id"), req)
+	environment, err := h.service.UpdateEnvironment(c.Request.Context(), principal, credential, c.Param("environment_id"), req)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return

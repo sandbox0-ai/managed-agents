@@ -1,4 +1,5 @@
 export const DEFAULT_VENDOR = 'claude';
+export const DEFAULT_AGENT_WRAPPER_STATE_DIR = '/workspace/.sandbox0/agent-wrapper';
 
 const VENDOR_ALIASES = new Map([
   ['anthropic', 'claude'],
@@ -99,6 +100,10 @@ export function runtimeEnvForEngine(engine) {
     ...process.env,
     ...(engine?.env ?? {}),
   };
+}
+
+export function agentWrapperStateDir(env = process.env) {
+  return env.AGENT_WRAPPER_STATE_DIR ?? DEFAULT_AGENT_WRAPPER_STATE_DIR;
 }
 
 export function runtimeModelForSession(session) {

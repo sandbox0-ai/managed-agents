@@ -32,18 +32,17 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	}
 	activeRunID := "run_123"
 	runtime := &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "secret_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "secret_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
@@ -134,18 +133,17 @@ func TestHandleSandboxWebhookPausesRequiresActionAndKeepsActiveRun(t *testing.T)
 	}
 	activeRunID := "run_requires_action_123"
 	runtime := &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_requires_action_123",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "secret_456",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_requires_action_123",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "secret_456",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
@@ -206,18 +204,17 @@ func TestHandleSandboxWebhookSkipsStaleRun(t *testing.T) {
 	}
 	activeRunID := "run_new_123"
 	runtime := &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_stale_123",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "secret_stale",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_stale_123",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "secret_stale",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
