@@ -31,7 +31,7 @@ jobs:
       SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL || 'https://api.sandbox0.ai' }}
       RUNTIME_CALLBACK_BASE_URL: ${{ vars.MANAGED_AGENTS_RUNTIME_CALLBACK_BASE_URL || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
-      CLAUDE_TEMPLATE: ${{ vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agent-claude' }}
+      TEMPLATE_ID: ${{ vars.MANAGED_AGENTS_TEMPLATE_ID || vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agents' }}
       INGRESS_ENABLED: ${{ vars.MANAGED_AGENTS_INGRESS_ENABLED || 'false' }}
       INGRESS_CLASS_NAME: ${{ vars.MANAGED_AGENTS_INGRESS_CLASS_NAME || 'nginx' }}
       INGRESS_HOST: ${{ vars.MANAGED_AGENTS_INGRESS_HOST || '' }}
@@ -125,7 +125,7 @@ jobs:
 
           helm_extra_args=(
             --set-string "agentGateway.env.runtimeEnabled=${RUNTIME_ENABLED}"
-            --set-string "agentGateway.env.claudeTemplate=${CLAUDE_TEMPLATE}"
+            --set-string "agentGateway.env.templateID=${TEMPLATE_ID}"
           )
           if [[ -n "${SANDBOX0_ADMIN_API_KEY}" ]]; then
             helm_extra_args+=(--set "agentGateway.secretKeys.sandbox0AdminAPIKey.enabled=true")
