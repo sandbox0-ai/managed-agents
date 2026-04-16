@@ -1,4 +1,6 @@
 {{- if .Values.agentGateway.enabled }}
+{{- $templateID := default .Values.agentGateway.env.claudeTemplate .Values.agentGateway.env.templateID }}
+{{- $templateID = default "managed-agents" $templateID }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,8 +56,8 @@ spec:
               value: {{ include "managed-agents.callbackBaseURL" . | quote }}
             - name: MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS
               value: {{ .Values.agentGateway.env.runtimeAllowedDomains | quote }}
-            - name: MANAGED_AGENT_CLAUDE_TEMPLATE
-              value: {{ .Values.agentGateway.env.claudeTemplate | quote }}
+            - name: MANAGED_AGENT_TEMPLATE_ID
+              value: {{ $templateID | quote }}
             - name: MANAGED_AGENT_WRAPPER_PORT
               value: {{ .Values.agentGateway.env.wrapperPort | quote }}
             - name: MANAGED_AGENT_WORKSPACE_MOUNT_PATH

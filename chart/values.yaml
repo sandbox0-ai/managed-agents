@@ -47,7 +47,10 @@ agentGateway:
     runtimeEnabled: true
     runtimeCallbackBaseURL: ""
     runtimeAllowedDomains: ""
-    claudeTemplate: managed-agent-claude
+    # Defaults to managed-agents when empty.
+    templateID: ""
+    # Deprecated: use templateID.
+    claudeTemplate: ""
     wrapperPort: 8080
     workspaceMountPath: /workspace
     engineStateMountPath: /var/lib/agent-wrapper

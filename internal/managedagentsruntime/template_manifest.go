@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultTemplateManifestPath = "templates/managed-agent-claude.yaml"
+const defaultTemplateManifestPath = "templates/managed-agents.yaml"
 
 //go:embed templates/*.yaml
 var templateManifestFS embed.FS
@@ -36,7 +36,7 @@ func loadTemplateRequest(cfg Config) (*apispec.TemplateCreateRequest, error) {
 	rendered := os.Expand(string(raw), func(name string) string {
 		switch name {
 		case "MANAGED_AGENT_TEMPLATE_ID":
-			return strings.TrimSpace(cfg.ClaudeTemplate)
+			return strings.TrimSpace(cfg.TemplateID)
 		case "MANAGED_AGENT_TEMPLATE_MAIN_IMAGE":
 			return strings.TrimSpace(cfg.TemplateMainImage)
 		case "MANAGED_AGENT_TEMPLATE_WRAPPER_PORT":
@@ -64,7 +64,7 @@ func loadTemplateRequest(cfg Config) (*apispec.TemplateCreateRequest, error) {
 		return nil, fmt.Errorf("decode template request: %w", err)
 	}
 	if strings.TrimSpace(request.TemplateID) == "" {
-		request.TemplateID = strings.TrimSpace(cfg.ClaudeTemplate)
+		request.TemplateID = strings.TrimSpace(cfg.TemplateID)
 	}
 	if err := validateTemplateRequest(&request); err != nil {
 		return nil, err

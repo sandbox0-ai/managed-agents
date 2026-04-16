@@ -11,7 +11,7 @@ import (
 func TestTemplateRequestForEnvironmentKeepsWarmTemplateStable(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:           true,
-		ClaudeTemplate:    "managed-agent-claude",
+		TemplateID:        "managed-agents",
 		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), nil)
 	if err != nil {
@@ -22,10 +22,10 @@ func TestTemplateRequestForEnvironmentKeepsWarmTemplateStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("templateRequestForEnvironment returned error: %v", err)
 	}
-	if request.TemplateID != "managed-agent-claude" {
-		t.Fatalf("TemplateID = %q, want managed-agent-claude", request.TemplateID)
+	if request.TemplateID != "managed-agents" {
+		t.Fatalf("TemplateID = %q, want managed-agents", request.TemplateID)
 	}
-	if mgr.templateRequest.TemplateID != "managed-agent-claude" {
+	if mgr.templateRequest.TemplateID != "managed-agents" {
 		t.Fatalf("base template mutated: %q", mgr.templateRequest.TemplateID)
 	}
 	if _, ok := request.Spec.Network.Get(); !ok {

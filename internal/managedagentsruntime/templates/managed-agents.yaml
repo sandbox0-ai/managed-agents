@@ -1,7 +1,7 @@
 template_id: ${MANAGED_AGENT_TEMPLATE_ID}
 spec:
-  displayName: Claude Managed Agent
-  description: Sandbox template for the Claude managed-agent wrapper warm process.
+  displayName: Managed Agents
+  description: Sandbox template for the managed-agents wrapper warm process.
   mainContainer:
     image: ${MANAGED_AGENT_TEMPLATE_MAIN_IMAGE}
     resources:
