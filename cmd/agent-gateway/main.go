@@ -41,7 +41,6 @@ type config struct {
 	TemplateMainImage      string
 	WrapperPort            int
 	WorkspaceMountPath     string
-	EngineStateMountPath   string
 	SandboxTTLSeconds      int
 	SandboxHardTTLSeconds  int
 }
@@ -98,7 +97,6 @@ func main() {
 		TemplateMainImage:      cfg.TemplateMainImage,
 		WrapperPort:            cfg.WrapperPort,
 		WorkspaceMountPath:     cfg.WorkspaceMountPath,
-		EngineStateMountPath:   cfg.EngineStateMountPath,
 		SandboxTTLSeconds:      cfg.SandboxTTLSeconds,
 		SandboxHardTTLSeconds:  cfg.SandboxHardTTLSeconds,
 		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
@@ -183,7 +181,6 @@ func loadConfig() (config, error) {
 		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
-		EngineStateMountPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH")),
 		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
 		SandboxHardTTLSeconds:  envInt("MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS", managedagentsruntime.DefaultSandboxHardTTLSeconds),
 	}

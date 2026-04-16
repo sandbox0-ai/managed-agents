@@ -99,17 +99,16 @@ func TestSendEventsInterruptClearsActiveRunAndMarksIdle(t *testing.T) {
 	}
 	activeRunID := "run_active_123"
 	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -204,17 +203,16 @@ func TestSendEventsQueuesUserMessageWhileRunIsActive(t *testing.T) {
 	}
 	activeRunID := "run_active_123"
 	runtime := &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_active_send_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_active_send_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
@@ -299,17 +297,16 @@ func TestDeleteSessionRejectsRunningSession(t *testing.T) {
 	}
 	activeRunID := "run_active_123"
 	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -353,17 +350,16 @@ func TestSendEventsStartsNewRunWhenResolvedActionsRequireResume(t *testing.T) {
 	}
 	activeRunID := "run_pending_123"
 	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
-		SessionID:           record.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}

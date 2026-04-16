@@ -62,8 +62,6 @@ spec:
               value: {{ .Values.agentGateway.env.wrapperPort | quote }}
             - name: MANAGED_AGENT_WORKSPACE_MOUNT_PATH
               value: {{ .Values.agentGateway.env.workspaceMountPath | quote }}
-            - name: MANAGED_AGENT_ENGINE_STATE_MOUNT_PATH
-              value: {{ .Values.agentGateway.env.engineStateMountPath | quote }}
             - name: MANAGED_AGENT_SANDBOX_TTL_SECONDS
               value: {{ .Values.agentGateway.env.sandboxTTLSeconds | quote }}
             - name: MANAGED_AGENT_SANDBOX_HARD_TTL_SECONDS

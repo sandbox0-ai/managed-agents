@@ -14,11 +14,10 @@ import (
 
 func TestLoadTemplateRequest(t *testing.T) {
 	request, err := loadTemplateRequest((Config{
-		TemplateID:           "managed-agents",
-		TemplateMainImage:    "example.com/wrapper:latest",
-		WrapperPort:          8080,
-		WorkspaceMountPath:   "/workspace",
-		EngineStateMountPath: "/var/lib/agent-wrapper",
+		TemplateID:         "managed-agents",
+		TemplateMainImage:  "example.com/wrapper:latest",
+		WrapperPort:        8080,
+		WorkspaceMountPath: "/workspace",
 	}).WithDefaults(0))
 	if err != nil {
 		t.Fatalf("loadTemplateRequest returned error: %v", err)

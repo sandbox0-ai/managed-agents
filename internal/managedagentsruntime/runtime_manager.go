@@ -33,7 +33,6 @@ type Config struct {
 	TemplateMainImage      string
 	WrapperPort            int
 	WorkspaceMountPath     string
-	EngineStateMountPath   string
 	SandboxTTLSeconds      int
 	SandboxHardTTLSeconds  int
 	SandboxRequestTimeout  time.Duration
@@ -61,7 +60,6 @@ func (c Config) WithDefaults(httpPort int) Config {
 	if c.WorkspaceMountPath == "" {
 		c.WorkspaceMountPath = "/workspace"
 	}
-	c.EngineStateMountPath = normalizeEngineStateMountPath(c.WorkspaceMountPath, c.EngineStateMountPath)
 	if c.SandboxTTLSeconds <= 0 {
 		c.SandboxTTLSeconds = DefaultSandboxTTLSeconds
 	}
@@ -158,7 +156,6 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		return nil, fmt.Errorf("create workspace volume: %w", err)
 	}
 	workspaceVolumeID := workspaceVolume.ID
-	engineStateVolumeID := workspaceVolumeID
 	sandboxID := ""
 	cleanupPending := true
 	defer func() {
@@ -208,17 +205,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}
 	now := time.Now().UTC()
 	runtime := &gatewaymanagedagents.RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              session.Vendor,
-		RegionID:            regionID,
-		SandboxID:           sandboxID,
-		WrapperURL:          publicURL,
-		WorkspaceVolumeID:   workspaceVolumeID,
-		EngineStateVolumeID: engineStateVolumeID,
-		ControlToken:        controlToken,
-		RuntimeGeneration:   1,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            session.Vendor,
+		RegionID:          regionID,
+		SandboxID:         sandboxID,
+		WrapperURL:        publicURL,
+		WorkspaceVolumeID: workspaceVolumeID,
+		ControlToken:      controlToken,
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := m.repo.UpsertRuntime(ctx, runtime); err != nil {
 		return nil, err
@@ -321,9 +317,9 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
 		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
 	}
-	for _, volumeID := range uniqueVolumeIDs(runtime.WorkspaceVolumeID, runtime.EngineStateVolumeID) {
-		if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-			m.logger.Warn("delete runtime volume failed", zap.Error(err), zap.String("volume_id", volumeID))
+	if runtime.WorkspaceVolumeID != "" {
+		if _, err := client.DeleteVolumeWithOptions(ctx, runtime.WorkspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+			m.logger.Warn("delete workspace volume failed", zap.Error(err), zap.String("volume_id", runtime.WorkspaceVolumeID))
 		}
 	}
 	return nil

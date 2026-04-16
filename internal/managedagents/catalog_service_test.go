@@ -749,14 +749,13 @@ func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
 func TestCreateSessionBootstrapsAndDelaysIdlePause(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
 	}, pauseCh: make(chan *RuntimeRecord, 1)}
 	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(0))
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
@@ -862,14 +861,13 @@ func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
 	}, pauseCh: make(chan *RuntimeRecord, 1)}
 	service := NewService(repo, runtime, nil, WithCreateIdlePauseDelay(100*time.Millisecond))
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
@@ -895,18 +893,17 @@ func TestCreateSessionDelayedIdlePauseSkipsActiveRuntime(t *testing.T) {
 	}
 	activeRunID := "srun_active"
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_create",
-		WrapperURL:          "https://wrapper.example.test",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -1378,16 +1375,15 @@ func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
@@ -1458,17 +1454,16 @@ func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 	}
 	activeRunID := "srun_123"
 	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
-		SessionID:           session.ID,
-		Vendor:              "claude",
-		RegionID:            "test-region",
-		SandboxID:           "sbx_123",
-		WorkspaceVolumeID:   "vol_workspace",
-		EngineStateVolumeID: "vol_state",
-		ControlToken:        "ctl_123",
-		RuntimeGeneration:   1,
-		ActiveRunID:         &activeRunID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
+		SessionID:         session.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}

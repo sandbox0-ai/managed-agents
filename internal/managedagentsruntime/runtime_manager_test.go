@@ -24,9 +24,6 @@ func TestConfigWithDefaults(t *testing.T) {
 	if cfg.WorkspaceMountPath != "/workspace" {
 		t.Fatalf("WorkspaceMountPath = %q, want /workspace", cfg.WorkspaceMountPath)
 	}
-	if cfg.EngineStateMountPath != "/workspace/.sandbox0/agent-wrapper" {
-		t.Fatalf("EngineStateMountPath = %q, want workspace state directory", cfg.EngineStateMountPath)
-	}
 	if cfg.TemplateMainImage == "" {
 		t.Fatal("TemplateMainImage should not be empty")
 	}
@@ -38,44 +35,33 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigWithDefaultsKeepsEngineStateInsideWorkspace(t *testing.T) {
+func TestRuntimeStateMountPathUsesWorkspace(t *testing.T) {
 	tests := []struct {
 		name      string
 		workspace string
-		state     string
 		want      string
 	}{
 		{
-			name:      "legacy path moves under default workspace",
+			name:      "default workspace",
 			workspace: "/workspace",
-			state:     "/var/lib/agent-wrapper",
 			want:      "/workspace/.sandbox0/agent-wrapper",
 		},
 		{
-			name:      "empty path uses custom workspace",
+			name:      "custom workspace",
 			workspace: "/home/agent/work",
-			state:     "",
 			want:      "/home/agent/work/.sandbox0/agent-wrapper",
 		},
 		{
-			name:      "custom workspace child is preserved",
-			workspace: "/workspace",
-			state:     "/workspace/.agent-state",
-			want:      "/workspace/.agent-state",
-		},
-		{
-			name:      "workspace root is replaced with state subdir",
-			workspace: "/workspace",
-			state:     "/workspace",
+			name:      "empty workspace falls back",
+			workspace: "",
 			want:      "/workspace/.sandbox0/agent-wrapper",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := (Config{WorkspaceMountPath: tt.workspace, EngineStateMountPath: tt.state}).WithDefaults(0)
-			if cfg.EngineStateMountPath != tt.want {
-				t.Fatalf("EngineStateMountPath = %q, want %q", cfg.EngineStateMountPath, tt.want)
+			if got := runtimeStateMountPath(tt.workspace); got != tt.want {
+				t.Fatalf("runtimeStateMountPath(%q) = %q, want %q", tt.workspace, got, tt.want)
 			}
 		})
 	}

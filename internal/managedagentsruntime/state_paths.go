@@ -7,36 +7,12 @@ import (
 
 const defaultRuntimeStateSubdir = ".sandbox0/agent-wrapper"
 
-func defaultEngineStateMountPath(workspaceMountPath string) string {
+func runtimeStateMountPath(workspaceMountPath string) string {
 	workspaceMountPath = cleanMountPath(workspaceMountPath)
 	if workspaceMountPath == "" {
 		workspaceMountPath = "/workspace"
 	}
 	return path.Join(workspaceMountPath, defaultRuntimeStateSubdir)
-}
-
-func normalizeEngineStateMountPath(workspaceMountPath, engineStateMountPath string) string {
-	workspaceMountPath = cleanMountPath(workspaceMountPath)
-	if workspaceMountPath == "" {
-		workspaceMountPath = "/workspace"
-	}
-	engineStateMountPath = cleanMountPath(engineStateMountPath)
-	if engineStateMountPath == "" || engineStateMountPath == workspaceMountPath || !mountPathContains(workspaceMountPath, engineStateMountPath) {
-		return defaultEngineStateMountPath(workspaceMountPath)
-	}
-	return engineStateMountPath
-}
-
-func mountPathContains(root, candidate string) bool {
-	root = cleanMountPath(root)
-	candidate = cleanMountPath(candidate)
-	if root == "" || candidate == "" {
-		return false
-	}
-	if root == "/" {
-		return true
-	}
-	return candidate == root || strings.HasPrefix(candidate, root+"/")
 }
 
 func uniqueVolumeIDs(values ...string) []string {
