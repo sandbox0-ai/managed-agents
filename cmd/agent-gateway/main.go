@@ -13,12 +13,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/managed-agent/internal/dbpool"
 	"github.com/sandbox0-ai/managed-agent/internal/httpauth"
 	"github.com/sandbox0-ai/managed-agent/internal/managedagents"
 	managedagentmigrations "github.com/sandbox0-ai/managed-agent/internal/managedagents/migrations"
 	"github.com/sandbox0-ai/managed-agent/internal/managedagentsruntime"
 	"github.com/sandbox0-ai/managed-agent/internal/migrate"
+	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	pgxobs "github.com/sandbox0-ai/sandbox0/pkg/observability/pgx"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -42,9 +53,16 @@ type config struct {
 	WrapperPort            int
 	WorkspaceMountPath     string
 	SandboxTTLSeconds      int
+	ObservabilityEnabled   bool
+	MetricsEnabled         bool
+	TraceExporter          string
+	TraceOTLPEndpoint      string
+	TraceOTLPInsecure      bool
+	TraceSampleRate        float64
 }
 
 const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
+const observabilityServiceName = "managed-agents"
 
 func main() {
 	cfg, err := loadConfig()
@@ -63,11 +81,53 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	tracer, shutdownTracing, err := initTracing(ctx, cfg, logger)
+	if err != nil {
+		logger.Fatal("init tracing", zap.Error(err))
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			logger.Warn("shutdown tracing failed", zap.Error(err))
+		}
+	}()
+
+	metricsEnabled := cfg.ObservabilityEnabled && cfg.MetricsEnabled
+	var metricsRegistry prometheus.Registerer
+	if metricsEnabled {
+		metricsRegistry = prometheus.DefaultRegisterer
+	}
+	httpAdapter := httpobs.NewAdapter(httpobs.AdapterConfig{
+		ServiceName:    observabilityServiceName,
+		Tracer:         tracer,
+		Logger:         logger,
+		Registry:       metricsRegistry,
+		DisableMetrics: !metricsEnabled,
+		Disabled:       !cfg.ObservabilityEnabled,
+	})
+	pgxAdapter := pgxobs.NewAdapter(pgxobs.AdapterConfig{
+		ServiceName:    observabilityServiceName,
+		Tracer:         tracer,
+		Logger:         logger,
+		Registry:       metricsRegistry,
+		DisableMetrics: !metricsEnabled,
+		Disabled:       !cfg.ObservabilityEnabled,
+	})
+	managedObservability := managedagents.NewObservability(managedagents.ObservabilityConfig{
+		ServiceName: observabilityServiceName,
+		Tracer:      tracer,
+		Logger:      logger,
+		Registry:    metricsRegistry,
+		Disabled:    !cfg.ObservabilityEnabled,
+	})
+
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: cfg.DatabaseURL,
-		MaxConns:    cfg.DatabaseMaxConns,
-		MinConns:    cfg.DatabaseMinConns,
-		Schema:      cfg.DatabaseSchema,
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConns:       cfg.DatabaseMaxConns,
+		MinConns:       cfg.DatabaseMinConns,
+		Schema:         cfg.DatabaseSchema,
+		ConfigModifier: pgxAdapter.ConfigModifier(),
 	})
 	if err != nil {
 		logger.Fatal("connect database", zap.Error(err))
@@ -103,19 +163,25 @@ func main() {
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
 		RuntimeAllowedDomains:  cfg.RuntimeAllowedDomains,
 	}.WithDefaults(0)
-	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger)
+	observableHTTPClient := httpAdapter.NewClient(httpobs.Config{Timeout: cfg.Sandbox0Timeout})
+	runtimeManager, err := managedagentsruntime.NewSDKRuntimeManager(repo, runtimeCfg, logger,
+		managedagentsruntime.WithObservability(managedObservability),
+		managedagentsruntime.WithHTTPClient(observableHTTPClient),
+	)
 	if err != nil {
 		logger.Fatal("create runtime manager", zap.Error(err))
 	}
 	runtimeManager.StartManagedTemplateSync(ctx)
 	runtimeManager.StartRuntimeLifecycleWorker(ctx)
 	serviceOpts = append(serviceOpts, managedagents.WithFileStore(managedagentsruntime.NewVolumeFileStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout)))
+	serviceOpts = append(serviceOpts, managedagents.WithObservability(managedObservability))
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	service.StartRuntimeWebhookWorker(ctx)
 	handler := managedagents.NewHandler(service, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+	router.Use(httpobs.GinMiddleware(httpAdapter.ServerConfig(logger)))
 	router.Use(gin.Recovery())
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	router.GET("/readyz", func(c *gin.Context) {
@@ -125,6 +191,9 @@ func main() {
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
+	if metricsEnabled {
+		router.GET("/metrics", gin.WrapH(promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{})))
+	}
 	managedagents.MountRoutes(router, authenticator, handler)
 
 	server := &http.Server{
@@ -138,6 +207,9 @@ func main() {
 		logger.Info("starting agent-gateway",
 			zap.String("addr", cfg.HTTPAddr),
 			zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL),
+			zap.Bool("observability_enabled", cfg.ObservabilityEnabled),
+			zap.Bool("metrics_enabled", metricsEnabled),
+			zap.String("trace_exporter", cfg.TraceExporter),
 		)
 		errCh <- server.ListenAndServe()
 	}()
@@ -181,11 +253,74 @@ func loadConfig() (config, error) {
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
 		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
 		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
+		ObservabilityEnabled:   envBool("MANAGED_AGENT_OBSERVABILITY_ENABLED", true),
+		MetricsEnabled:         envBool("MANAGED_AGENT_METRICS_ENABLED", true),
+		TraceExporter:          strings.ToLower(envOrDefault("MANAGED_AGENT_TRACE_EXPORTER", "noop")),
+		TraceOTLPEndpoint:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TRACE_OTLP_ENDPOINT")),
+		TraceOTLPInsecure:      envBool("MANAGED_AGENT_TRACE_OTLP_INSECURE", true),
+		TraceSampleRate:        envFloat("MANAGED_AGENT_TRACE_SAMPLE_RATE", 1),
+	}
+	if cfg.TraceExporter == "noop" && cfg.TraceOTLPEndpoint != "" {
+		cfg.TraceExporter = "otlp"
 	}
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")
 	}
 	return cfg, nil
+}
+
+func initTracing(ctx context.Context, cfg config, logger *zap.Logger) (trace.Tracer, func(context.Context) error, error) {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+	if !cfg.ObservabilityEnabled || cfg.TraceExporter == "" || cfg.TraceExporter == "noop" {
+		return otel.Tracer(observabilityServiceName), func(context.Context) error { return nil }, nil
+	}
+	var exporter sdktrace.SpanExporter
+	switch cfg.TraceExporter {
+	case "otlp":
+		opts := []otlptracegrpc.Option{}
+		if cfg.TraceOTLPEndpoint != "" {
+			opts = append(opts, otlptracegrpc.WithEndpoint(cfg.TraceOTLPEndpoint))
+		}
+		if cfg.TraceOTLPInsecure {
+			opts = append(opts, otlptracegrpc.WithInsecure())
+		}
+		created, err := otlptracegrpc.New(ctx, opts...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create otlp trace exporter: %w", err)
+		}
+		exporter = created
+	default:
+		return nil, nil, fmt.Errorf("unsupported MANAGED_AGENT_TRACE_EXPORTER %q", cfg.TraceExporter)
+	}
+	sampleRate := cfg.TraceSampleRate
+	if sampleRate < 0 {
+		sampleRate = 0
+	}
+	if sampleRate > 1 {
+		sampleRate = 1
+	}
+	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName(observabilityServiceName),
+	))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create trace resource: %w", err)
+	}
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRate))),
+	)
+	otel.SetTracerProvider(provider)
+	logger.Info("tracing configured",
+		zap.String("exporter", cfg.TraceExporter),
+		zap.Float64("sample_rate", sampleRate),
+		zap.String("otlp_endpoint", cfg.TraceOTLPEndpoint),
+	)
+	return provider.Tracer(observabilityServiceName), provider.Shutdown, nil
 }
 
 func initLogger(level string) (*zap.Logger, error) {
@@ -274,6 +409,33 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

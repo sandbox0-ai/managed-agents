@@ -110,22 +110,39 @@ func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context,
 	return artifact, nil
 }
 
-func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
+	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_ready", "",
+		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
+		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
+		zap.String("environment_artifact_id", environmentArtifactIDForLog(artifact)),
+	)
+	defer func() { op.End(err) }()
 	if artifact == nil {
 		return nil, gatewaymanagedagents.ErrEnvironmentArtifactNotFound
 	}
 	deadline := time.Now().UTC().Add(m.cfg.SandboxRequestTimeout)
 	for {
+		phaseStarted := time.Now()
 		switch strings.TrimSpace(artifact.Status) {
 		case gatewaymanagedagents.EnvironmentArtifactStatusReady:
+			op.ObservePhase("artifact_already_ready", time.Since(phaseStarted), nil,
+				zap.String("environment_artifact_id", artifact.ID),
+			)
 			return artifact, nil
 		case gatewaymanagedagents.EnvironmentArtifactStatusArchived:
 			return nil, fmt.Errorf("environment artifact %s is archived", artifact.ID)
 		case gatewaymanagedagents.EnvironmentArtifactStatusPending, gatewaymanagedagents.EnvironmentArtifactStatusFailed:
 			acquired, err := m.repo.BeginEnvironmentArtifactBuild(ctx, artifact.TeamID, artifact.ID, time.Now().UTC())
 			if err != nil {
+				op.ObservePhase("begin_artifact_build", time.Since(phaseStarted), err,
+					zap.String("environment_artifact_status", artifact.Status),
+				)
 				return nil, err
 			}
+			op.ObservePhase("begin_artifact_build", time.Since(phaseStarted), nil,
+				zap.Bool("acquired", acquired),
+				zap.String("environment_artifact_status", artifact.Status),
+			)
 			if acquired {
 				return m.buildEnvironmentArtifact(ctx, credential, artifact, environment, templateRequest, templateClient)
 			}
@@ -133,23 +150,43 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 			if time.Now().UTC().After(deadline) {
 				return nil, fmt.Errorf("timed out waiting for environment artifact %s to build", artifact.ID)
 			}
+			op.ObservePhase("wait_artifact_building", time.Since(phaseStarted), nil,
+				zap.String("environment_artifact_id", artifact.ID),
+			)
 			time.Sleep(250 * time.Millisecond)
 		default:
 			return nil, fmt.Errorf("unsupported environment artifact status %q", artifact.Status)
 		}
+		phaseStarted = time.Now()
 		refreshed, err := m.repo.GetEnvironmentArtifact(ctx, artifact.TeamID, artifact.ID)
 		if err != nil {
+			op.ObservePhase("refresh_artifact_status", time.Since(phaseStarted), err,
+				zap.String("environment_artifact_id", artifact.ID),
+			)
 			return nil, err
 		}
+		op.ObservePhase("refresh_artifact_status", time.Since(phaseStarted), nil,
+			zap.String("environment_artifact_id", artifact.ID),
+			zap.String("environment_artifact_status", refreshed.Status),
+		)
 		artifact = refreshed
 	}
 }
 
-func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (built *gatewaymanagedagents.EnvironmentArtifact, err error) {
+	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_build", "",
+		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
+		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
+		zap.String("environment_artifact_id", environmentArtifactIDForLog(artifact)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
 	client, err := m.newSandboxClient(credential.Token, artifact.TeamID)
 	if err != nil {
+		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), nil)
 	var (
 		lastErr error
 		logs    strings.Builder
@@ -158,17 +195,26 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 		if attempt > 1 {
 			logs.WriteString("\n\nretrying environment artifact build\n")
 		}
+		phaseStarted = time.Now()
 		assets, buildLog, buildErr := m.buildEnvironmentArtifactAttempt(ctx, client, environment, templateRequest, templateClient)
 		logs.WriteString(buildLog)
+		op.ObservePhase("build_attempt", time.Since(phaseStarted), buildErr,
+			zap.Int("attempt", attempt),
+		)
 		if buildErr == nil {
 			artifact.Status = gatewaymanagedagents.EnvironmentArtifactStatusReady
 			artifact.Assets = assets
 			artifact.BuildLog = logs.String()
 			artifact.FailureReason = nil
 			artifact.UpdatedAt = time.Now().UTC()
+			phaseStarted = time.Now()
 			if err := m.repo.UpdateEnvironmentArtifact(ctx, artifact); err != nil {
+				op.ObservePhase("mark_artifact_ready", time.Since(phaseStarted), err)
 				return nil, err
 			}
+			op.ObservePhase("mark_artifact_ready", time.Since(phaseStarted), nil,
+				zap.Int("asset_volume_count", len(artifact.Assets.VolumeIDs())),
+			)
 			m.collectGarbageEnvironmentArtifacts(ctx, client, artifact)
 			return artifact, nil
 		}
@@ -179,10 +225,34 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 	artifact.BuildLog = logs.String()
 	artifact.FailureReason = &reason
 	artifact.UpdatedAt = time.Now().UTC()
+	phaseStarted = time.Now()
 	if err := m.repo.UpdateEnvironmentArtifact(ctx, artifact); err != nil {
+		op.ObservePhase("mark_artifact_failed", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("mark_artifact_failed", time.Since(phaseStarted), nil)
 	return nil, lastErr
+}
+
+func environmentArtifactTeamIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return artifact.TeamID
+}
+
+func environmentArtifactEnvironmentIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return artifact.EnvironmentID
+}
+
+func environmentArtifactIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return artifact.ID
 }
 
 func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {

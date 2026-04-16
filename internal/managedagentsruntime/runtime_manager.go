@@ -77,10 +77,27 @@ type SDKRuntimeManager struct {
 	logger          *zap.Logger
 	httpClient      *http.Client
 	templateRequest *apispec.TemplateCreateRequest
+	observability   *gatewaymanagedagents.Observability
+}
+
+type RuntimeManagerOption func(*SDKRuntimeManager)
+
+func WithObservability(observability *gatewaymanagedagents.Observability) RuntimeManagerOption {
+	return func(m *SDKRuntimeManager) {
+		m.observability = observability
+	}
+}
+
+func WithHTTPClient(client *http.Client) RuntimeManagerOption {
+	return func(m *SDKRuntimeManager) {
+		if client != nil {
+			m.httpClient = client
+		}
+	}
 }
 
 // NewSDKRuntimeManager creates a runtime manager backed by sandbox0 sdk-go.
-func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, logger *zap.Logger) (*SDKRuntimeManager, error) {
+func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, logger *zap.Logger, opts ...RuntimeManagerOption) (*SDKRuntimeManager, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -89,6 +106,11 @@ func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, log
 		cfg:        cfg,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: cfg.SandboxRequestTimeout},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(manager)
+		}
 	}
 	if cfg.Enabled {
 		request, err := loadTemplateRequest(cfg)
@@ -100,7 +122,12 @@ func NewSDKRuntimeManager(repo *gatewaymanagedagents.Repository, cfg Config, log
 	return manager, nil
 }
 
-func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanagedagents.Principal, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, engine map[string]any, gatewayBaseURL string) (*gatewaymanagedagents.RuntimeRecord, error) {
+func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanagedagents.Principal, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, engine map[string]any, gatewayBaseURL string) (runtime *gatewaymanagedagents.RuntimeRecord, err error) {
+	ctx, op := m.observability.StartOperation(ctx, "runtime_ensure", sessionVendorForLog(session),
+		zap.String("team_id", sessionTeamIDForLog(session)),
+		zap.String("session_id", sessionIDForLog(session)),
+	)
+	defer func() { op.End(err) }()
 	if strings.TrimSpace(credential.Token) == "" {
 		return nil, errors.New("request credential is required")
 	}
@@ -108,56 +135,115 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		return nil, errors.New("gateway base url is required")
 	}
 	var existingRuntime *gatewaymanagedagents.RuntimeRecord
+	phaseStarted := time.Now()
 	if runtime, err := m.repo.GetRuntime(ctx, session.ID); err == nil {
 		if strings.TrimSpace(runtime.SandboxID) != "" {
+			op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), nil,
+				zap.String("sandbox_id", runtime.SandboxID),
+			)
+			phaseStarted = time.Now()
 			if err := m.configureRuntimeSandboxLifecycle(ctx, credential, runtime); err != nil {
+				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), err,
+					zap.String("sandbox_id", runtime.SandboxID),
+				)
 				m.logger.Warn("configure existing runtime sandbox lifecycle failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+			} else {
+				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), nil,
+					zap.String("sandbox_id", runtime.SandboxID),
+				)
 			}
-			return m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
+			phaseStarted = time.Now()
+			ensured, ensureErr := m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
+			op.ObservePhase("ensure_wrapper_endpoint", time.Since(phaseStarted), ensureErr,
+				zap.String("sandbox_id", runtime.SandboxID),
+			)
+			if ensureErr != nil {
+				return nil, ensureErr
+			}
+			return ensured, nil
 		}
 		existingRuntime = runtime
 	} else if !errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
+		op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), nil,
+		zap.Bool("existing_runtime_without_sandbox", existingRuntime != nil),
+	)
+	phaseStarted = time.Now()
 	regionID, err := m.repo.ResolveRuntimeRegionID(ctx, session.TeamID)
 	if err != nil {
+		op.ObservePhase("resolve_region", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("resolve_region", time.Since(phaseStarted), nil,
+		zap.String("region_id", regionID),
+	)
+	phaseStarted = time.Now()
 	client, err := m.newSandboxClient(credential.Token, session.TeamID)
 	if err != nil {
+		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	templateClient, err := m.templateClient(ctx, credential, session.TeamID)
 	if err != nil {
+		op.ObservePhase("create_template_client", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("create_template_client", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	environment, err := m.repo.GetEnvironment(ctx, session.TeamID, session.EnvironmentID)
 	if err != nil {
+		op.ObservePhase("load_environment", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("resolve environment: %w", err)
 	}
+	op.ObservePhase("load_environment", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	templateRequest, err := m.templateRequestForEnvironment(environment)
 	if err != nil {
+		op.ObservePhase("prepare_template_request", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("prepare environment template: %w", err)
 	}
+	op.ObservePhase("prepare_template_request", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
+		op.ObservePhase("ensure_template", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("ensure managed template: %w", err)
 	}
+	op.ObservePhase("ensure_template", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest, templateClient)
 	if err != nil {
+		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("resolve environment artifact: %w", err)
 	}
+	op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), nil,
+		zap.String("environment_artifact_id", artifact.ID),
+		zap.String("environment_artifact_status", artifact.Status),
+	)
 	workspaceVolumeID := ""
 	createdWorkspaceVolume := false
 	if existingRuntime != nil {
 		workspaceVolumeID = strings.TrimSpace(existingRuntime.WorkspaceVolumeID)
 	}
 	if workspaceVolumeID == "" {
+		phaseStarted = time.Now()
 		workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 		if err != nil {
+			op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), err)
 			return nil, fmt.Errorf("create workspace volume: %w", err)
 		}
 		workspaceVolumeID = workspaceVolume.ID
 		createdWorkspaceVolume = true
+		op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), nil,
+			zap.String("workspace_volume_id", workspaceVolumeID),
+		)
+	} else {
+		op.ObservePhase("reuse_workspace_volume", 0, nil,
+			zap.String("workspace_volume_id", workspaceVolumeID),
+		)
 	}
 	sandboxID := ""
 	cleanupPending := true
@@ -190,23 +276,43 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
 		}),
 	}
+	phaseStarted = time.Now()
 	packageMounts, err := environmentArtifactMounts(environment, artifact)
 	if err != nil {
+		op.ObservePhase("prepare_environment_artifact_mounts", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("prepare_environment_artifact_mounts", time.Since(phaseStarted), nil,
+		zap.Int("package_mount_count", len(packageMounts)),
+	)
 	for _, mount := range packageMounts {
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath, nil))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
+	phaseStarted = time.Now()
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
+		op.ObservePhase("claim_sandbox", time.Since(phaseStarted), err,
+			zap.Int("bootstrap_mount_count", len(packageMounts)+1),
+		)
 		return nil, fmt.Errorf("claim sandbox: %w", err)
 	}
 	sandboxID = sandbox.ID
+	op.ObservePhase("claim_sandbox", time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", sandboxID),
+		zap.Int("bootstrap_mount_count", len(packageMounts)+1),
+	)
+	phaseStarted = time.Now()
 	publicURL, err := m.exposeWrapperPort(ctx, client.Sandbox(sandbox.ID))
 	if err != nil {
+		op.ObservePhase("expose_wrapper_port", time.Since(phaseStarted), err,
+			zap.String("sandbox_id", sandboxID),
+		)
 		return nil, err
 	}
+	op.ObservePhase("expose_wrapper_port", time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", sandboxID),
+	)
 	now := time.Now().UTC()
 	runtimeGeneration := int64(1)
 	createdAt := now
@@ -227,7 +333,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			regionID = existingRuntime.RegionID
 		}
 	}
-	runtime := &gatewaymanagedagents.RuntimeRecord{
+	runtime = &gatewaymanagedagents.RuntimeRecord{
 		SessionID:         session.ID,
 		Vendor:            session.Vendor,
 		RegionID:          regionID,
@@ -241,18 +347,36 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		CreatedAt:         createdAt,
 		UpdatedAt:         now,
 	}
+	phaseStarted = time.Now()
 	if err := m.repo.UpsertRuntime(ctx, runtime); err != nil {
+		op.ObservePhase("upsert_runtime_record", time.Since(phaseStarted), err,
+			zap.String("sandbox_id", sandboxID),
+		)
 		return nil, err
 	}
+	op.ObservePhase("upsert_runtime_record", time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", sandboxID),
+	)
 	cleanupPending = false
 	return runtime, nil
 }
 
-func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) error {
+func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
+	ctx, op := m.observability.StartOperation(ctx, "runtime_bootstrap_session", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+	)
+	defer func() { op.End(err) }()
 	bootstrapReq := *req
+	phaseStarted := time.Now()
 	if err := m.syncBootstrapState(ctx, credential, runtime, &bootstrapReq); err != nil {
+		op.ObservePhase("sync_bootstrap_state", time.Since(phaseStarted), err)
 		return err
 	}
+	op.ObservePhase("sync_bootstrap_state", time.Since(phaseStarted), nil,
+		zap.Int("bootstrap_event_count", len(bootstrapReq.BootstrapEvents)),
+		zap.Int("skill_count", len(bootstrapReq.SkillNames)),
+	)
 	bootstrapReq.SandboxID = runtime.SandboxID
 	bootstrapReq.CallbackURL = m.runtimeWebhookURL("")
 	bootstrapReq.ControlToken = runtime.ControlToken
@@ -261,7 +385,10 @@ func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gat
 		zap.Any("engine_extra_args", mapValue(bootstrapReq.Engine["extra_args"])),
 		zap.Strings("engine_env_keys", sortedMapKeys(mapValue(bootstrapReq.Engine["env"]))),
 	)
-	return m.wrapperJSON(ctx, credential, runtime, http.MethodPut, "/v1/runtime/session", &bootstrapReq)
+	phaseStarted = time.Now()
+	err = m.wrapperJSON(ctx, credential, runtime, http.MethodPut, "/v1/runtime/session", &bootstrapReq)
+	op.ObservePhase("wrapper_put_session", time.Since(phaseStarted), err)
+	return err
 }
 
 func (m *SDKRuntimeManager) runtimeWebhookURL(requestBaseURL string) string {
@@ -275,11 +402,25 @@ func (m *SDKRuntimeManager) runtimeWebhookURL(requestBaseURL string) string {
 	return gatewaymanagedagents.InternalSandboxWebhookURL(baseURL)
 }
 
-func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperRunRequest) error {
+func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperRunRequest) (err error) {
+	ctx, op := m.observability.StartOperation(ctx, "runtime_start_run", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+		zap.String("run_id", reqRunIDForLog(req)),
+		zap.Int("input_event_count", reqInputEventCountForLog(req)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
 	if err := m.RefreshRuntimeTTL(ctx, credential, runtime); err != nil {
+		op.ObservePhase("refresh_runtime_ttl", time.Since(phaseStarted), err)
 		m.logger.Warn("refresh runtime ttl before run failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+	} else {
+		op.ObservePhase("refresh_runtime_ttl", time.Since(phaseStarted), nil)
 	}
-	return m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs", req)
+	phaseStarted = time.Now()
+	err = m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs", req)
+	op.ObservePhase("wrapper_start_run", time.Since(phaseStarted), err)
+	return err
 }
 
 func (m *SDKRuntimeManager) ResolveActions(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperResolveActionsRequest) (*gatewaymanagedagents.WrapperResolveActionsResponse, error) {
@@ -413,6 +554,9 @@ func (m *SDKRuntimeManager) newSandboxClient(token, teamID string) (*sandbox0sdk
 		sandbox0sdk.WithToken(token),
 		sandbox0sdk.WithTimeout(m.cfg.SandboxRequestTimeout),
 	}
+	if m.httpClient != nil {
+		opts = append(opts, sandbox0sdk.WithHTTPClient(m.httpClient))
+	}
 	if trimmedTeamID := strings.TrimSpace(teamID); trimmedTeamID != "" {
 		opts = append(opts, sandbox0sdk.WithRequestEditor(func(_ context.Context, req *http.Request) error {
 			req.Header.Set("X-Team-ID", trimmedTeamID)
@@ -467,6 +611,48 @@ func runtimeSandboxID(runtime *gatewaymanagedagents.RuntimeRecord) string {
 		return ""
 	}
 	return runtime.SandboxID
+}
+
+func runtimeVendorForLog(runtime *gatewaymanagedagents.RuntimeRecord) string {
+	if runtime == nil {
+		return ""
+	}
+	return runtime.Vendor
+}
+
+func sessionIDForLog(session *gatewaymanagedagents.SessionRecord) string {
+	if session == nil {
+		return ""
+	}
+	return session.ID
+}
+
+func sessionVendorForLog(session *gatewaymanagedagents.SessionRecord) string {
+	if session == nil {
+		return ""
+	}
+	return session.Vendor
+}
+
+func sessionTeamIDForLog(session *gatewaymanagedagents.SessionRecord) string {
+	if session == nil {
+		return ""
+	}
+	return session.TeamID
+}
+
+func reqRunIDForLog(req *gatewaymanagedagents.WrapperRunRequest) string {
+	if req == nil {
+		return ""
+	}
+	return req.RunID
+}
+
+func reqInputEventCountForLog(req *gatewaymanagedagents.WrapperRunRequest) int {
+	if req == nil {
+		return 0
+	}
+	return len(req.InputEvents)
 }
 
 func (m *SDKRuntimeManager) teamIDForRuntime(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) (string, error) {
