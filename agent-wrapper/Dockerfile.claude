@@ -8,6 +8,8 @@ ARG CODEX_NPM_VERSION=latest
 ARG RUBY_VERSION=3.3.10
 ARG RUST_VERSION=1.77.2
 ARG TARGETARCH=amd64
+ARG UBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu
+ARG UBUNTU_SECURITY_MIRROR=http://azure.archive.ubuntu.com/ubuntu
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -19,7 +21,16 @@ ENV LANG=C.UTF-8 \
 	AGENT_WRAPPER_DEFAULT_VENDOR=claude \
 	NODE_EXTRA_CA_CERTS=/var/run/sandbox0/netd/mitm-ca.crt
 
-RUN apt-get update \
+RUN sed -i \
+		-e "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_MIRROR}|g" \
+		-e "s|http://security.ubuntu.com/ubuntu|${UBUNTU_SECURITY_MIRROR}|g" \
+		/etc/apt/sources.list \
+	&& printf '%s\n' \
+		'Acquire::Retries "5";' \
+		'Acquire::http::Timeout "30";' \
+		'Acquire::https::Timeout "30";' \
+		> /etc/apt/apt.conf.d/80-retries \
+	&& apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		apt-transport-https \
 		ca-certificates \
