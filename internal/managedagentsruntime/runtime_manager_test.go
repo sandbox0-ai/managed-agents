@@ -12,8 +12,8 @@ import (
 
 func TestConfigWithDefaults(t *testing.T) {
 	cfg := (Config{}).WithDefaults(8443)
-	if cfg.ClaudeTemplate != "managed-agent-claude" {
-		t.Fatalf("ClaudeTemplate = %q", cfg.ClaudeTemplate)
+	if cfg.TemplateID != "managed-agents" {
+		t.Fatalf("TemplateID = %q", cfg.TemplateID)
 	}
 	if cfg.SandboxBaseURL != "http://127.0.0.1:8443" {
 		t.Fatalf("SandboxBaseURL = %q", cfg.SandboxBaseURL)
@@ -194,7 +194,7 @@ func TestTemplateClientUsesAdminKeyWithoutTeamHeader(t *testing.T) {
 	seen := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = true
-		if r.URL.Path != "/api/v1/templates/managed-agent-claude" {
+		if r.URL.Path != "/api/v1/templates/managed-agents" {
 			t.Fatalf("path = %q, want template lookup", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer admin_123" {
@@ -212,7 +212,7 @@ func TestTemplateClientUsesAdminKeyWithoutTeamHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("templateClient returned error: %v", err)
 	}
-	_, _ = client.GetTemplate(context.Background(), "managed-agent-claude")
+	_, _ = client.GetTemplate(context.Background(), "managed-agents")
 	if !seen {
 		t.Fatal("expected template client to issue a request")
 	}
@@ -237,7 +237,7 @@ func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("templateClient returned error: %v", err)
 	}
-	_, _ = client.GetTemplate(context.Background(), "managed-agent-claude")
+	_, _ = client.GetTemplate(context.Background(), "managed-agents")
 	if !seen {
 		t.Fatal("expected template client to issue a request")
 	}

@@ -59,7 +59,7 @@ func TestEnvironmentArtifactDigestStableAndCompatibilitySensitive(t *testing.T) 
 		},
 	})
 	compatibilityA := map[string]any{
-		"template_family": "managed-agent-claude-warm-v1",
+		"template_family": "managed-agents-warm-v1",
 		"os":              "linux",
 		"arch":            "amd64",
 		"base_image":      "warm-image-v1",

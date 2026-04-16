@@ -22,12 +22,13 @@ import (
 const (
 	DefaultSandboxTTLSeconds     = 0
 	DefaultSandboxHardTTLSeconds = 3600
+	defaultTemplateID            = "managed-agents"
 )
 
-// Config configures sandbox-backed Claude managed-agent runtimes.
+// Config configures sandbox-backed managed-agent runtimes.
 type Config struct {
 	Enabled                bool
-	ClaudeTemplate         string
+	TemplateID             string
 	TemplateManifestPath   string
 	TemplateMainImage      string
 	WrapperPort            int
@@ -44,8 +45,8 @@ type Config struct {
 
 // WithDefaults fills missing fields with stable local defaults.
 func (c Config) WithDefaults(httpPort int) Config {
-	if strings.TrimSpace(c.ClaudeTemplate) == "" {
-		c.ClaudeTemplate = "managed-agent-claude"
+	if strings.TrimSpace(c.TemplateID) == "" {
+		c.TemplateID = defaultTemplateID
 	}
 	if strings.TrimSpace(c.TemplateMainImage) == "" {
 		c.TemplateMainImage = "sandbox0ai/managed-agents:wrapper-latest"
@@ -402,7 +403,7 @@ func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
 	if m.templateRequest != nil && strings.TrimSpace(m.templateRequest.TemplateID) != "" {
 		return m.templateRequest.TemplateID
 	}
-	return m.cfg.ClaudeTemplate
+	return m.cfg.TemplateID
 }
 
 func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *apispec.TemplateCreateRequest) string {

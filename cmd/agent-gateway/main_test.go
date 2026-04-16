@@ -43,3 +43,30 @@ func TestLoadConfigParsesRuntimeAllowedDomains(t *testing.T) {
 		t.Fatalf("RuntimeAllowedDomains = %#v, want %#v", cfg.RuntimeAllowedDomains, want)
 	}
 }
+
+func TestLoadConfigUsesTemplateIDEnv(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
+	t.Setenv("MANAGED_AGENT_TEMPLATE_ID", " managed-agents ")
+	t.Setenv("MANAGED_AGENT_CLAUDE_TEMPLATE", "legacy-template")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.TemplateID != "managed-agents" {
+		t.Fatalf("TemplateID = %q, want managed-agents", cfg.TemplateID)
+	}
+}
+
+func TestLoadConfigFallsBackToLegacyClaudeTemplateEnv(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
+	t.Setenv("MANAGED_AGENT_CLAUDE_TEMPLATE", " legacy-template ")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.TemplateID != "legacy-template" {
+		t.Fatalf("TemplateID = %q, want legacy-template", cfg.TemplateID)
+	}
+}

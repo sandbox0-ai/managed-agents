@@ -14,7 +14,7 @@ import (
 
 func TestLoadTemplateRequest(t *testing.T) {
 	request, err := loadTemplateRequest((Config{
-		ClaudeTemplate:       "managed-agent-claude",
+		TemplateID:           "managed-agents",
 		TemplateMainImage:    "example.com/wrapper:latest",
 		WrapperPort:          8080,
 		WorkspaceMountPath:   "/workspace",
@@ -23,8 +23,8 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadTemplateRequest returned error: %v", err)
 	}
-	if request.TemplateID != "managed-agent-claude" {
-		t.Fatalf("TemplateID = %q, want managed-agent-claude", request.TemplateID)
+	if request.TemplateID != "managed-agents" {
+		t.Fatalf("TemplateID = %q, want managed-agents", request.TemplateID)
 	}
 	main, ok := request.Spec.MainContainer.Get()
 	if !ok {
@@ -68,7 +68,7 @@ func TestLoadTemplateRequest(t *testing.T) {
 func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:           true,
-		ClaudeTemplate:    "managed-agent-claude",
+		TemplateID:        "managed-agents",
 		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {
@@ -83,7 +83,7 @@ func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 	if client.created == nil {
 		t.Fatal("expected CreateTemplate to be called")
 	}
-	if client.created.TemplateID != "managed-agent-claude" {
+	if client.created.TemplateID != "managed-agents" {
 		t.Fatalf("created.TemplateID = %q", client.created.TemplateID)
 	}
 }
@@ -91,7 +91,7 @@ func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
 func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:           true,
-		ClaudeTemplate:    "managed-agent-claude",
+		TemplateID:        "managed-agents",
 		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {
@@ -115,7 +115,7 @@ func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 func TestSyncManagedTemplateOnceRequiresAdminKey(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:           true,
-		ClaudeTemplate:    "managed-agent-claude",
+		TemplateID:        "managed-agents",
 		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {
@@ -131,7 +131,7 @@ func TestSyncManagedTemplateOnceRequiresAdminKey(t *testing.T) {
 func TestEnsureConfiguredManagedTemplateUsesManifestRequest(t *testing.T) {
 	mgr, err := NewSDKRuntimeManager(nil, (Config{
 		Enabled:           true,
-		ClaudeTemplate:    "managed-agent-claude",
+		TemplateID:        "managed-agents",
 		TemplateMainImage: "example.com/wrapper:latest",
 	}).WithDefaults(0), zap.NewNop())
 	if err != nil {

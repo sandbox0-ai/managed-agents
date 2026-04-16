@@ -36,7 +36,7 @@ type config struct {
 	Sandbox0Timeout        time.Duration
 	RuntimeEnabled         bool
 	RuntimeAllowedDomains  []string
-	ClaudeTemplate         string
+	TemplateID             string
 	TemplateManifestPath   string
 	TemplateMainImage      string
 	WrapperPort            int
@@ -93,7 +93,7 @@ func main() {
 	serviceOpts := make([]managedagents.ServiceOption, 0, 1)
 	runtimeCfg := managedagentsruntime.Config{
 		Enabled:                cfg.RuntimeEnabled,
-		ClaudeTemplate:         cfg.ClaudeTemplate,
+		TemplateID:             cfg.TemplateID,
 		TemplateManifestPath:   cfg.TemplateManifestPath,
 		TemplateMainImage:      cfg.TemplateMainImage,
 		WrapperPort:            cfg.WrapperPort,
@@ -178,7 +178,7 @@ func loadConfig() (config, error) {
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
 		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
 		RuntimeAllowedDomains:  envStringList("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS"),
-		ClaudeTemplate:         strings.TrimSpace(os.Getenv("MANAGED_AGENT_CLAUDE_TEMPLATE")),
+		TemplateID:             firstEnv("MANAGED_AGENT_TEMPLATE_ID", "MANAGED_AGENT_CLAUDE_TEMPLATE"),
 		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
 		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
 		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
@@ -244,6 +244,15 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func envStringList(key string) []string {
