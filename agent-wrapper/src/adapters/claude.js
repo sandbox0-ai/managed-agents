@@ -67,6 +67,41 @@ export function claudeAgentContextOptions(session) {
   };
 }
 
+export function claudeExtraArgsForSession(session) {
+  const rawExtraArgs = session?.engine?.extra_args;
+  const extraArgs = rawExtraArgs && typeof rawExtraArgs === 'object' && !Array.isArray(rawExtraArgs)
+    ? { ...rawExtraArgs }
+    : {};
+  delete extraArgs.bare;
+  return extraArgs;
+}
+
+export function claudeToolsForSession(session, sdkTools) {
+  const tools = Array.isArray(sdkTools) ? [...sdkTools] : [];
+  if (querySkillNames(session) && !tools.includes('Skill')) {
+    tools.push('Skill');
+  }
+  return tools;
+}
+
+export function claudeSettingSourcesForSession(session) {
+  const engine = session?.engine ?? {};
+  const rawSources = Array.isArray(engine.setting_sources)
+    ? engine.setting_sources
+    : (Array.isArray(engine.settingSources) ? engine.settingSources : undefined);
+  const sources = rawSources
+    ?.map((value) => String(value ?? '').trim())
+    .filter((value) => value === 'user' || value === 'project' || value === 'local');
+  if (!querySkillNames(session)) {
+    return sources && sources.length > 0 ? sources : undefined;
+  }
+  const next = sources && sources.length > 0 ? [...sources] : [];
+  if (!next.includes('project')) {
+    next.push('project');
+  }
+  return next;
+}
+
 export function sessionErrorEventForClaudeSDKSystemMessage(message) {
   if (!message || typeof message !== 'object' || message.type !== 'system') {
     return null;
@@ -101,8 +136,9 @@ export function allowToolUseDecision(input, toolUseID) {
 }
 
 export class ClaudeRuntime extends AgentRuntime {
-  constructor() {
+  constructor({ queryFn = query } = {}) {
     super('claude');
+    this.queryFn = queryFn;
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
@@ -141,7 +177,7 @@ export class ClaudeRuntime extends AgentRuntime {
       events: [{ type: 'span.model_request_start', id: modelRequestStartID }],
     });
 
-    const stream = query({ prompt, options });
+    const stream = this.queryFn({ prompt, options });
     this.activeRuns.set(run.run_id, { stream, sessionID: session.session_id });
     try {
       for await (const message of stream) {
@@ -304,9 +340,10 @@ export class ClaudeRuntime extends AgentRuntime {
       pathToClaudeCodeExecutable: engine.path_to_claude_code_executable,
       maxTurns: engine.max_turns,
       mcpServers: mergeMcpServers(mcpServersFromAgent(session.agent?.mcp_servers), engine.mcp_servers, customTools.mcpServers),
-      tools: toolPlan.builtinSDKTools,
+      tools: claudeToolsForSession(session, toolPlan.builtinSDKTools),
       settings: engine.settings,
-      extraArgs: engine.extra_args,
+      settingSources: claudeSettingSourcesForSession(session),
+      extraArgs: claudeExtraArgsForSession(session),
       env: runtimeEnvForClaudeEngine(engine),
       persistSession: true,
       canUseTool: async (toolName, input, options) => this.#handlePermissionRequest(
@@ -328,7 +365,7 @@ export class ClaudeRuntime extends AgentRuntime {
               return { continue: true };
             }
             const currentSession = sessionStore.getSession() ?? session;
-            const resolvedTool = resolveToolPolicy(toolPlan, input);
+            const resolvedTool = resolveToolPolicyForSession(session, toolPlan, input);
             const evaluatedPermission = resolvedTool.enabled
               ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
               : 'deny';
@@ -469,7 +506,7 @@ export class ClaudeRuntime extends AgentRuntime {
     }
 
     const currentSession = sessionStore.getSession() ?? session;
-    const resolvedTool = resolveToolPolicy(toolPlan, hookInput);
+    const resolvedTool = resolveToolPolicyForSession(session, toolPlan, hookInput);
     const evaluatedPermission = resolvedTool.enabled
       ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
       : 'deny';
@@ -1126,6 +1163,14 @@ export function resolveToolPolicy(plan, input) {
     };
   }
   return { kind: 'builtin', name, enabled: false, policy: 'always_ask' };
+}
+
+function resolveToolPolicyForSession(session, plan, input) {
+  const name = normalizeToolName(input?.tool_name);
+  if (name === 'skill' && querySkillNames(session)) {
+    return { kind: 'builtin', name, enabled: true, policy: 'always_allow' };
+  }
+  return resolveToolPolicy(plan, input);
 }
 
 function defaultToolConfig(config, fallbackPolicy) {

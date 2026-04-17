@@ -8,6 +8,9 @@ import {
   buildToolPlan,
   ClaudeRuntime,
   claudeAgentContextOptions,
+  claudeExtraArgsForSession,
+  claudeSettingSourcesForSession,
+  claudeToolsForSession,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
   providerErrorEventForText,
@@ -166,6 +169,99 @@ test('ClaudeRuntime can resume builtin tool confirmations from vendor session st
   assert.equal(persisted.tool_confirmation_resolutions.tool_2.result.behavior, 'allow');
 });
 
+test('ClaudeRuntime starts SDK runs with documented skill context options', async () => {
+  let sdkCall = null;
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      sdkCall = { prompt, options };
+      return sdkResultStream();
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_sdk_options',
+    working_directory: '/workspace/project',
+    skill_names: ['workspace-map', 'regression-check'],
+    agent: {
+      system: 'Use attached skills.',
+      model: { id: 'glm-5.1' },
+      tools: [{ type: 'agent_toolset_20260401' }],
+    },
+    engine: {
+      extra_args: { bare: null, 'debug-file': '/tmp/claude-debug.log' },
+      setting_sources: ['local'],
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const callbackPayloads = [];
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_sdk_options',
+    input_events: [{ type: 'user.message', content: 'hi' }],
+  }, {
+    send: async (_session, payload) => callbackPayloads.push(payload),
+  }, {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  });
+
+  assert.equal(sdkCall.prompt, 'hi');
+  assert.equal(sdkCall.options.agent, 'managed-agent');
+  assert.deepEqual(sdkCall.options.agents['managed-agent'].skills, ['workspace-map', 'regression-check']);
+  assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
+  assert.deepEqual(sdkCall.options.settingSources, ['local', 'project']);
+  assert.equal(sdkCall.options.tools.includes('Skill'), true);
+  assert.equal(currentSession.vendor_session_id, 'vendor_sesn_sdk_options');
+  assert.equal(callbackPayloads.at(-1).events.at(-1).type, 'session.status_idle');
+});
+
+test('ClaudeRuntime strips bare mode even without attached skills', async () => {
+  let sdkCall = null;
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      sdkCall = { prompt, options };
+      return sdkResultStream();
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_no_skills',
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      extra_args: { bare: null, 'debug-file': '/tmp/claude-debug.log' },
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_no_skills',
+    input_events: [{ type: 'user.message', content: 'hi' }],
+  }, {
+    send: async () => {},
+  }, {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  });
+
+  assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
+  assert.equal(sdkCall.options.agent, undefined);
+  assert.deepEqual(sdkCall.options.tools, []);
+  assert.equal(sdkCall.options.settingSources, undefined);
+});
+
 test('runtimeEnvForEngine preserves base process environment', () => {
   const merged = runtimeEnvForEngine({
     env: {
@@ -233,6 +329,21 @@ test('runtimeModelForSession prefers explicit engine model', () => {
     agent: { model: { id: 'GLM-5.1' } },
   }), 'claude-sonnet-4-6');
 });
+
+async function* sdkResultStream() {
+  yield {
+    type: 'system',
+    subtype: 'init',
+    session_id: 'vendor_sesn_sdk_options',
+  };
+  yield {
+    type: 'result',
+    subtype: 'success',
+    session_id: 'vendor_sesn_sdk_options',
+    stop_reason: 'end_turn',
+    usage: {},
+  };
+}
 
 test('allowToolUseDecision returns SDK-compatible allow result', () => {
   assert.deepEqual(allowToolUseDecision({ command: 'printf ok' }, 'toolu_123'), {
@@ -513,4 +624,44 @@ test('claudeAgentContextOptions keeps systemPrompt when no skills are attached',
   }), {
     systemPrompt: 'Use attached skills.',
   });
+});
+
+test('claudeExtraArgsForSession removes bare mode', () => {
+  const extraArgs = { bare: null, workload: 'managed-agents' };
+  const result = claudeExtraArgsForSession({
+    skill_names: [],
+    engine: { extra_args: extraArgs },
+  });
+
+  assert.deepEqual(result, { workload: 'managed-agents' });
+  assert.deepEqual(extraArgs, { bare: null, workload: 'managed-agents' });
+});
+
+test('claudeToolsForSession enables the Claude Skill tool when skills are attached', () => {
+  const sdkTools = ['Bash', 'Read'];
+  const result = claudeToolsForSession({ skill_names: ['workspace-map'] }, sdkTools);
+
+  assert.deepEqual(result, ['Bash', 'Read', 'Skill']);
+  assert.deepEqual(sdkTools, ['Bash', 'Read']);
+});
+
+test('claudeToolsForSession does not duplicate Skill or enable it without skills', () => {
+  assert.deepEqual(claudeToolsForSession({ skill_names: ['workspace-map'] }, ['Skill']), ['Skill']);
+  assert.deepEqual(claudeToolsForSession({ skill_names: [] }, ['Bash']), ['Bash']);
+});
+
+test('claudeSettingSourcesForSession loads project settings when skills are attached', () => {
+  assert.deepEqual(claudeSettingSourcesForSession({ skill_names: ['workspace-map'] }), ['project']);
+  assert.deepEqual(claudeSettingSourcesForSession({
+    skill_names: ['workspace-map'],
+    engine: { setting_sources: ['user', 'invalid'] },
+  }), ['user', 'project']);
+});
+
+test('claudeSettingSourcesForSession preserves explicit setting sources without skills', () => {
+  assert.deepEqual(claudeSettingSourcesForSession({
+    skill_names: [],
+    engine: { settingSources: ['local'] },
+  }), ['local']);
+  assert.equal(claudeSettingSourcesForSession({ skill_names: [] }), undefined);
 });

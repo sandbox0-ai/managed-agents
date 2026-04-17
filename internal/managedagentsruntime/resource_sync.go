@@ -119,16 +119,6 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		zap.Int("vault_count", len(req.VaultIDs)),
 		zap.Int("bootstrap_event_count", len(bootstrapEvents)),
 	)
-	var llmCredential *managedLLMCredential
-	phaseStarted = time.Now()
-	req.Engine, llmCredential, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
-	if err != nil {
-		op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), err)
-		return err
-	}
-	op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), nil,
-		zap.Bool("has_llm_credential", llmCredential != nil),
-	)
 	phaseStarted = time.Now()
 	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
 	if err != nil {
@@ -138,6 +128,16 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	req.SkillNames = skillNames
 	op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), nil,
 		zap.Int("skill_count", len(skillNames)),
+	)
+	var llmCredential *managedLLMCredential
+	phaseStarted = time.Now()
+	req.Engine, llmCredential, err = applyManagedLLMEnv(req.Vendor, req.Engine, vaultCredentials)
+	if err != nil {
+		op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), err)
+		return err
+	}
+	op.ObservePhase("apply_llm_environment", time.Since(phaseStarted), nil,
+		zap.Bool("has_llm_credential", llmCredential != nil),
 	)
 	phaseStarted = time.Now()
 	llmBindings, err := m.syncManagedLLMCredentialSource(ctx, client, req.SessionID, req.Vendor, llmCredential)
