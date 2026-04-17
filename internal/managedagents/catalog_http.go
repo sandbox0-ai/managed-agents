@@ -271,11 +271,11 @@ func (h *Handler) UpdateEnvironment(c *gin.Context) {
 }
 
 func (h *Handler) DeleteEnvironment(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
-	response, err := h.service.DeleteEnvironment(c.Request.Context(), principal, c.Param("environment_id"))
+	response, err := h.service.DeleteEnvironment(c.Request.Context(), principal, credential, c.Param("environment_id"))
 	if err != nil {
 		h.writeServiceError(c, err)
 		return

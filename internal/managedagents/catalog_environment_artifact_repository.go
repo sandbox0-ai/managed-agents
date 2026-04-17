@@ -166,6 +166,34 @@ func (r *Repository) GetLatestEnvironmentArtifact(ctx context.Context, teamID, e
 	`, strings.TrimSpace(teamID), strings.TrimSpace(environmentID))
 }
 
+func (r *Repository) ListEnvironmentArtifacts(ctx context.Context, teamID, environmentID string) ([]*EnvironmentArtifact, error) {
+	rows, err := r.db(ctx).Query(ctx, `
+		SELECT id, team_id, environment_id, digest, status, config_snapshot, compatibility, assets,
+			build_log, failure_reason, archived_at, created_at, updated_at
+		FROM managed_agent_environment_artifacts
+		WHERE team_id = $1
+			AND environment_id = $2
+		ORDER BY created_at ASC, id ASC
+	`, strings.TrimSpace(teamID), strings.TrimSpace(environmentID))
+	if err != nil {
+		return nil, fmt.Errorf("list managed-agent environment artifacts: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*EnvironmentArtifact, 0)
+	for rows.Next() {
+		artifact, err := scanEnvironmentArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, artifact)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate managed-agent environment artifacts: %w", err)
+	}
+	return out, nil
+}
+
 func (r *Repository) ListGCableEnvironmentArtifacts(ctx context.Context, teamID, environmentID, keepArtifactID string) ([]*EnvironmentArtifact, error) {
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT id, team_id, environment_id, digest, status, config_snapshot, compatibility, assets,

@@ -519,6 +519,48 @@ func TestServiceArchiveVaultCascadesAndPurgesCredentialSecrets(t *testing.T) {
 	}
 }
 
+func TestDeleteVaultAndCredentialRejectReferencedSessions(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	now := time.Now().UTC()
+	vault := buildVaultObject("vlt_in_use", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	displayName := "token"
+	credential := buildCredentialObject("vcrd_in_use", vault.ID, CreateCredentialRequest{DisplayName: &displayName}, now, nil)
+	if err := repo.CreateCredential(ctx, principal.TeamID, vault.ID, credential, map[string]any{"token": "secret"}, nil, now); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	session := &SessionRecord{
+		ID:               "sesn_vault_in_use",
+		TeamID:           principal.TeamID,
+		CreatedByUserID:  principal.UserID,
+		Vendor:           ManagedAgentsEngineClaude,
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Metadata:         map[string]string{},
+		Agent:            map[string]any{"type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{vault.ID},
+		Status:           "idle",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(ctx, session, nil); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if _, err := service.DeleteVault(ctx, principal, vault.ID); !errors.Is(err, ErrVaultInUse) {
+		t.Fatalf("DeleteVault error = %v, want ErrVaultInUse", err)
+	}
+	if _, err := service.DeleteCredential(ctx, principal, vault.ID, credential.ID); !errors.Is(err, ErrVaultInUse) {
+		t.Fatalf("DeleteCredential error = %v, want ErrVaultInUse", err)
+	}
+}
+
 func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
 	repo := newTestRepository(t)
 	store := newTestFileStore()
@@ -547,6 +589,28 @@ func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
 	}
 	if string(file.Content) != "%PDF-1.7" {
 		t.Fatalf("file content = %q", string(file.Content))
+	}
+}
+
+func TestDeleteFileKeepsRecordWhenFileStoreDeleteFails(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestFileStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	metadata, err := service.UploadFile(ctx, principal, credential, "report.pdf", "application/pdf", strings.NewReader("%PDF-1.7"))
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	store.deleteErr = errors.New("delete volume failed")
+
+	_, err = service.DeleteFile(ctx, principal, credential, metadata.ID)
+	if err == nil || !strings.Contains(err.Error(), "delete volume failed") {
+		t.Fatalf("DeleteFile error = %v, want file-store failure", err)
+	}
+	if _, err := repo.GetFile(ctx, principal.TeamID, metadata.ID); err != nil {
+		t.Fatalf("GetFile after failed delete: %v", err)
 	}
 }
 
@@ -1168,7 +1232,7 @@ func TestEnvironmentLifecycleFlow(t *testing.T) {
 		t.Fatalf("ListEnvironments includeArchived = %#v, want archived environment", all)
 	}
 
-	deleted, err := service.DeleteEnvironment(ctx, principal, created.ID)
+	deleted, err := service.DeleteEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, created.ID)
 	if err != nil {
 		t.Fatalf("DeleteEnvironment: %v", err)
 	}
@@ -1302,7 +1366,7 @@ func TestDeleteEnvironmentRejectsReferencedSessions(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	_, err := service.DeleteEnvironment(ctx, principal, environment.ID)
+	_, err := service.DeleteEnvironment(ctx, principal, RequestCredential{Token: "token_123"}, environment.ID)
 	if err == nil || !strings.Contains(err.Error(), "referenced by existing sessions") {
 		t.Fatalf("DeleteEnvironment error = %v, want in-use rejection", err)
 	}
@@ -1706,7 +1770,8 @@ func (m *updateSessionRuntimeManager) DestroyRuntime(context.Context, RequestCre
 }
 
 type testFileStore struct {
-	content map[string][]byte
+	content   map[string][]byte
+	deleteErr error
 }
 
 func newTestFileStore() *testFileStore {
@@ -1738,6 +1803,9 @@ func (s *testFileStore) ReadFile(_ context.Context, _ RequestCredential, req Fil
 }
 
 func (s *testFileStore) DeleteFile(_ context.Context, _ RequestCredential, req FileStoreDeleteRequest) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	delete(s.content, req.FileID)
 	return nil
 }

@@ -284,12 +284,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		defer cancel()
 		if sandboxID != "" {
 			if _, err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil {
-				m.logger.Warn("delete sandbox after runtime claim failed", zap.Error(err), zap.String("sandbox_id", sandboxID))
+				if !isSandboxNotFound(err) {
+					m.logger.Warn("delete sandbox after runtime claim failed", zap.Error(err), zap.String("sandbox_id", sandboxID))
+				}
 			}
 		}
 		if createdWorkspaceVolume && workspaceVolumeID != "" {
 			if _, err := client.DeleteVolumeWithOptions(cleanupCtx, workspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-				m.logger.Warn("delete workspace volume after runtime claim failed", zap.Error(err), zap.String("volume_id", workspaceVolumeID))
+				if !isSandboxNotFound(err) {
+					m.logger.Warn("delete workspace volume after runtime claim failed", zap.Error(err), zap.String("volume_id", workspaceVolumeID))
+				}
 			}
 		}
 	}()
@@ -473,18 +477,27 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	if err != nil {
 		return err
 	}
-	m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID)
+	var cleanupErrs []error
+	if err := m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
 	if strings.TrimSpace(runtime.SandboxID) != "" {
 		if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
-			m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+			if !isSandboxNotFound(err) {
+				m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete sandbox %s: %w", runtime.SandboxID, err))
+			}
 		}
 	}
 	if runtime.WorkspaceVolumeID != "" {
 		if _, err := client.DeleteVolumeWithOptions(ctx, runtime.WorkspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-			m.logger.Warn("delete workspace volume failed", zap.Error(err), zap.String("volume_id", runtime.WorkspaceVolumeID))
+			if !isSandboxNotFound(err) {
+				m.logger.Warn("delete workspace volume failed", zap.Error(err), zap.String("volume_id", runtime.WorkspaceVolumeID))
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete workspace volume %s: %w", runtime.WorkspaceVolumeID, err))
+			}
 		}
 	}
-	return nil
+	return errors.Join(cleanupErrs...)
 }
 
 func (m *SDKRuntimeManager) DeleteRuntimeSandbox(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) error {
@@ -495,8 +508,13 @@ func (m *SDKRuntimeManager) DeleteRuntimeSandbox(ctx context.Context, runtime *g
 	if err != nil {
 		return err
 	}
-	m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID)
+	if err := m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID); err != nil {
+		return err
+	}
 	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
+		if isSandboxNotFound(err) {
+			return nil
+		}
 		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
 		return err
 	}

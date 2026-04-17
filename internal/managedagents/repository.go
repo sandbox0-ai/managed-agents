@@ -22,6 +22,7 @@ var (
 	ErrEnvironmentNameConflict     = errors.New("managed-agent environment already exists")
 	ErrEnvironmentInUse            = errors.New("managed-agent environment is referenced by existing sessions")
 	ErrVaultNotFound               = errors.New("managed-agent vault not found")
+	ErrVaultInUse                  = errors.New("managed-agent vault is referenced by existing sessions")
 	ErrCredentialNotFound          = errors.New("managed-agent credential not found")
 	ErrFileNotFound                = errors.New("managed-agent file not found")
 	ErrSkillNotFound               = errors.New("managed-agent skill not found")

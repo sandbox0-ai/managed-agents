@@ -312,13 +312,18 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, cr
 	return environment, nil
 }
 
-func (s *Service) DeleteEnvironment(ctx context.Context, principal Principal, environmentID string) (map[string]any, error) {
+func (s *Service) DeleteEnvironment(ctx context.Context, principal Principal, credential RequestCredential, environmentID string) (map[string]any, error) {
 	count, err := s.repo.CountActiveSessionsForEnvironment(ctx, principal.TeamID, environmentID)
 	if err != nil {
 		return nil, err
 	}
 	if count > 0 {
 		return nil, ErrEnvironmentInUse
+	}
+	if cleaner, ok := s.runtime.(EnvironmentArtifactCleaner); ok && cleaner != nil {
+		if err := cleaner.CleanupEnvironmentArtifacts(ctx, credential, principal.TeamID, environmentID); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.repo.DeleteEnvironment(ctx, principal.TeamID, environmentID); err != nil {
 		return nil, err
@@ -405,6 +410,13 @@ func (s *Service) UpdateVault(ctx context.Context, principal Principal, vaultID 
 }
 
 func (s *Service) DeleteVault(ctx context.Context, principal Principal, vaultID string) (map[string]any, error) {
+	count, err := s.repo.CountActiveSessionsForVault(ctx, principal.TeamID, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, ErrVaultInUse
+	}
 	if err := s.repo.DeleteVault(ctx, principal.TeamID, vaultID); err != nil {
 		return nil, err
 	}
@@ -535,6 +547,16 @@ func (s *Service) UpdateCredential(ctx context.Context, principal Principal, vau
 }
 
 func (s *Service) DeleteCredential(ctx context.Context, principal Principal, vaultID, credentialID string) (map[string]any, error) {
+	if _, _, err := s.repo.GetCredential(ctx, principal.TeamID, vaultID, credentialID); err != nil {
+		return nil, err
+	}
+	count, err := s.repo.CountActiveSessionsForVault(ctx, principal.TeamID, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, ErrVaultInUse
+	}
 	if err := s.repo.DeleteCredential(ctx, principal.TeamID, vaultID, credentialID); err != nil {
 		return nil, err
 	}
@@ -641,9 +663,6 @@ func (s *Service) DeleteFile(ctx context.Context, principal Principal, credentia
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.DeleteFile(ctx, principal.TeamID, fileID); err != nil {
-		return nil, err
-	}
 	if s.fileStore != nil {
 		if err := s.fileStore.DeleteFile(ctx, credential, FileStoreDeleteRequest{
 			TeamID:   principal.TeamID,
@@ -653,6 +672,9 @@ func (s *Service) DeleteFile(ctx context.Context, principal Principal, credentia
 		}); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.repo.DeleteFile(ctx, principal.TeamID, fileID); err != nil {
+		return nil, err
 	}
 	return deletedObject("file_deleted", fileID), nil
 }

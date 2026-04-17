@@ -68,6 +68,71 @@ func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, cre
 	return err
 }
 
+func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID, environmentID string) error {
+	if !m.cfg.Enabled {
+		return nil
+	}
+	if m.repo == nil {
+		return errors.New("managed-agent repository is required")
+	}
+	teamID = strings.TrimSpace(teamID)
+	environmentID = strings.TrimSpace(environmentID)
+	if teamID == "" {
+		return errors.New("team id is required")
+	}
+	if environmentID == "" {
+		return errors.New("environment id is required")
+	}
+	cleanupCredential := credential
+	if strings.TrimSpace(cleanupCredential.Token) == "" {
+		cleanupCredential.Token = strings.TrimSpace(m.cfg.SandboxAdminAPIKey)
+	}
+	if strings.TrimSpace(cleanupCredential.Token) == "" {
+		return errors.New("request credential is required")
+	}
+	artifacts, err := m.repo.ListEnvironmentArtifacts(ctx, teamID, environmentID)
+	if err != nil {
+		return err
+	}
+	for _, artifact := range artifacts {
+		if strings.TrimSpace(artifact.Status) == gatewaymanagedagents.EnvironmentArtifactStatusBuilding {
+			return fmt.Errorf("environment artifact %s is still building", artifact.ID)
+		}
+	}
+	client, err := m.newSandboxClient(cleanupCredential.Token, teamID)
+	if err != nil {
+		return err
+	}
+	var cleanupErrs []error
+	for _, artifact := range artifacts {
+		for _, volumeID := range artifact.Assets.VolumeIDs() {
+			if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+				if isSandboxNotFound(err) {
+					continue
+				}
+				m.logger.Warn("delete environment artifact volume failed", zap.Error(err), zap.String("artifact_id", artifact.ID), zap.String("volume_id", volumeID))
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete environment artifact volume %s: %w", volumeID, err))
+			}
+		}
+	}
+	if err := errors.Join(cleanupErrs...); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, artifact := range artifacts {
+		if strings.TrimSpace(artifact.Status) == gatewaymanagedagents.EnvironmentArtifactStatusArchived {
+			continue
+		}
+		artifact.Status = gatewaymanagedagents.EnvironmentArtifactStatusArchived
+		artifact.ArchivedAt = &now
+		artifact.UpdatedAt = now
+		if err := m.repo.UpdateEnvironmentArtifact(ctx, artifact); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	if session == nil {
 		return nil, gatewaymanagedagents.ErrSessionNotFound
@@ -342,7 +407,9 @@ func (m *SDKRuntimeManager) cleanupEnvironmentBuildResources(ctx context.Context
 
 	if sandbox != nil {
 		if _, err := client.DeleteSandbox(ctx, sandbox.ID); err != nil {
-			m.logger.Warn("delete environment builder sandbox failed", zap.Error(err), zap.String("sandbox_id", sandbox.ID))
+			if !isSandboxNotFound(err) {
+				m.logger.Warn("delete environment builder sandbox failed", zap.Error(err), zap.String("sandbox_id", sandbox.ID))
+			}
 		}
 	}
 	if resources == nil {
@@ -350,7 +417,9 @@ func (m *SDKRuntimeManager) cleanupEnvironmentBuildResources(ctx context.Context
 	}
 	for _, volumeID := range uniqueVolumeIDs(append([]string{resources.workspaceVolumeID}, mapValues(resources.managerVolumeIDs)...)...) {
 		if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-			m.logger.Warn("delete environment builder volume failed", zap.Error(err), zap.String("volume_id", volumeID))
+			if !isSandboxNotFound(err) {
+				m.logger.Warn("delete environment builder volume failed", zap.Error(err), zap.String("volume_id", volumeID))
+			}
 		}
 	}
 }
@@ -391,6 +460,9 @@ func (m *SDKRuntimeManager) collectGarbageEnvironmentArtifacts(ctx context.Conte
 		deleteFailed := false
 		for _, volumeID := range artifact.Assets.VolumeIDs() {
 			if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+				if isSandboxNotFound(err) {
+					continue
+				}
 				deleteFailed = true
 				m.logger.Warn("delete environment artifact volume failed", zap.Error(err), zap.String("artifact_id", artifact.ID), zap.String("volume_id", volumeID))
 			}
