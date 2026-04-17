@@ -67,6 +67,72 @@ func TestMergeManagedGitHubCredentialPolicy(t *testing.T) {
 	}
 }
 
+func TestClearManagedCredentialPolicyRemovesOnlySessionCredentialReferences(t *testing.T) {
+	base := apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeBlockAll,
+		CredentialBindings: []apispec.CredentialBinding{
+			{Ref: "existing-bind", SourceRef: "existing-source"},
+			{Ref: managedCredentialBindingRef("sesn_123", "vcrd_123"), SourceRef: managedCredentialSourceName("sesn_123", "vcrd_123")},
+			{Ref: "legacy-bind", SourceRef: managedCredentialSourceName("sesn_123", "legacy")},
+			{Ref: managedCredentialBindingRef("sesn_other", "vcrd_123"), SourceRef: managedCredentialSourceName("sesn_other", "vcrd_123")},
+		},
+		Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+			AllowedDomains: []string{"api.example.com"},
+			TrafficRules: []apispec.TrafficRule{{
+				Name: apispec.NewOptString("existing-traffic"),
+			}},
+			CredentialRules: []apispec.EgressCredentialRule{
+				{
+					Name:          apispec.NewOptString("existing-rule"),
+					CredentialRef: "existing-bind",
+					Domains:       []string{"example.com"},
+				},
+				{
+					Name:          apispec.NewOptString(managedCredentialRuleName("sesn_123", "vcrd_123")),
+					CredentialRef: managedCredentialBindingRef("sesn_123", "vcrd_123"),
+					Domains:       []string{"api.example.com"},
+				},
+				{
+					CredentialRef: managedCredentialBindingRef("sesn_123", "unnamed"),
+					Domains:       []string{"unnamed.example.com"},
+				},
+				{
+					Name:          apispec.NewOptString(managedCredentialRuleName("sesn_other", "vcrd_123")),
+					CredentialRef: managedCredentialBindingRef("sesn_other", "vcrd_123"),
+					Domains:       []string{"other.example.com"},
+				},
+			},
+		}),
+	}
+
+	cleared, changed := clearManagedCredentialPolicy(base, "sesn_123")
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if len(cleared.CredentialBindings) != 2 {
+		t.Fatalf("credential bindings = %#v, want existing and other session bindings", cleared.CredentialBindings)
+	}
+	if cleared.CredentialBindings[0].Ref != "existing-bind" || !strings.HasPrefix(cleared.CredentialBindings[1].Ref, managedCredentialBindingPrefix("sesn_other")) {
+		t.Fatalf("credential bindings = %#v", cleared.CredentialBindings)
+	}
+	egress, ok := cleared.Egress.Get()
+	if !ok {
+		t.Fatal("egress not set")
+	}
+	if len(egress.CredentialRules) != 2 {
+		t.Fatalf("credential rules = %#v, want existing and other session rules", egress.CredentialRules)
+	}
+	if egress.CredentialRules[0].CredentialRef != "existing-bind" || !strings.HasPrefix(egress.CredentialRules[1].CredentialRef, managedCredentialBindingPrefix("sesn_other")) {
+		t.Fatalf("credential rules = %#v", egress.CredentialRules)
+	}
+	if len(egress.AllowedDomains) != 1 || egress.AllowedDomains[0] != "api.example.com" {
+		t.Fatalf("allowed domains = %#v, want preserved", egress.AllowedDomains)
+	}
+	if len(egress.TrafficRules) != 1 {
+		t.Fatalf("traffic rules = %#v, want preserved", egress.TrafficRules)
+	}
+}
+
 func TestGitHubAuthorizationHeaderUsesBasicAuth(t *testing.T) {
 	header := githubAuthorizationHeader("token-123")
 	if !strings.HasPrefix(header, "Basic ") {

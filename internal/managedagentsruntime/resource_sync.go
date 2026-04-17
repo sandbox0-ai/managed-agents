@@ -556,6 +556,43 @@ func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID s
 	return base
 }
 
+func clearManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID string) (apispec.SandboxNetworkPolicy, bool) {
+	if strings.TrimSpace(sessionID) == "" {
+		return base, false
+	}
+	bindingPrefix := managedCredentialBindingPrefix(sessionID)
+	sourcePrefix := managedCredentialSourcePrefix(sessionID)
+	rulePrefix := managedCredentialRulePrefix(sessionID)
+	changed := false
+
+	filteredBindings := base.CredentialBindings[:0]
+	for _, binding := range base.CredentialBindings {
+		if strings.HasPrefix(binding.Ref, bindingPrefix) || strings.HasPrefix(binding.SourceRef, sourcePrefix) {
+			changed = true
+			continue
+		}
+		filteredBindings = append(filteredBindings, binding)
+	}
+	base.CredentialBindings = filteredBindings
+
+	egress, ok := base.Egress.Get()
+	if ok {
+		filteredRules := egress.CredentialRules[:0]
+		for _, rule := range egress.CredentialRules {
+			name, hasName := rule.Name.Get()
+			if (hasName && strings.HasPrefix(name, rulePrefix)) || strings.HasPrefix(rule.CredentialRef, bindingPrefix) {
+				changed = true
+				continue
+			}
+			filteredRules = append(filteredRules, rule)
+		}
+		egress.CredentialRules = filteredRules
+		base.Egress = apispec.NewOptNetworkEgressPolicy(egress)
+	}
+
+	return base, changed
+}
+
 func projectedHeadersForBinding(binding managedCredentialBinding) []apispec.ProjectedHeader {
 	out := make([]apispec.ProjectedHeader, 0, len(binding.projectionHeaders))
 	for _, header := range binding.projectionHeaders {

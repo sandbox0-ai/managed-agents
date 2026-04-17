@@ -477,27 +477,33 @@ func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatew
 	if err != nil {
 		return err
 	}
-	var cleanupErrs []error
+	return m.cleanupRuntimeSandboxResources(ctx, client, runtime, true)
+}
+
+func (m *SDKRuntimeManager) cleanupRuntimeSandboxResources(ctx context.Context, client *sandbox0sdk.Client, runtime *gatewaymanagedagents.RuntimeRecord, deleteWorkspaceVolume bool) error {
+	if err := m.clearRuntimeSandboxCredentialReferences(ctx, client, runtime); err != nil {
+		return err
+	}
 	if err := m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID); err != nil {
-		cleanupErrs = append(cleanupErrs, err)
+		return err
 	}
 	if strings.TrimSpace(runtime.SandboxID) != "" {
 		if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
 			if !isSandboxNotFound(err) {
 				m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete sandbox %s: %w", runtime.SandboxID, err))
+				return err
 			}
 		}
 	}
-	if runtime.WorkspaceVolumeID != "" {
+	if deleteWorkspaceVolume && runtime.WorkspaceVolumeID != "" {
 		if _, err := client.DeleteVolumeWithOptions(ctx, runtime.WorkspaceVolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
 			if !isSandboxNotFound(err) {
 				m.logger.Warn("delete workspace volume failed", zap.Error(err), zap.String("volume_id", runtime.WorkspaceVolumeID))
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete workspace volume %s: %w", runtime.WorkspaceVolumeID, err))
+				return err
 			}
 		}
 	}
-	return errors.Join(cleanupErrs...)
+	return nil
 }
 
 func (m *SDKRuntimeManager) DeleteRuntimeSandbox(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) error {
@@ -508,15 +514,30 @@ func (m *SDKRuntimeManager) DeleteRuntimeSandbox(ctx context.Context, runtime *g
 	if err != nil {
 		return err
 	}
-	if err := m.cleanupManagedCredentialSources(ctx, client, runtime.SessionID); err != nil {
-		return err
+	return m.cleanupRuntimeSandboxResources(ctx, client, runtime, false)
+}
+
+func (m *SDKRuntimeManager) clearRuntimeSandboxCredentialReferences(ctx context.Context, client *sandbox0sdk.Client, runtime *gatewaymanagedagents.RuntimeRecord) error {
+	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" || strings.TrimSpace(runtime.SessionID) == "" {
+		return nil
 	}
-	if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
+	sandbox := client.Sandbox(runtime.SandboxID)
+	policy, err := sandbox.GetNetworkPolicy(ctx)
+	if err != nil {
 		if isSandboxNotFound(err) {
 			return nil
 		}
-		m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
-		return err
+		return fmt.Errorf("get sandbox network policy for credential cleanup: %w", err)
+	}
+	cleared, changed := clearManagedCredentialPolicy(*policy, runtime.SessionID)
+	if !changed {
+		return nil
+	}
+	if _, err := sandbox.UpdateNetworkPolicy(ctx, cleared); err != nil {
+		if isSandboxNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("clear sandbox credential references: %w", err)
 	}
 	return nil
 }
