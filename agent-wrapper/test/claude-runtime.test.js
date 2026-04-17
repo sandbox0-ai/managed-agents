@@ -7,6 +7,7 @@ import {
   allowToolUseDecision,
   buildToolPlan,
   ClaudeRuntime,
+  claudeAgentContextOptions,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
   providerErrorEventForText,
@@ -487,4 +488,29 @@ test('sessionErrorEventForClaudeSDKSystemMessage ignores non-error system events
 test('querySkillNames trims and filters preload skill names', () => {
   assert.deepEqual(querySkillNames({ skill_names: [' demo-skill ', '', null, 'search'] }), ['demo-skill', 'search']);
   assert.equal(querySkillNames({ skill_names: [] }), undefined);
+});
+
+test('claudeAgentContextOptions preloads skills through the main agent definition', () => {
+  assert.deepEqual(claudeAgentContextOptions({
+    agent: { system: 'Use attached skills.' },
+    skill_names: [' workspace-map ', 'regression-check'],
+  }), {
+    agent: 'managed-agent',
+    agents: {
+      'managed-agent': {
+        description: 'Primary Sandbox0 Managed Agents coding session.',
+        prompt: 'Use attached skills.',
+        skills: ['workspace-map', 'regression-check'],
+      },
+    },
+  });
+});
+
+test('claudeAgentContextOptions keeps systemPrompt when no skills are attached', () => {
+  assert.deepEqual(claudeAgentContextOptions({
+    agent: { system: 'Use attached skills.' },
+    skill_names: [],
+  }), {
+    systemPrompt: 'Use attached skills.',
+  });
 });

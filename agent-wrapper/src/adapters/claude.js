@@ -16,6 +16,10 @@ import {
 
 async function* emptyPromptStream() {}
 
+const MAIN_AGENT_NAME = 'managed-agent';
+const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
+const DEFAULT_MAIN_AGENT_PROMPT = 'You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.';
+
 export {
   finalStatusEventForSessionError,
   providerErrorEventForText,
@@ -41,6 +45,26 @@ export function querySkillNames(session) {
     .map((value) => String(value ?? '').trim())
     .filter((value) => value.length > 0);
   return names.length > 0 ? names : undefined;
+}
+
+export function claudeAgentContextOptions(session) {
+  const systemPrompt = typeof session?.agent?.system === 'string' && session.agent.system.trim() !== ''
+    ? session.agent.system
+    : undefined;
+  const skillNames = querySkillNames(session);
+  if (!skillNames) {
+    return systemPrompt ? { systemPrompt } : {};
+  }
+  return {
+    agent: MAIN_AGENT_NAME,
+    agents: {
+      [MAIN_AGENT_NAME]: {
+        description: MAIN_AGENT_DESCRIPTION,
+        prompt: systemPrompt ?? DEFAULT_MAIN_AGENT_PROMPT,
+        skills: skillNames,
+      },
+    },
+  };
 }
 
 export function sessionErrorEventForClaudeSDKSystemMessage(message) {
@@ -276,10 +300,9 @@ export class ClaudeRuntime extends AgentRuntime {
       model: runtimeModelForSession(session),
       permissionMode: engine.permission_mode ?? 'default',
       allowDangerouslySkipPermissions: false,
-      systemPrompt: typeof session.agent?.system === 'string' ? session.agent.system : undefined,
+      ...claudeAgentContextOptions(session),
       pathToClaudeCodeExecutable: engine.path_to_claude_code_executable,
       maxTurns: engine.max_turns,
-      skills: querySkillNames(session),
       mcpServers: mergeMcpServers(mcpServersFromAgent(session.agent?.mcp_servers), engine.mcp_servers, customTools.mcpServers),
       tools: toolPlan.builtinSDKTools,
       settings: engine.settings,
