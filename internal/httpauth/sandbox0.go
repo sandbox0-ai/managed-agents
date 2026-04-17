@@ -58,7 +58,7 @@ func (a *Sandbox0Authenticator) Authenticate() gin.HandlerFunc {
 			return
 		}
 
-		authCtx, err := a.AuthenticateRequest(c.Request.Context(), token, "")
+		authCtx, err := a.AuthenticateRequest(c.Request.Context(), token, c.GetHeader(teamIDHeader))
 		if err != nil {
 			writeAuthError(c, err)
 			return
