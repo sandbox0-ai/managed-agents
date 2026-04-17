@@ -2,13 +2,17 @@ package managedagentsruntime
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	gatewaymanagedagents "github.com/sandbox0-ai/managed-agent/internal/managedagents"
 	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
+	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
+	"go.uber.org/zap"
 )
 
 func TestConfigWithDefaults(t *testing.T) {
@@ -240,6 +244,173 @@ func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
 	}
 }
 
+func TestCleanupRuntimeSandboxResourcesClearsCredentialReferencesBeforeDeletingSources(t *testing.T) {
+	sessionID := "sesn_123"
+	sandboxID := "sbx_123"
+	sourceName := managedCredentialSourceName(sessionID, "vcrd_123")
+	calls := make([]string, 0)
+	policyCleared := false
+	initialPolicy := apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+		CredentialBindings: []apispec.CredentialBinding{
+			testCredentialBinding("existing-bind", "existing-source"),
+			testCredentialBinding(managedCredentialBindingRef(sessionID, "vcrd_123"), sourceName),
+		},
+		Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+			CredentialRules: []apispec.EgressCredentialRule{
+				{
+					Name:          apispec.NewOptString("existing-rule"),
+					CredentialRef: "existing-bind",
+					Domains:       []string{"example.com"},
+				},
+				{
+					Name:          apispec.NewOptString(managedCredentialRuleName(sessionID, "vcrd_123")),
+					CredentialRef: managedCredentialBindingRef(sessionID, "vcrd_123"),
+					Domains:       []string{"api.example.com"},
+				},
+			},
+		}),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/"+sandboxID+"/network":
+			calls = append(calls, "get-network")
+			writeTestJSON(t, w, map[string]any{"success": true, "data": initialPolicy})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/sandboxes/"+sandboxID+"/network":
+			calls = append(calls, "put-network")
+			var updated apispec.SandboxNetworkPolicy
+			if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode updated network policy: %v", err)
+			}
+			if len(updated.CredentialBindings) != 1 || updated.CredentialBindings[0].Ref != "existing-bind" {
+				t.Fatalf("updated credential bindings = %#v, want only existing binding", updated.CredentialBindings)
+			}
+			egress, ok := updated.Egress.Get()
+			if !ok {
+				t.Fatal("updated egress not set")
+			}
+			if len(egress.CredentialRules) != 1 || egress.CredentialRules[0].CredentialRef != "existing-bind" {
+				t.Fatalf("updated credential rules = %#v, want only existing rule", egress.CredentialRules)
+			}
+			policyCleared = true
+			writeTestJSON(t, w, map[string]any{"success": true, "data": updated})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/credential-sources":
+			calls = append(calls, "list-sources")
+			writeTestJSON(t, w, map[string]any{
+				"success": true,
+				"data": []map[string]any{
+					{"name": sourceName, "resolverKind": "static_headers"},
+					{"name": "external-source", "resolverKind": "static_headers"},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/credential-sources/"+sourceName:
+			calls = append(calls, "delete-source")
+			if !policyCleared {
+				http.Error(w, `{"error":{"code":"conflict","message":"credential source is still referenced by sandbox bindings"}}`, http.StatusConflict)
+				return
+			}
+			writeTestJSON(t, w, map[string]any{"success": true, "data": map[string]any{"message": "deleted"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/sandboxes/"+sandboxID:
+			calls = append(calls, "delete-sandbox")
+			if !policyCleared {
+				t.Fatal("sandbox deleted before network policy credential references were cleared")
+			}
+			writeTestJSON(t, w, map[string]any{"success": true, "data": map[string]any{"message": "deleted"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}, logger: zap.NewNop()}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	runtime := &gatewaymanagedagents.RuntimeRecord{
+		SessionID: sessionID,
+		SandboxID: sandboxID,
+	}
+	if err := mgr.cleanupRuntimeSandboxResources(context.Background(), client, runtime, false); err != nil {
+		t.Fatalf("cleanupRuntimeSandboxResources returned error: %v", err)
+	}
+	got := strings.Join(calls, ",")
+	want := "get-network,put-network,list-sources,delete-source,delete-sandbox"
+	if got != want {
+		t.Fatalf("calls = %s, want %s", got, want)
+	}
+}
+
+func TestCleanupRuntimeSandboxResourcesStopsBeforeSandboxDeleteWhenCredentialCleanupFails(t *testing.T) {
+	sessionID := "sesn_123"
+	sandboxID := "sbx_123"
+	sourceName := managedCredentialSourceName(sessionID, "vcrd_123")
+	calls := make([]string, 0)
+	initialPolicy := apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeAllowAll,
+		CredentialBindings: []apispec.CredentialBinding{
+			testCredentialBinding(managedCredentialBindingRef(sessionID, "vcrd_123"), sourceName),
+		},
+		Egress: apispec.NewOptNetworkEgressPolicy(apispec.NetworkEgressPolicy{
+			CredentialRules: []apispec.EgressCredentialRule{{
+				Name:          apispec.NewOptString(managedCredentialRuleName(sessionID, "vcrd_123")),
+				CredentialRef: managedCredentialBindingRef(sessionID, "vcrd_123"),
+				Domains:       []string{"api.example.com"},
+			}},
+		}),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sandboxes/"+sandboxID+"/network":
+			calls = append(calls, "get-network")
+			writeTestJSON(t, w, map[string]any{"success": true, "data": initialPolicy})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/sandboxes/"+sandboxID+"/network":
+			calls = append(calls, "put-network")
+			var updated apispec.SandboxNetworkPolicy
+			if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+				t.Fatalf("decode updated network policy: %v", err)
+			}
+			writeTestJSON(t, w, map[string]any{"success": true, "data": updated})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/credential-sources":
+			calls = append(calls, "list-sources")
+			writeTestJSON(t, w, map[string]any{
+				"success": true,
+				"data": []map[string]any{
+					{"name": sourceName, "resolverKind": "static_headers"},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/credential-sources/"+sourceName:
+			calls = append(calls, "delete-source")
+			http.Error(w, `{"error":{"code":"conflict","message":"credential source is still referenced by sandbox bindings"}}`, http.StatusConflict)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/sandboxes/"+sandboxID:
+			t.Fatal("sandbox delete should not run when credential source cleanup fails")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}, logger: zap.NewNop()}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	runtime := &gatewaymanagedagents.RuntimeRecord{
+		SessionID: sessionID,
+		SandboxID: sandboxID,
+	}
+	if err := mgr.cleanupRuntimeSandboxResources(context.Background(), client, runtime, false); err == nil {
+		t.Fatal("cleanupRuntimeSandboxResources error = nil, want credential cleanup error")
+	}
+	got := strings.Join(calls, ",")
+	want := "get-network,put-network,list-sources,delete-source"
+	if got != want {
+		t.Fatalf("calls = %s, want %s", got, want)
+	}
+}
+
 func TestBuildEnvironmentArtifactAttemptSkipsPackageVolumesWhenNoPackages(t *testing.T) {
 	mgr := &SDKRuntimeManager{}
 	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
@@ -255,6 +426,29 @@ func TestBuildEnvironmentArtifactAttemptSkipsPackageVolumesWhenNoPackages(t *tes
 	}
 	if buildLog != "no environment packages requested; no package volumes created\n" {
 		t.Fatalf("build log = %q", buildLog)
+	}
+}
+
+func testCredentialBinding(ref, sourceRef string) apispec.CredentialBinding {
+	return apispec.CredentialBinding{
+		Ref:       ref,
+		SourceRef: sourceRef,
+		Projection: apispec.ProjectionSpec{
+			Type: apispec.CredentialProjectionTypeHTTPHeaders,
+			HttpHeaders: apispec.NewOptHTTPHeadersProjection(apispec.HTTPHeadersProjection{
+				Headers: []apispec.ProjectedHeader{{
+					Name:          "Authorization",
+					ValueTemplate: "{{ .authorization }}",
+				}},
+			}),
+		},
+	}
+}
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatalf("encode response: %v", err)
 	}
 }
 
