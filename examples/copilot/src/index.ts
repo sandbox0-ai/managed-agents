@@ -1,36 +1,64 @@
 import "dotenv/config";
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { toFile } from "@anthropic-ai/sdk";
+import type {
+  BetaManagedAgentsSkillParams,
+  AgentCreateParams,
+} from "@anthropic-ai/sdk/resources/beta/agents";
 import type { BetaManagedAgentsStreamSessionEvents } from "@anthropic-ai/sdk/resources/beta/sessions/events";
 import type { CredentialCreateParams } from "@anthropic-ai/sdk/resources/beta/vaults/credentials";
+import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import process, { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_BASE_URL = "https://agents.sandbox0.ai";
 const DEFAULT_MODEL = "glm-5.1";
+const METADATA_FILE = "example-metadata.json";
 
-const COPILOT_SYSTEM_PROMPT = [
+const EXAMPLE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const SKILLS_DIR = path.join(EXAMPLE_ROOT, "example-skills");
+
+const SYSTEM_PROMPT = [
   "You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.",
-  "Help the user inspect, create, and modify files in the session workspace.",
-  "Prefer small, verifiable changes. Mention file paths and commands when they matter.",
-  "Before a destructive action, explain the risk and ask for confirmation.",
+  "Use the attached skills when they match the user's request.",
+  "Prefer small, verifiable changes and mention the commands or files that matter.",
 ].join("\n");
 
 interface Config {
   apiKey: string;
   baseURL: string;
   model: string;
-  agentID?: string;
-  environmentID?: string;
-  vaultID?: string;
   llmAPIKey?: string;
   llmBaseURL?: string;
   verbose: boolean;
 }
 
-interface CLIArgs {
-  help: boolean;
-  task?: string;
+interface SkillMetadata {
+  skillID: string;
+  version: string;
+  sourceHash: string;
+}
+
+interface ExampleMetadata {
+  baseURL?: string;
+  model?: string;
+  environmentID?: string;
+  agentID?: string;
+  agentVersion?: number;
+  vaultID?: string;
+  skills?: Record<string, SkillMetadata>;
+  updatedAt?: string;
+}
+
+interface SkillSource {
+  name: string;
+  displayTitle: string;
+  files: Array<{ relativePath: string; content: Buffer }>;
+  sourceHash: string;
 }
 
 interface TurnResult {
@@ -38,46 +66,6 @@ interface TurnResult {
   requiresAction: boolean;
   streamComplete: boolean;
   lastEventID?: string;
-}
-
-function printHelp(): void {
-  console.log(`Sandbox0 Managed Agents Copilot Demo
-
-Usage:
-  npm run start
-  npm run start -- --task "Create a Python script that writes fibonacci.txt"
-
-Environment:
-  SANDBOX0_API_KEY              API key for the Sandbox0 Managed Agents gateway
-  MANAGED_AGENTS_BASE_URL       Defaults to ${DEFAULT_BASE_URL}
-  MANAGED_AGENTS_MODEL          Defaults to ${DEFAULT_MODEL}
-  MANAGED_AGENTS_LLM_API_KEY    LLM provider key stored in a Sandbox0 LLM vault
-  MANAGED_AGENTS_LLM_BASE_URL   Anthropic-compatible LLM provider endpoint
-
-Interactive commands:
-  /help                         Show this help
-  /exit                         Close the local CLI`);
-}
-
-function parseArgs(argv: string[]): CLIArgs {
-  const positional: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--help" || arg === "-h") {
-      return { help: true };
-    }
-    if (arg === "--task" || arg === "-t") {
-      const value = argv[index + 1]?.trim();
-      if (!value) {
-        throw new Error(`${arg} requires a value`);
-      }
-      index += 1;
-      return { help: false, task: value };
-    }
-    positional.push(arg);
-  }
-  const task = positional.join(" ").trim();
-  return { help: false, task: task || undefined };
 }
 
 function optionalEnv(name: string): string | undefined {
@@ -88,25 +76,14 @@ function optionalEnv(name: string): string | undefined {
 function readConfig(): Config {
   const apiKey = optionalEnv("SANDBOX0_API_KEY");
   if (!apiKey) {
-    throw new Error("Set SANDBOX0_API_KEY for the Sandbox0 Managed Agents gateway.");
+    throw new Error("Set SANDBOX0_API_KEY before running this example.");
   }
-
-  const vaultID = optionalEnv("MANAGED_AGENTS_VAULT_ID");
-  const llmAPIKey = optionalEnv("MANAGED_AGENTS_LLM_API_KEY");
-  const llmBaseURL = optionalEnv("MANAGED_AGENTS_LLM_BASE_URL");
-  if (!vaultID && (!llmAPIKey || !llmBaseURL)) {
-    throw new Error("Set MANAGED_AGENTS_LLM_API_KEY and MANAGED_AGENTS_LLM_BASE_URL, or set MANAGED_AGENTS_VAULT_ID to reuse an existing LLM vault.");
-  }
-
   return {
     apiKey,
     baseURL: optionalEnv("MANAGED_AGENTS_BASE_URL") ?? DEFAULT_BASE_URL,
     model: optionalEnv("MANAGED_AGENTS_MODEL") ?? DEFAULT_MODEL,
-    agentID: optionalEnv("MANAGED_AGENTS_AGENT_ID"),
-    environmentID: optionalEnv("MANAGED_AGENTS_ENVIRONMENT_ID"),
-    vaultID,
-    llmAPIKey,
-    llmBaseURL,
+    llmAPIKey: optionalEnv("MANAGED_AGENTS_LLM_API_KEY"),
+    llmBaseURL: optionalEnv("MANAGED_AGENTS_LLM_BASE_URL"),
     verbose: optionalEnv("MANAGED_AGENTS_VERBOSE") === "1",
   };
 }
@@ -114,75 +91,83 @@ function readConfig(): Config {
 function createClient(config: Config): Anthropic {
   return new Anthropic({
     apiKey: config.apiKey,
-    // The SDK otherwise reads ANTHROPIC_AUTH_TOKEN and sends Authorization.
-    // Sandbox0 Managed Agents expects the gateway key in X-Api-Key.
     authToken: null,
     baseURL: config.baseURL,
     timeout: 10 * 60 * 1000,
   });
 }
 
-async function ensureAgent(client: Anthropic, config: Config, suffix: string): Promise<string> {
-  if (config.agentID) {
-    console.log(`Using existing agent ${config.agentID}`);
-    return config.agentID;
+async function readMetadata(metadataPath: string): Promise<ExampleMetadata> {
+  try {
+    const raw = await readFile(metadataPath, "utf8");
+    return JSON.parse(raw) as ExampleMetadata;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return {};
+    }
+    throw error;
   }
-
-  const agent = await client.beta.agents.create({
-    name: `Copilot Demo ${suffix}`,
-    model: config.model,
-    system: COPILOT_SYSTEM_PROMPT,
-    tools: [{ type: "agent_toolset_20260401" }],
-    metadata: {
-      demo: "copilot",
-      source: "managed-agents-examples",
-    },
-  });
-  console.log(`Created agent ${agent.id} v${agent.version}`);
-  return agent.id;
 }
 
-async function ensureEnvironment(client: Anthropic, config: Config, suffix: string): Promise<string> {
-  if (config.environmentID) {
-    console.log(`Using existing environment ${config.environmentID}`);
-    return config.environmentID;
+async function saveMetadata(metadataPath: string, metadata: ExampleMetadata): Promise<void> {
+  const next = {
+    ...metadata,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeFile(metadataPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+async function idExists(load: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await load();
+    return true;
+  } catch (error) {
+    if (error instanceof Anthropic.APIError && error.status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function ensureEnvironment(client: Anthropic, metadata: ExampleMetadata): Promise<string> {
+  if (metadata.environmentID && await idExists(() => client.beta.environments.retrieve(metadata.environmentID!))) {
+    console.log(`environment: ${metadata.environmentID}`);
+    return metadata.environmentID;
   }
 
   const environment = await client.beta.environments.create({
-    name: `copilot-demo-env-${suffix}`,
-    description: "Reusable cloud environment for the TypeScript SDK copilot demo.",
+    name: "copilot-example",
+    description: "Reusable environment for the Sandbox0 Managed Agents copilot example.",
     config: {
       type: "cloud",
       networking: { type: "unrestricted" },
       packages: { type: "packages" },
     },
-    metadata: {
-      demo: "copilot",
-      source: "managed-agents-examples",
-    },
+    metadata: { example: "copilot" },
   });
-  console.log(`Created environment ${environment.id}`);
+  metadata.environmentID = environment.id;
+  console.log(`environment: ${environment.id} created`);
   return environment.id;
 }
 
-async function ensureVaultIDs(client: Anthropic, config: Config, suffix: string): Promise<string[]> {
-  if (config.vaultID) {
-    console.log(`Using existing vault ${config.vaultID}`);
-    return [config.vaultID];
+async function ensureVault(client: Anthropic, config: Config, metadata: ExampleMetadata): Promise<string> {
+  if (metadata.vaultID && await idExists(() => client.beta.vaults.retrieve(metadata.vaultID!))) {
+    console.log(`vault: ${metadata.vaultID}`);
+    return metadata.vaultID;
   }
   if (!config.llmAPIKey || !config.llmBaseURL) {
-    throw new Error("LLM key and base URL are required when MANAGED_AGENTS_VAULT_ID is not set.");
+    throw new Error(`Set MANAGED_AGENTS_LLM_API_KEY and MANAGED_AGENTS_LLM_BASE_URL, or keep a reusable vault in ${METADATA_FILE}.`);
   }
 
   const vault = await client.beta.vaults.create({
-    display_name: `Copilot Demo LLM ${suffix}`,
+    display_name: "Copilot Example LLM",
     metadata: {
       "sandbox0.managed_agents.role": "llm",
       "sandbox0.managed_agents.engine": "claude",
       "sandbox0.managed_agents.llm_base_url": config.llmBaseURL,
+      example: "copilot",
     },
   });
-
   const auth = {
     type: "static_bearer",
     token: config.llmAPIKey,
@@ -192,33 +177,195 @@ async function ensureVaultIDs(client: Anthropic, config: Config, suffix: string)
     display_name: "Anthropic-compatible LLM API key",
     auth,
   });
-
-  console.log(`Created Sandbox0 LLM vault ${vault.id}`);
-  return [vault.id];
+  metadata.vaultID = vault.id;
+  console.log(`vault: ${vault.id} created`);
+  return vault.id;
 }
 
-async function createSession(
+async function loadSkillSources(): Promise<SkillSource[]> {
+  await access(SKILLS_DIR, fsConstants.R_OK);
+  const entries = await readdir(SKILLS_DIR, { withFileTypes: true });
+  const skills: SkillSource[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const name = entry.name;
+    const root = path.join(SKILLS_DIR, name);
+    const files = await readSkillFiles(root, name);
+    const skillFile = files.find((file) => file.relativePath === `${name}/SKILL.md`);
+    if (!skillFile) {
+      throw new Error(`Skill ${name} is missing SKILL.md`);
+    }
+    skills.push({
+      name,
+      displayTitle: titleFromSkillName(name),
+      files,
+      sourceHash: hashSkillFiles(files),
+    });
+  }
+
+  if (skills.length === 0) {
+    throw new Error(`No skills found in ${SKILLS_DIR}`);
+  }
+  return skills.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function readSkillFiles(root: string, skillName: string, current = root): Promise<Array<{ relativePath: string; content: Buffer }>> {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files: Array<{ relativePath: string; content: Buffer }> = [];
+  for (const entry of entries) {
+    const fullPath = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await readSkillFiles(root, skillName, fullPath));
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+    const insideSkill = path.relative(root, fullPath).split(path.sep).join("/");
+    files.push({
+      relativePath: `${skillName}/${insideSkill}`,
+      content: await readFile(fullPath),
+    });
+  }
+  return files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
+
+function hashSkillFiles(files: Array<{ relativePath: string; content: Buffer }>): string {
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file.relativePath);
+    hash.update("\0");
+    hash.update(file.content);
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function titleFromSkillName(name: string): string {
+  return name.split("-").map((part) => part.slice(0, 1).toUpperCase() + part.slice(1)).join(" ");
+}
+
+async function uploadablesForSkill(skill: SkillSource) {
+  return Promise.all(skill.files.map((file) => toFile(file.content, file.relativePath, { type: "text/markdown" })));
+}
+
+async function ensureSkills(client: Anthropic, metadata: ExampleMetadata): Promise<BetaManagedAgentsSkillParams[]> {
+  const sources = await loadSkillSources();
+  metadata.skills ??= {};
+  const params: BetaManagedAgentsSkillParams[] = [];
+
+  for (const source of sources) {
+    const cached = metadata.skills[source.name];
+    if (cached?.skillID && cached.version && cached.sourceHash === source.sourceHash) {
+      const exists = await idExists(() => client.beta.skills.versions.retrieve(cached.version, { skill_id: cached.skillID }));
+      if (exists) {
+        params.push({ type: "custom", skill_id: cached.skillID, version: cached.version });
+        console.log(`skill: ${source.name} ${cached.version}`);
+        continue;
+      }
+    }
+
+    const files = await uploadablesForSkill(source);
+    if (cached?.skillID && await idExists(() => client.beta.skills.retrieve(cached.skillID))) {
+      const version = await client.beta.skills.versions.create(cached.skillID, { files });
+      metadata.skills[source.name] = {
+        skillID: cached.skillID,
+        version: version.version,
+        sourceHash: source.sourceHash,
+      };
+      params.push({ type: "custom", skill_id: cached.skillID, version: version.version });
+      console.log(`skill: ${source.name} ${version.version} created`);
+      continue;
+    }
+
+    const skill = await client.beta.skills.create({
+      display_title: source.displayTitle,
+      files,
+    });
+    if (!skill.latest_version) {
+      throw new Error(`Created skill ${skill.id} without a latest version`);
+    }
+    metadata.skills[source.name] = {
+      skillID: skill.id,
+      version: skill.latest_version,
+      sourceHash: source.sourceHash,
+    };
+    params.push({ type: "custom", skill_id: skill.id, version: skill.latest_version });
+    console.log(`skill: ${source.name} ${skill.latest_version} created`);
+  }
+
+  return params;
+}
+
+async function ensureAgent(
   client: Anthropic,
   config: Config,
-  agentID: string,
-  environmentID: string,
-  vaultIDs: string[],
-  suffix: string,
+  metadata: ExampleMetadata,
+  skills: BetaManagedAgentsSkillParams[],
 ): Promise<string> {
-  const metadata: Record<string, string> = {
-    demo: "copilot",
-    source: "managed-agents-examples",
+  const tools: NonNullable<AgentCreateParams["tools"]> = [{
+    type: "agent_toolset_20260401",
+    default_config: {
+      enabled: true,
+      permission_policy: { type: "always_allow" },
+    },
+  }];
+  const params = {
+    name: "Copilot Example",
+    model: config.model,
+    system: SYSTEM_PROMPT,
+    tools,
+    skills,
+    metadata: { example: "copilot" },
   };
 
+  if (metadata.agentID && await idExists(() => client.beta.agents.retrieve(metadata.agentID!))) {
+    const current = await client.beta.agents.retrieve(metadata.agentID);
+    const currentSkills = current.skills.map((skill) => `${skill.type}:${skill.skill_id}:${skill.version}`).sort();
+    const nextSkills = skills.map((skill) => `${skill.type}:${skill.skill_id}:${skill.version ?? ""}`).sort();
+    if (
+      current.model.id === config.model
+      && current.system === SYSTEM_PROMPT
+      && JSON.stringify(currentSkills) === JSON.stringify(nextSkills)
+    ) {
+      metadata.agentVersion = current.version;
+      console.log(`agent: ${metadata.agentID} v${current.version}`);
+      return metadata.agentID;
+    }
+
+    const updated = await client.beta.agents.update(metadata.agentID, {
+      version: current.version,
+      name: params.name,
+      model: params.model,
+      system: params.system,
+      tools: params.tools,
+      skills: params.skills,
+      metadata: params.metadata,
+    });
+    metadata.agentVersion = updated.version;
+    console.log(`agent: ${updated.id} v${updated.version} updated`);
+    return updated.id;
+  }
+
+  const agent = await client.beta.agents.create(params);
+  metadata.agentID = agent.id;
+  metadata.agentVersion = agent.version;
+  console.log(`agent: ${agent.id} v${agent.version} created`);
+  return agent.id;
+}
+
+async function createSession(client: Anthropic, agentID: string, environmentID: string, vaultID: string): Promise<string> {
   const session = await client.beta.sessions.create({
     agent: agentID,
     environment_id: environmentID,
-    title: `Copilot demo ${suffix}`,
-    metadata,
-    vault_ids: vaultIDs,
+    title: "Copilot example REPL",
+    vault_ids: [vaultID],
+    metadata: { example: "copilot" },
   });
-
-  console.log(`Started session ${session.id}`);
+  console.log(`session: ${session.id}`);
   return session.id;
 }
 
@@ -229,16 +376,13 @@ async function sendAndStreamTurn(
   verbose: boolean,
 ): Promise<TurnResult> {
   const sent = await client.beta.sessions.events.send(sessionID, {
-    events: [
-      {
-        type: "user.message",
-        content: [{ type: "text", text }],
-      },
-    ],
+    events: [{
+      type: "user.message",
+      content: [{ type: "text", text }],
+    }],
   });
 
   let lastEventID = sent.data?.at(-1)?.id;
-
   for (;;) {
     const stream = await client.beta.sessions.events.stream(
       sessionID,
@@ -297,6 +441,12 @@ async function consumeEventStream(
           output.write(`\n[mcp tool error] ${event.mcp_tool_use_id}\n`);
         }
         break;
+      case "span.model_request_end":
+        if (verbose) {
+          const usage = event.model_usage;
+          output.write(`\n[model usage] input=${usage.input_tokens} output=${usage.output_tokens}\n`);
+        }
+        break;
       case "agent.thinking":
       case "agent.thread_context_compacted":
       case "session.status_running":
@@ -304,12 +454,6 @@ async function consumeEventStream(
       case "span.model_request_start":
         if (verbose) {
           output.write(`\n[${event.type}]\n`);
-        }
-        break;
-      case "span.model_request_end":
-        if (verbose) {
-          const usage = event.model_usage;
-          output.write(`\n[model usage] input=${usage.input_tokens} output=${usage.output_tokens}\n`);
         }
         break;
       case "session.error": {
@@ -327,9 +471,6 @@ async function consumeEventStream(
         if (event.stop_reason.type === "requires_action") {
           output.write(`[requires action] ${event.stop_reason.event_ids.join(", ")}\n`);
           return { canContinue: false, requiresAction: true, streamComplete: true, lastEventID };
-        }
-        if (event.stop_reason.type === "retries_exhausted") {
-          output.write("[idle] retries exhausted\n");
         }
         return { canContinue: true, requiresAction: false, streamComplete: true, lastEventID };
       }
@@ -351,17 +492,9 @@ async function consumeEventStream(
   return { canContinue: true, requiresAction: false, streamComplete: false, lastEventID };
 }
 
-async function runOneShot(client: Anthropic, sessionID: string, task: string, verbose: boolean): Promise<void> {
-  console.log("Copilot>");
-  const result = await sendAndStreamTurn(client, sessionID, task, verbose);
-  if (result.requiresAction) {
-    process.exitCode = 2;
-  }
-}
-
-async function runInteractive(client: Anthropic, sessionID: string, verbose: boolean): Promise<void> {
+async function runRepl(client: Anthropic, sessionID: string, verbose: boolean): Promise<void> {
   const rl = createInterface({ input, output });
-  console.log("Type a task, /help, or /exit.");
+  console.log("Type a request, /help, or /exit.");
 
   try {
     for (;;) {
@@ -373,7 +506,8 @@ async function runInteractive(client: Anthropic, sessionID: string, verbose: boo
         return;
       }
       if (text === "/help") {
-        printHelp();
+        console.log("Commands: /help, /exit");
+        console.log(`Reusable IDs are stored in ${path.join(process.cwd(), METADATA_FILE)}.`);
         continue;
       }
 
@@ -381,7 +515,7 @@ async function runInteractive(client: Anthropic, sessionID: string, verbose: boo
       const result = await sendAndStreamTurn(client, sessionID, text, verbose);
       if (!result.canContinue) {
         if (result.requiresAction) {
-          console.error("This demo does not yet implement custom action resolution events.");
+          console.error("The session requires an action this simple REPL does not resolve.");
         }
         return;
       }
@@ -392,30 +526,28 @@ async function runInteractive(client: Anthropic, sessionID: string, verbose: boo
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.help) {
-    printHelp();
-    return;
-  }
-
   const config = readConfig();
   const client = createClient(config);
-  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const metadataPath = path.join(process.cwd(), METADATA_FILE);
+  await mkdir(path.dirname(metadataPath), { recursive: true });
+  const metadata = await readMetadata(metadataPath);
+  metadata.baseURL = config.baseURL;
+  metadata.model = config.model;
 
-  console.log(`Managed Agents API: ${config.baseURL}`);
-  const [agentID, environmentID, vaultIDs] = await Promise.all([
-    ensureAgent(client, config, suffix),
-    ensureEnvironment(client, config, suffix),
-    ensureVaultIDs(client, config, suffix),
-  ]);
-  const sessionID = await createSession(client, config, agentID, environmentID, vaultIDs, suffix);
+  console.log(`metadata: ${metadataPath}`);
+  console.log(`api: ${config.baseURL}`);
 
-  if (args.task) {
-    await runOneShot(client, sessionID, args.task, config.verbose);
-    return;
-  }
+  const environmentID = await ensureEnvironment(client, metadata);
+  await saveMetadata(metadataPath, metadata);
+  const vaultID = await ensureVault(client, config, metadata);
+  await saveMetadata(metadataPath, metadata);
+  const skills = await ensureSkills(client, metadata);
+  await saveMetadata(metadataPath, metadata);
+  const agentID = await ensureAgent(client, config, metadata, skills);
+  await saveMetadata(metadataPath, metadata);
 
-  await runInteractive(client, sessionID, config.verbose);
+  const sessionID = await createSession(client, agentID, environmentID, vaultID);
+  await runRepl(client, sessionID, config.verbose);
 }
 
 main().catch((error: unknown) => {

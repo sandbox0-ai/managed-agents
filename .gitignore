@@ -4,3 +4,5 @@ dist/
 coverage/
 *.test
 vendor
+.env
+example-metadata.json
