@@ -1,6 +1,7 @@
 {{- if .Values.agentGateway.enabled }}
 {{- $templateID := default .Values.agentGateway.env.claudeTemplate .Values.agentGateway.env.templateID }}
 {{- $templateID = default "managed-agents" $templateID }}
+{{- $sandbox0AuthBaseURL := default .Values.agentGateway.env.sandbox0BaseURL .Values.agentGateway.env.sandbox0AuthBaseURL }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,6 +49,8 @@ spec:
               value: {{ .Values.agentGateway.env.databaseMinConns | quote }}
             - name: MANAGED_AGENT_SANDBOX0_BASE_URL
               value: {{ .Values.agentGateway.env.sandbox0BaseURL | quote }}
+            - name: MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL
+              value: {{ $sandbox0AuthBaseURL | quote }}
             - name: MANAGED_AGENT_SANDBOX0_TIMEOUT
               value: {{ .Values.agentGateway.env.sandbox0Timeout | quote }}
             - name: MANAGED_AGENT_RUNTIME_ENABLED
