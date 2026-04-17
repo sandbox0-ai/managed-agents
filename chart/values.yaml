@@ -56,6 +56,12 @@ agentGateway:
     sandboxTTLSeconds: 180
     templateManifestPath: ""
     templateMainImage: sandbox0ai/managed-agents:wrapper-latest
+    observabilityEnabled: true
+    metricsEnabled: true
+    traceExporter: noop
+    traceOTLPEndpoint: ""
+    traceOTLPInsecure: true
+    traceSampleRate: 1
   extraEnv: []
   envFromSecrets: []
   envFromConfigMaps: []
