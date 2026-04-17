@@ -158,6 +158,90 @@ func TestSandbox0AuthenticatorMiddlewareStoresContext(t *testing.T) {
 	}
 }
 
+func TestSandbox0AuthenticatorMiddlewareUsesSelectedTeamHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"user_123","email":"u@example.com","name":"User","email_verified":true,"is_admin":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		case "/teams/team_2":
+			if got := r.Header.Get(teamIDHeader); got != "team_2" {
+				t.Fatalf("x-team-id = %q, want team_2", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"team_2","name":"Team 2","slug":"team-2","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(authenticator.Authenticate())
+	router.GET("/protected", func(c *gin.Context) {
+		authCtx := GetContext(c)
+		if authCtx == nil {
+			c.String(http.StatusInternalServerError, "missing auth context")
+			return
+		}
+		c.String(http.StatusOK, fmt.Sprintf("%s:%s", authCtx.TeamID, authCtx.UserID))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer jwt-token")
+	req.Header.Set(teamIDHeader, "team_2")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); body != "team_2:user_123" {
+		t.Fatalf("body = %q, want team_2:user_123", body)
+	}
+}
+
+func TestSandbox0AuthenticatorMiddlewareRejectsAPIKeyTeamMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api-keys/current":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","created_by":"","type":"secret","roles":["sandbox:create"],"permissions":["sandbox:create"],"is_active":true,"expires_at":"2026-01-01T00:00:00Z"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: server.URL, Timeout: 5 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(authenticator.Authenticate())
+	router.GET("/protected", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer s0_region_token")
+	req.Header.Set(teamIDHeader, "team_other")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestSandbox0AuthenticatorMiddlewareUsesManagedAgentErrorShape(t *testing.T) {
 	authenticator, err := NewSandbox0Authenticator(Sandbox0AuthenticatorConfig{BaseURL: "http://example.invalid", Timeout: 5 * time.Second, Logger: zap.NewNop()})
 	if err != nil {
