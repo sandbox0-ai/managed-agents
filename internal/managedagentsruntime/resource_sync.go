@@ -481,21 +481,27 @@ func (m *SDKRuntimeManager) syncSandboxNetworkPolicy(ctx context.Context, sandbo
 	return nil
 }
 
-func (m *SDKRuntimeManager) cleanupManagedCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string) {
+func (m *SDKRuntimeManager) cleanupManagedCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string) error {
 	sources, err := client.ListCredentialSources(ctx)
 	if err != nil {
 		m.logger.Warn("list credential sources failed", zap.Error(err), zap.String("session_id", sessionID))
-		return
+		return fmt.Errorf("list credential sources for session %s: %w", sessionID, err)
 	}
 	prefix := managedCredentialSourcePrefix(sessionID)
+	var cleanupErrs []error
 	for _, source := range sources {
 		if !strings.HasPrefix(source.Name, prefix) {
 			continue
 		}
 		if _, err := client.DeleteCredentialSource(ctx, source.Name); err != nil {
+			if isSandboxNotFound(err) {
+				continue
+			}
 			m.logger.Warn("delete credential source failed", zap.Error(err), zap.String("source_name", source.Name), zap.String("session_id", sessionID))
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete credential source %s: %w", source.Name, err))
 		}
 	}
+	return errors.Join(cleanupErrs...)
 }
 
 func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID string, bindings []managedCredentialBinding) apispec.SandboxNetworkPolicy {

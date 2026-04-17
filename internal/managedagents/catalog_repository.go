@@ -381,6 +381,21 @@ func (r *Repository) GetVault(ctx context.Context, teamID, vaultID string) (*Vau
 	return &snapshot, nil
 }
 
+func (r *Repository) CountActiveSessionsForVault(ctx context.Context, teamID, vaultID string) (int, error) {
+	var count int
+	err := r.db(ctx).QueryRow(ctx, `
+		SELECT COUNT(1)
+		FROM managed_agent_sessions
+		WHERE team_id = $1
+			AND vault_ids ? $2
+			AND deleted_at IS NULL
+	`, strings.TrimSpace(teamID), strings.TrimSpace(vaultID)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count managed-agent vault sessions: %w", err)
+	}
+	return count, nil
+}
+
 func (r *Repository) UpdateVault(ctx context.Context, teamID, vaultID string, snapshot *Vault, archivedAt *time.Time, updatedAt time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {

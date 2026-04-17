@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gatewaymanagedagents "github.com/sandbox0-ai/managed-agent/internal/managedagents"
+	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 )
 
 func TestConfigWithDefaults(t *testing.T) {
@@ -73,6 +74,15 @@ func TestSandboxTTLSecondsUsesRuntimeDefault(t *testing.T) {
 	mgr.cfg.SandboxTTLSeconds = 60
 	if got := mgr.sandboxTTLSeconds(); got != 60 {
 		t.Fatalf("sandboxTTLSeconds = %d, want 60", got)
+	}
+}
+
+func TestSandboxNotFoundRecognizesAPIError(t *testing.T) {
+	if !isSandboxNotFound(&sandbox0sdk.APIError{StatusCode: http.StatusNotFound}) {
+		t.Fatal("isSandboxNotFound returned false for sandbox0 404")
+	}
+	if isSandboxNotFound(&sandbox0sdk.APIError{StatusCode: http.StatusInternalServerError}) {
+		t.Fatal("isSandboxNotFound returned true for sandbox0 500")
 	}
 }
 

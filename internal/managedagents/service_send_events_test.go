@@ -15,6 +15,7 @@ type recordingRuntimeManager struct {
 	startRunReqs    []*WrapperRunRequest
 	resolveReqs     []*WrapperResolveActionsRequest
 	interruptRunIDs []string
+	destroyErr      error
 }
 
 func (m *recordingRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
@@ -49,7 +50,7 @@ func (m *recordingRuntimeManager) DeleteWrapperSession(context.Context, RequestC
 }
 
 func (m *recordingRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
-	return nil
+	return m.destroyErr
 }
 
 func TestSendEventsInterruptClearsActiveRunAndMarksIdle(t *testing.T) {

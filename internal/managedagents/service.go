@@ -29,6 +29,11 @@ type EnvironmentArtifactPrebuilder interface {
 	PrebuildEnvironmentArtifact(ctx context.Context, credential RequestCredential, teamID string, environment *Environment) error
 }
 
+// EnvironmentArtifactCleaner deletes sandbox0 resources owned by environment artifacts.
+type EnvironmentArtifactCleaner interface {
+	CleanupEnvironmentArtifacts(ctx context.Context, credential RequestCredential, teamID, environmentID string) error
+}
+
 const (
 	runtimeWebhookLeaseDuration = 2 * time.Minute
 	runtimeWebhookPollInterval  = 100 * time.Millisecond
@@ -393,10 +398,10 @@ func (s *Service) deleteSessionLocked(ctx context.Context, principal Principal, 
 			}
 		}
 		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
-			s.logger.Warn("failed to destroy runtime", zap.Error(err), zap.String("session_id", sessionID))
+			return nil, fmt.Errorf("destroy runtime for session %s: %w", sessionID, err)
 		}
 		if err := s.repo.DeleteRuntime(ctx, sessionID); err != nil {
-			s.logger.Warn("failed to delete runtime record", zap.Error(err), zap.String("session_id", sessionID))
+			return nil, err
 		}
 	}
 	processedAt := time.Now().UTC()

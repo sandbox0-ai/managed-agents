@@ -86,6 +86,9 @@ func (s *VolumeFileStore) DeleteFile(ctx context.Context, credential gatewaymana
 		return err
 	}
 	if _, err := client.DeleteVolumeWithOptions(ctx, req.VolumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+		if isSandboxNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("delete file-store volume: %w", err)
 	}
 	return nil
