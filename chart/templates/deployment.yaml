@@ -68,6 +68,18 @@ spec:
               value: {{ .Values.agentGateway.env.templateManifestPath | quote }}
             - name: MANAGED_AGENT_TEMPLATE_MAIN_IMAGE
               value: {{ .Values.agentGateway.env.templateMainImage | quote }}
+            - name: MANAGED_AGENT_OBSERVABILITY_ENABLED
+              value: {{ .Values.agentGateway.env.observabilityEnabled | quote }}
+            - name: MANAGED_AGENT_METRICS_ENABLED
+              value: {{ .Values.agentGateway.env.metricsEnabled | quote }}
+            - name: MANAGED_AGENT_TRACE_EXPORTER
+              value: {{ .Values.agentGateway.env.traceExporter | quote }}
+            - name: MANAGED_AGENT_TRACE_OTLP_ENDPOINT
+              value: {{ .Values.agentGateway.env.traceOTLPEndpoint | quote }}
+            - name: MANAGED_AGENT_TRACE_OTLP_INSECURE
+              value: {{ .Values.agentGateway.env.traceOTLPInsecure | quote }}
+            - name: MANAGED_AGENT_TRACE_SAMPLE_RATE
+              value: {{ .Values.agentGateway.env.traceSampleRate | quote }}
             {{- if .Values.agentGateway.secretKeys.databaseURL.enabled }}
             - name: {{ .Values.agentGateway.secretKeys.databaseURL.envName }}
               valueFrom:

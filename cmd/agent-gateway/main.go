@@ -30,6 +30,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -274,11 +275,17 @@ func initTracing(ctx context.Context, cfg config, logger *zap.Logger) (trace.Tra
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
-	if !cfg.ObservabilityEnabled || cfg.TraceExporter == "" || cfg.TraceExporter == "noop" {
-		return otel.Tracer(observabilityServiceName), func(context.Context) error { return nil }, nil
+	if !cfg.ObservabilityEnabled {
+		return noop.NewTracerProvider().Tracer(observabilityServiceName), func(context.Context) error { return nil }, nil
+	}
+
+	exporterName := strings.TrimSpace(cfg.TraceExporter)
+	if exporterName == "" {
+		exporterName = "noop"
 	}
 	var exporter sdktrace.SpanExporter
-	switch cfg.TraceExporter {
+	switch exporterName {
+	case "noop":
 	case "otlp":
 		opts := []otlptracegrpc.Option{}
 		if cfg.TraceOTLPEndpoint != "" {
@@ -303,20 +310,23 @@ func initTracing(ctx context.Context, cfg config, logger *zap.Logger) (trace.Tra
 		sampleRate = 1
 	}
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL,
+		"",
 		semconv.ServiceName(observabilityServiceName),
 	))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create trace resource: %w", err)
 	}
-	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+	providerOpts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRate))),
-	)
+	}
+	if exporter != nil {
+		providerOpts = append(providerOpts, sdktrace.WithBatcher(exporter))
+	}
+	provider := sdktrace.NewTracerProvider(providerOpts...)
 	otel.SetTracerProvider(provider)
 	logger.Info("tracing configured",
-		zap.String("exporter", cfg.TraceExporter),
+		zap.String("exporter", exporterName),
 		zap.Float64("sample_rate", sampleRate),
 		zap.String("otlp_endpoint", cfg.TraceOTLPEndpoint),
 	)

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestLoadConfigDefaultsSandbox0BaseURLToGlobal(t *testing.T) {
@@ -68,5 +71,51 @@ func TestLoadConfigFallsBackToLegacyClaudeTemplateEnv(t *testing.T) {
 	}
 	if cfg.TemplateID != "legacy-template" {
 		t.Fatalf("TemplateID = %q, want legacy-template", cfg.TemplateID)
+	}
+}
+
+func TestInitTracingNoopExporterCreatesTraceIDs(t *testing.T) {
+	cfg := config{
+		ObservabilityEnabled: true,
+		TraceExporter:        "noop",
+		TraceSampleRate:      1,
+	}
+	tracer, shutdown, err := initTracing(context.Background(), cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("initTracing: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown tracing: %v", err)
+		}
+	}()
+
+	_, span := tracer.Start(context.Background(), "test")
+	defer span.End()
+	if !span.SpanContext().IsValid() {
+		t.Fatal("expected noop exporter to keep a valid trace context for log correlation")
+	}
+}
+
+func TestInitTracingDisabledUsesInvalidTraceContext(t *testing.T) {
+	cfg := config{
+		ObservabilityEnabled: false,
+		TraceExporter:        "noop",
+		TraceSampleRate:      1,
+	}
+	tracer, shutdown, err := initTracing(context.Background(), cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("initTracing: %v", err)
+	}
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown tracing: %v", err)
+		}
+	}()
+
+	_, span := tracer.Start(context.Background(), "test")
+	defer span.End()
+	if span.SpanContext().IsValid() {
+		t.Fatal("expected disabled observability to use an invalid noop trace context")
 	}
 }
