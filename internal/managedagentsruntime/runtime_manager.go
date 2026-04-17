@@ -141,28 +141,57 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), nil,
 				zap.String("sandbox_id", runtime.SandboxID),
 			)
+			runtimeSandboxLost := false
 			phaseStarted = time.Now()
 			if err := m.configureRuntimeSandboxLifecycle(ctx, credential, runtime); err != nil {
 				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), err,
 					zap.String("sandbox_id", runtime.SandboxID),
 				)
-				m.logger.Warn("configure existing runtime sandbox lifecycle failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+				if isSandboxNotFound(err) {
+					reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while configuring lifecycle")
+					if markErr != nil {
+						return nil, markErr
+					}
+					existingRuntime = reloaded
+					runtimeSandboxLost = true
+				} else {
+					m.logger.Warn("configure existing runtime sandbox lifecycle failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+				}
 			} else {
 				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), nil,
 					zap.String("sandbox_id", runtime.SandboxID),
 				)
 			}
-			phaseStarted = time.Now()
-			ensured, ensureErr := m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
-			op.ObservePhase("ensure_wrapper_endpoint", time.Since(phaseStarted), ensureErr,
-				zap.String("sandbox_id", runtime.SandboxID),
-			)
-			if ensureErr != nil {
-				return nil, ensureErr
+			if !runtimeSandboxLost {
+				phaseStarted = time.Now()
+				ensured, ensureErr := m.ensureWrapperEndpoint(ctx, credential.Token, runtime)
+				op.ObservePhase("ensure_wrapper_endpoint", time.Since(phaseStarted), ensureErr,
+					zap.String("sandbox_id", runtime.SandboxID),
+				)
+				if ensureErr != nil {
+					if isSandboxNotFound(ensureErr) {
+						reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while ensuring wrapper endpoint")
+						if markErr != nil {
+							return nil, markErr
+						}
+						existingRuntime = reloaded
+					} else {
+						return nil, ensureErr
+					}
+				} else {
+					return ensured, nil
+				}
 			}
-			return ensured, nil
+			if existingRuntime == nil {
+				existingRuntime = runtime
+				existingRuntime.SandboxID = ""
+				existingRuntime.WrapperURL = ""
+				existingRuntime.ControlToken = ""
+			}
 		}
-		existingRuntime = runtime
+		if existingRuntime == nil {
+			existingRuntime = runtime
+		}
 	} else if !errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
 		op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), err)
 		return nil, err

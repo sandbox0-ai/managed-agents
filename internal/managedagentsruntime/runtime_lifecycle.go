@@ -43,12 +43,59 @@ func (m *SDKRuntimeManager) runtimeLifecycleLoop(ctx context.Context) {
 }
 
 func (m *SDKRuntimeManager) runRuntimeLifecycleOnce(ctx context.Context) {
+	if err := m.ReconcileRuntimeSandboxes(ctx); err != nil {
+		m.logger.Warn("reconcile managed-agent runtime sandboxes failed", zap.Error(err))
+	}
 	if err := m.RefreshRunningRuntimeTTLs(ctx); err != nil {
 		m.logger.Warn("refresh running managed-agent runtimes failed", zap.Error(err))
 	}
 	if err := m.DeleteIdleRuntimeSandboxes(ctx, time.Now().UTC().Add(-runtimeIdleDeleteAfter)); err != nil {
 		m.logger.Warn("delete idle managed-agent runtime sandboxes failed", zap.Error(err))
 	}
+}
+
+func (m *SDKRuntimeManager) ReconcileRuntimeSandboxes(ctx context.Context) error {
+	runtimes, err := m.repo.ListRuntimesWithSandboxes(ctx, runtimeLifecycleBatch)
+	if err != nil {
+		return err
+	}
+	for _, runtime := range runtimes {
+		sandboxID := strings.TrimSpace(runtime.SandboxID)
+		if sandboxID == "" {
+			continue
+		}
+		client, err := m.sandboxClientForRuntime(ctx, gatewaymanagedagents.RequestCredential{}, runtime)
+		if err != nil {
+			m.logger.Warn("create sandbox client for runtime reconcile failed",
+				zap.Error(err),
+				zap.String("session_id", runtimeSessionID(runtime)),
+				zap.String("sandbox_id", sandboxID),
+			)
+			continue
+		}
+		opCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
+		_, err = client.GetSandbox(opCtx, sandboxID)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if isSandboxNotFound(err) {
+			if markErr := m.markRuntimeSandboxLost(ctx, runtime, "sandbox not found during runtime reconcile"); markErr != nil {
+				m.logger.Warn("mark runtime sandbox lost during reconcile failed",
+					zap.Error(markErr),
+					zap.String("session_id", runtimeSessionID(runtime)),
+					zap.String("sandbox_id", sandboxID),
+				)
+			}
+			continue
+		}
+		m.logger.Warn("get runtime sandbox during reconcile failed",
+			zap.Error(err),
+			zap.String("session_id", runtimeSessionID(runtime)),
+			zap.String("sandbox_id", sandboxID),
+		)
+	}
+	return nil
 }
 
 func (m *SDKRuntimeManager) RefreshRunningRuntimeTTLs(ctx context.Context) error {
@@ -61,6 +108,16 @@ func (m *SDKRuntimeManager) RefreshRunningRuntimeTTLs(ctx context.Context) error
 		err := m.RefreshRuntimeTTL(opCtx, gatewaymanagedagents.RequestCredential{}, runtime)
 		cancel()
 		if err != nil {
+			if isSandboxNotFound(err) {
+				if markErr := m.markRuntimeSandboxLost(ctx, runtime, "sandbox not found during ttl refresh"); markErr != nil {
+					m.logger.Warn("mark runtime sandbox lost after ttl refresh failed",
+						zap.Error(markErr),
+						zap.String("session_id", runtimeSessionID(runtime)),
+						zap.String("sandbox_id", runtimeSandboxID(runtime)),
+					)
+				}
+				continue
+			}
 			m.logger.Warn("refresh running runtime ttl failed",
 				zap.Error(err),
 				zap.String("session_id", runtimeSessionID(runtime)),
@@ -128,6 +185,36 @@ func (m *SDKRuntimeManager) deleteIdleRuntimeSandbox(ctx context.Context, runtim
 		}
 		return nil
 	})
+}
+
+func (m *SDKRuntimeManager) markRuntimeSandboxLost(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord, reason string) error {
+	if runtime == nil {
+		return nil
+	}
+	return m.repo.WithSessionLock(ctx, runtime.SessionID, func(ctx context.Context) error {
+		current, err := m.repo.GetRuntime(ctx, runtime.SessionID)
+		if err != nil {
+			if errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
+				return nil
+			}
+			return err
+		}
+		return m.repo.MarkRuntimeSandboxLost(ctx, current, reason, time.Now().UTC())
+	})
+}
+
+func (m *SDKRuntimeManager) markRuntimeSandboxLostAndReload(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord, reason string) (*gatewaymanagedagents.RuntimeRecord, error) {
+	if err := m.markRuntimeSandboxLost(ctx, runtime, reason); err != nil {
+		return nil, err
+	}
+	reloaded, err := m.repo.GetRuntime(ctx, runtime.SessionID)
+	if err != nil {
+		if errors.Is(err, gatewaymanagedagents.ErrRuntimeNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return reloaded, nil
 }
 
 func isSandboxNotFound(err error) bool {

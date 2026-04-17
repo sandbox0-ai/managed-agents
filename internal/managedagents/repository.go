@@ -712,6 +712,28 @@ func (r *Repository) ListIdleRuntimesForSandboxDeletion(ctx context.Context, cut
 	return scanRuntimeRows(rows)
 }
 
+func (r *Repository) ListRuntimesWithSandboxes(ctx context.Context, limit int) ([]*RuntimeRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.db(ctx).Query(ctx, `
+		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+		FROM managed_agent_session_runtimes r
+		JOIN managed_agent_sessions s ON s.id = r.session_id
+		WHERE s.deleted_at IS NULL
+			AND r.sandbox_id IS NOT NULL
+			AND r.sandbox_id <> ''
+		ORDER BY r.updated_at ASC, r.session_id ASC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list managed-agent runtimes with sandboxes: %w", err)
+	}
+	defer rows.Close()
+	return scanRuntimeRows(rows)
+}
+
 func (r *Repository) MarkRuntimeSandboxDeleted(ctx context.Context, sessionID, sandboxID string, deletedAt time.Time) error {
 	result, err := r.db(ctx).Exec(ctx, `
 		UPDATE managed_agent_session_runtimes

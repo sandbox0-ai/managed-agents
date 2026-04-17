@@ -714,14 +714,33 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 	if err := json.Unmarshal(rawBody, &envelope); err != nil {
 		return errors.New("invalid webhook body")
 	}
+	eventType := strings.TrimSpace(envelope.EventType)
+	if strings.TrimSpace(envelope.SandboxID) == "" {
+		return errors.New("webhook sandbox_id is required")
+	}
 	runtime, err := s.repo.GetRuntimeBySandboxID(ctx, envelope.SandboxID)
 	if err != nil {
+		if errors.Is(err, ErrRuntimeNotFound) && sandboxWebhookEventMarksRuntimeLost(eventType) {
+			return nil
+		}
 		return err
 	}
 	if subtleTrim(runtime.ControlToken) == "" || !sandbox0sdk.VerifyWebhookSignature(runtime.ControlToken, rawBody, signature) {
 		return errors.New("invalid webhook signature")
 	}
-	if strings.TrimSpace(envelope.EventType) != "agent.event" {
+	if sandboxWebhookEventMarksRuntimeLost(eventType) {
+		return s.repo.WithSessionLock(ctx, runtime.SessionID, func(ctx context.Context) error {
+			current, err := s.repo.GetRuntime(ctx, runtime.SessionID)
+			if err != nil {
+				if errors.Is(err, ErrRuntimeNotFound) {
+					return nil
+				}
+				return err
+			}
+			return s.repo.MarkRuntimeSandboxLost(ctx, current, eventType, time.Now().UTC())
+		})
+	}
+	if eventType != "agent.event" {
 		return nil
 	}
 	var payload RuntimeCallbackPayload
@@ -748,12 +767,21 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 		SandboxID:         runtime.SandboxID,
 		RuntimeGeneration: runtime.RuntimeGeneration,
 		RunID:             strings.TrimSpace(payload.RunID),
-		EventType:         strings.TrimSpace(envelope.EventType),
+		EventType:         eventType,
 		Payload:           payload,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	})
 	return err
+}
+
+func sandboxWebhookEventMarksRuntimeLost(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "sandbox.killed", "sandbox.deleted":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) StartRuntimeWebhookWorker(ctx context.Context) {
