@@ -30,8 +30,16 @@ export function inputEventsToPrompt(events) {
 }
 
 export function inputEventsToSDKMessages(events) {
+  const messages = inputEventsToSDKUserMessages(events);
+  const needsStructuredPrompt = messages.some((message) => (
+    Array.isArray(message?.message?.content)
+    && message.message.content.some((block) => block.type !== 'text')
+  ));
+  return needsStructuredPrompt ? asyncIterableFrom(messages) : null;
+}
+
+export function inputEventsToSDKUserMessages(events) {
   const messages = [];
-  let needsStructuredPrompt = false;
   for (const event of events ?? []) {
     if (!event || typeof event !== 'object') {
       continue;
@@ -41,9 +49,6 @@ export function inputEventsToSDKMessages(events) {
       if (content.length === 0) {
         continue;
       }
-      if (content.some((block) => block.type !== 'text')) {
-        needsStructuredPrompt = true;
-      }
       messages.push(sdkUserMessage(content, event));
       continue;
     }
@@ -52,7 +57,7 @@ export function inputEventsToSDKMessages(events) {
       messages.push(sdkUserMessage([{ type: 'text', text }], event));
     }
   }
-  return needsStructuredPrompt ? asyncIterableFrom(messages) : null;
+  return messages;
 }
 
 function extractText(content) {

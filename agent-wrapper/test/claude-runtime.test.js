@@ -209,7 +209,7 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
     },
   });
 
-  assert.equal(sdkCall.prompt, 'hi');
+  assert.equal(typeof sdkCall.prompt?.[Symbol.asyncIterator], 'function');
   assert.equal(sdkCall.options.agent, 'managed-agent');
   assert.deepEqual(sdkCall.options.agents['managed-agent'].skills, ['workspace-map', 'regression-check']);
   assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
@@ -217,6 +217,120 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
   assert.equal(sdkCall.options.tools.includes('Skill'), true);
   assert.equal(currentSession.vendor_session_id, 'vendor_sesn_sdk_options');
   assert.equal(callbackPayloads.at(-1).events.at(-1).type, 'session.status_idle');
+});
+
+test('ClaudeRuntime reuses a resident SDK query across runs in a session', async () => {
+  const sdkCalls = [];
+  const prompts = [];
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      sdkCalls.push({ prompt, options });
+      return sdkResidentResultStream(prompt, prompts, 'vendor_sesn_resident');
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_resident',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+  const callbackPayloads = [];
+  const callbackClient = {
+    send: async (_session, payload) => callbackPayloads.push(payload),
+  };
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_resident_1',
+    input_events: [{ type: 'user.message', content: 'first' }],
+  }, callbackClient, sessionStore);
+  await runtime.startRun(currentSession, {
+    run_id: 'run_resident_2',
+    input_events: [{ type: 'user.message', content: 'second' }],
+  }, callbackClient, sessionStore);
+
+  assert.equal(sdkCalls.length, 1);
+  assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['first', 'second']);
+  assert.equal(currentSession.vendor_session_id, 'vendor_sesn_resident');
+  assert.equal(callbackPayloads.filter((payload) => payload.events.some((event) => event.type === 'session.status_idle')).length, 2);
+  runtime.deleteSession(currentSession.session_id);
+});
+
+test('ClaudeRuntime restarts a resident SDK query when session resources change', async () => {
+  const sdkCalls = [];
+  const prompts = [];
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      const callIndex = sdkCalls.length + 1;
+      sdkCalls.push({ prompt, options });
+      return sdkResidentResultStream(prompt, prompts, `vendor_sesn_resources_${callIndex}`);
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_resources',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    resources: [{ type: 'volume', id: 'vol_a', mount_path: '/mnt/data' }],
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+  const callbackClient = {
+    send: async () => {},
+  };
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_resources_1',
+    input_events: [{ type: 'user.message', content: 'before remount' }],
+  }, callbackClient, sessionStore);
+
+  currentSession = {
+    ...currentSession,
+    resources: [{ type: 'volume', id: 'vol_b', mount_path: '/mnt/data' }],
+  };
+  await runtime.startRun(currentSession, {
+    run_id: 'run_resources_2',
+    input_events: [{ type: 'user.message', content: 'after remount' }],
+  }, callbackClient, sessionStore);
+  await new Promise((resolve) => setImmediate(resolve));
+  await runtime.startRun(currentSession, {
+    run_id: 'run_resources_3',
+    input_events: [{ type: 'user.message', content: 'same mount' }],
+  }, callbackClient, sessionStore);
+
+  assert.equal(sdkCalls.length, 2);
+  assert.equal(sdkCalls[1].options.resume, 'vendor_sesn_resources_1');
+  assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['before remount', 'after remount', 'same mount']);
+  runtime.deleteSession(currentSession.session_id);
 });
 
 test('ClaudeRuntime strips bare mode even without attached skills', async () => {
@@ -256,6 +370,7 @@ test('ClaudeRuntime strips bare mode even without attached skills', async () => 
     },
   });
 
+  assert.equal(typeof sdkCall.prompt?.[Symbol.asyncIterator], 'function');
   assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
   assert.equal(sdkCall.options.agent, undefined);
   assert.deepEqual(sdkCall.options.tools, []);
@@ -343,6 +458,28 @@ async function* sdkResultStream() {
     stop_reason: 'end_turn',
     usage: {},
   };
+}
+
+async function* sdkResidentResultStream(prompt, prompts, sessionID) {
+  let initialized = false;
+  for await (const message of prompt) {
+    prompts.push(message);
+    if (!initialized) {
+      initialized = true;
+      yield {
+        type: 'system',
+        subtype: 'init',
+        session_id: sessionID,
+      };
+    }
+    yield {
+      type: 'result',
+      subtype: 'success',
+      session_id: sessionID,
+      stop_reason: 'end_turn',
+      usage: {},
+    };
+  }
 }
 
 test('allowToolUseDecision returns SDK-compatible allow result', () => {

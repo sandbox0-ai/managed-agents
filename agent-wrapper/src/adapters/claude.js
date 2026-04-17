@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { inputEventsToPrompt, inputEventsToSDKMessages } from '../lib/prompt.js';
+import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
 import {
   AgentRuntime,
@@ -13,8 +13,6 @@ import {
   runtimeModelForSession,
   sessionErrorEventForError,
 } from './runtime.js';
-
-async function* emptyPromptStream() {}
 
 const MAIN_AGENT_NAME = 'managed-agent';
 const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
@@ -139,6 +137,7 @@ export class ClaudeRuntime extends AgentRuntime {
   constructor({ queryFn = query } = {}) {
     super('claude');
     this.queryFn = queryFn;
+    this.sessions = new Map();
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
@@ -146,12 +145,37 @@ export class ClaudeRuntime extends AgentRuntime {
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
-    const prompt = buildPromptInput(run.input_events);
-    const options = this.#buildOptions(session, run, callbackClient, sessionStore);
-    const modelRequestStartID = newEventID('span');
-    if (session.vendor_session_id) {
-      options.resume = session.vendor_session_id;
+    const sessionRuntime = this.#runtimeForSession(session);
+    return this.#startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore);
+  }
+
+  async interruptRun(runID) {
+    const active = this.activeRuns.get(runID);
+    if (!active) {
+      return false;
     }
+    await active.stream.interrupt();
+    return true;
+  }
+
+  deleteSession(sessionID) {
+    this.#closeSessionRuntime(sessionID);
+    this.pendingActions.delete(sessionID);
+    this.emittedToolUses.delete(sessionID);
+  }
+
+  async #startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore) {
+    if (sessionRuntime.completedRunIDs.has(run.run_id)) {
+      return;
+    }
+    if (sessionRuntime.activeRun?.run?.run_id === run.run_id) {
+      return sessionRuntime.activeRun.done;
+    }
+    if (sessionRuntime.activeRun) {
+      throw new Error(`claude session ${session.session_id} already has an active run`);
+    }
+
+    const modelRequestStartID = newEventID('span');
     let currentSession = session;
     const bootstrapEvents = Array.isArray(session.bootstrap_events)
       ? session.bootstrap_events.filter((event) => event && typeof event === 'object')
@@ -170,70 +194,172 @@ export class ClaudeRuntime extends AgentRuntime {
       }));
     }
 
-    await callbackClient.send(currentSession, {
-      session_id: currentSession.session_id,
-      run_id: run.run_id,
-      vendor_session_id: currentSession.vendor_session_id,
-      events: [{ type: 'span.model_request_start', id: modelRequestStartID }],
+    let resolveRun;
+    const done = new Promise((resolve) => {
+      resolveRun = resolve;
     });
+    sessionRuntime.activeRun = {
+      session: currentSession,
+      run,
+      callbackClient,
+      sessionStore,
+      modelRequestStartID,
+      done,
+      resolve: resolveRun,
+    };
 
-    const stream = this.queryFn({ prompt, options });
-    this.activeRuns.set(run.run_id, { stream, sessionID: session.session_id });
     try {
-      for await (const message of stream) {
+      if (!sessionRuntime.stream) {
+        this.#startSessionRuntime(sessionRuntime, currentSession);
+      }
+
+      await callbackClient.send(currentSession, {
+        session_id: currentSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: currentSession.vendor_session_id,
+        events: [{ type: 'span.model_request_start', id: modelRequestStartID }],
+      });
+
+      this.activeRuns.set(run.run_id, { stream: sessionRuntime.stream, sessionID: session.session_id });
+      sessionRuntime.inputQueue.push(runInputMessages(run.input_events));
+    } catch (error) {
+      sessionRuntime.activeRun = null;
+      this.activeRuns.delete(run.run_id);
+      this.#closeSessionRuntime(session.session_id);
+      throw error;
+    }
+    return done;
+  }
+
+  #startSessionRuntime(sessionRuntime, session) {
+    const options = this.#buildOptions(session, {
+      getActiveRun: () => sessionRuntime.activeRun,
+    });
+    if (session.vendor_session_id) {
+      options.resume = session.vendor_session_id;
+    }
+    const stream = this.queryFn({ prompt: sessionRuntime.inputQueue, options });
+    sessionRuntime.stream = stream;
+    sessionRuntime.pump = this.#pumpSessionRuntime(sessionRuntime).catch((error) => {
+      logWarn('claude resident runtime failed', {
+        session_id: sessionRuntime.sessionID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  async #pumpSessionRuntime(sessionRuntime) {
+    try {
+      for await (const message of sessionRuntime.stream) {
+        const activeRun = sessionRuntime.activeRun;
+        if (!activeRun) {
+          continue;
+        }
+        let currentSession = activeRun.session;
         if (!currentSession.vendor_session_id && message?.session_id) {
-          currentSession = sessionStore.persistSession((current) => ({
+          currentSession = activeRun.sessionStore.persistSession((current) => ({
             ...current,
             vendor_session_id: message.session_id,
           }));
+          activeRun.session = currentSession;
         }
-        const callbackPayload = this.#mapMessage(currentSession, run, message, modelRequestStartID);
+        const callbackPayload = this.#mapMessage(currentSession, activeRun.run, message, activeRun.modelRequestStartID);
         if (callbackPayload) {
-          await callbackClient.send(currentSession, callbackPayload);
+          await activeRun.callbackClient.send(currentSession, callbackPayload);
+        }
+        if (message?.type === 'result') {
+          this.#finishResidentRun(sessionRuntime);
         }
       }
     } catch (error) {
-      const latestSession = sessionStore.getSession?.() ?? currentSession;
+      const activeRun = sessionRuntime.activeRun;
+      if (!activeRun) {
+        throw error;
+      }
+      const latestSession = activeRun.sessionStore.getSession?.() ?? activeRun.session;
       const errorEvent = sessionErrorEventForError(error);
       logWarn('claude run failed', {
         session_id: latestSession.session_id,
-        run_id: run.run_id,
+        run_id: activeRun.run.run_id,
         vendor_session_id: latestSession.vendor_session_id ?? null,
         error: errorEvent.error.message,
         error_type: errorEvent.error.type,
         retry_status: errorEvent.error.retry_status?.type ?? null,
       });
-      await callbackClient.send(latestSession, {
+      await activeRun.callbackClient.send(latestSession, {
         session_id: latestSession.session_id,
-        run_id: run.run_id,
+        run_id: activeRun.run.run_id,
         vendor_session_id: latestSession.vendor_session_id,
         events: [
-          buildModelRequestEndEvent(modelRequestStartID, null, true),
+          buildModelRequestEndEvent(activeRun.modelRequestStartID, null, true),
           errorEvent,
           finalStatusEventForSessionError(errorEvent),
         ],
       });
+      this.#finishResidentRun(sessionRuntime);
     } finally {
-      this.pendingActions.delete(session.session_id);
-      this.emittedToolUses.delete(session.session_id);
-      this.deferredRunErrors.delete(run.run_id);
-      this.activeRuns.delete(run.run_id);
+      sessionRuntime.closed = true;
+      sessionRuntime.inputQueue.close();
+      if (this.sessions.get(sessionRuntime.sessionID) === sessionRuntime) {
+        this.sessions.delete(sessionRuntime.sessionID);
+      }
     }
   }
 
-  async interruptRun(runID) {
-    const active = this.activeRuns.get(runID);
-    if (!active) {
-      return false;
+  #finishResidentRun(sessionRuntime) {
+    const activeRun = sessionRuntime.activeRun;
+    if (!activeRun) {
+      return;
     }
-    await active.stream.interrupt();
-    active.stream.close();
-    return true;
+    this.pendingActions.delete(activeRun.session.session_id);
+    this.emittedToolUses.delete(activeRun.session.session_id);
+    this.deferredRunErrors.delete(activeRun.run.run_id);
+    this.activeRuns.delete(activeRun.run.run_id);
+    rememberCompletedRunID(sessionRuntime, activeRun.run.run_id);
+    sessionRuntime.activeRun = null;
+    activeRun.resolve();
   }
 
-  deleteSession(sessionID) {
-    this.pendingActions.delete(sessionID);
-    this.emittedToolUses.delete(sessionID);
+  #runtimeForSession(session) {
+    const signature = residentSessionSignature(session);
+    const existing = this.sessions.get(session.session_id);
+    if (existing && existing.signature === signature && !existing.closed) {
+      return existing;
+    }
+    if (existing) {
+      if (existing.activeRun) {
+        throw new Error(`claude session ${session.session_id} configuration changed during an active run`);
+      }
+      this.#closeSessionRuntime(session.session_id);
+    }
+    const sessionRuntime = {
+      sessionID: session.session_id,
+      signature,
+      inputQueue: new AsyncInputQueue(),
+      stream: null,
+      pump: null,
+      activeRun: null,
+      completedRunIDs: new Set(),
+      completedRunOrder: [],
+      closed: false,
+    };
+    this.sessions.set(session.session_id, sessionRuntime);
+    return sessionRuntime;
+  }
+
+  #closeSessionRuntime(sessionID) {
+    const sessionRuntime = this.sessions.get(sessionID);
+    if (!sessionRuntime) {
+      return;
+    }
+    sessionRuntime.closed = true;
+    sessionRuntime.inputQueue.close();
+    sessionRuntime.stream?.close?.();
+    if (sessionRuntime.activeRun) {
+      this.activeRuns.delete(sessionRuntime.activeRun.run.run_id);
+      sessionRuntime.activeRun.resolve();
+    }
+    this.sessions.delete(sessionID);
   }
 
   resolveActions(sessionID, events, sessionStore) {
@@ -324,12 +450,22 @@ export class ClaudeRuntime extends AgentRuntime {
     return response;
   }
 
-  #buildOptions(session, run, callbackClient, sessionStore) {
+  #buildOptions(session, runContext) {
     const engine = session.engine ?? {};
     const toolPlan = buildToolPlan(session.agent?.tools);
+    const activeRun = () => {
+      const current = runContext?.getActiveRun?.();
+      if (!current) {
+        throw new Error('claude runtime has no active run context');
+      }
+      return current;
+    };
     const customTools = buildCustomToolAdapters(
       session.agent?.tools,
-      async (tool, args) => this.#invokeCustomTool(session, run, callbackClient, sessionStore, tool, args),
+      async (tool, args) => {
+        const current = activeRun();
+        return this.#invokeCustomTool(current.session, current.run, current.callbackClient, current.sessionStore, tool, args);
+      },
     );
     const options = {
       cwd: session.working_directory,
@@ -346,26 +482,30 @@ export class ClaudeRuntime extends AgentRuntime {
       extraArgs: claudeExtraArgsForSession(session),
       env: runtimeEnvForClaudeEngine(engine),
       persistSession: true,
-      canUseTool: async (toolName, input, options) => this.#handlePermissionRequest(
-        session,
-        run,
-        callbackClient,
-        sessionStore,
-        toolPlan,
-        customTools,
-        toolName,
-        input,
-        options,
-      ),
+      canUseTool: async (toolName, input, options) => {
+        const current = activeRun();
+        return this.#handlePermissionRequest(
+          current.session,
+          current.run,
+          current.callbackClient,
+          current.sessionStore,
+          toolPlan,
+          customTools,
+          toolName,
+          input,
+          options,
+        );
+      },
       hooks: {
         PreToolUse: [{
           hooks: [async (input) => {
+            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
             const eventID = String(input.tool_use_id ?? '');
             if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
-            const currentSession = sessionStore.getSession() ?? session;
-            const resolvedTool = resolveToolPolicyForSession(session, toolPlan, input);
+            const currentSession = sessionStore.getSession() ?? currentRunSession;
+            const resolvedTool = resolveToolPolicyForSession(currentRunSession, toolPlan, input);
             const evaluatedPermission = resolvedTool.enabled
               ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
               : 'deny';
@@ -450,10 +590,11 @@ export class ClaudeRuntime extends AgentRuntime {
         }],
         PostToolUse: [{
           hooks: [async (input) => {
+            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
             if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
-            const currentSession = sessionStore.getSession() ?? session;
+            const currentSession = sessionStore.getSession() ?? currentRunSession;
             await callbackClient.send(currentSession, {
               session_id: currentSession.session_id,
               run_id: run.run_id,
@@ -465,10 +606,11 @@ export class ClaudeRuntime extends AgentRuntime {
         }],
         PostToolUseFailure: [{
           hooks: [async (input) => {
+            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
             if (isCustomToolInput(customTools, input)) {
               return { continue: true };
             }
-            const currentSession = sessionStore.getSession() ?? session;
+            const currentSession = sessionStore.getSession() ?? currentRunSession;
             await callbackClient.send(currentSession, {
               session_id: currentSession.session_id,
               run_id: run.run_id,
@@ -480,7 +622,8 @@ export class ClaudeRuntime extends AgentRuntime {
         }],
         PostCompact: [{
           hooks: [async () => {
-            const currentSession = sessionStore.getSession() ?? session;
+            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
+            const currentSession = sessionStore.getSession() ?? currentRunSession;
             await callbackClient.send(currentSession, {
               session_id: currentSession.session_id,
               run_id: run.run_id,
@@ -772,21 +915,116 @@ export class ClaudeRuntime extends AgentRuntime {
   }
 }
 
-function buildPromptInput(events) {
-  const filteredEvents = filteredPromptEvents(events);
-  const structuredPrompt = inputEventsToSDKMessages(filteredEvents);
-  if (structuredPrompt) {
-    return structuredPrompt;
-  }
-  const prompt = inputEventsToPrompt(filteredEvents);
-  if (prompt) {
-    return prompt;
-  }
-  return emptyPromptStream();
-}
-
 function filteredPromptEvents(events) {
   return (events ?? []).filter((event) => event?.type !== 'user.tool_confirmation');
+}
+
+function runInputMessages(events) {
+  const messages = inputEventsToSDKUserMessages(filteredPromptEvents(events));
+  if (messages.length > 0) {
+    return messages;
+  }
+  return [{
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: '' }],
+    },
+    parent_tool_use_id: null,
+  }];
+}
+
+function residentSessionSignature(session) {
+  return stableStringify({
+    vendor: session?.vendor,
+    working_directory: session?.working_directory,
+    agent: session?.agent,
+    environment_id: session?.environment_id,
+    environment_artifact: session?.environment_artifact,
+    resources: session?.resources,
+    vault_ids: session?.vault_ids,
+    skill_names: session?.skill_names,
+    engine: session?.engine,
+  });
+}
+
+function stableStringify(value) {
+  return JSON.stringify(stableValue(value));
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableValue(item));
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    out[key] = stableValue(value[key]);
+  }
+  return out;
+}
+
+function rememberCompletedRunID(sessionRuntime, runID) {
+  const normalized = String(runID ?? '').trim();
+  if (!normalized || sessionRuntime.completedRunIDs.has(normalized)) {
+    return;
+  }
+  sessionRuntime.completedRunIDs.add(normalized);
+  sessionRuntime.completedRunOrder.push(normalized);
+  while (sessionRuntime.completedRunOrder.length > 128) {
+    const removed = sessionRuntime.completedRunOrder.shift();
+    sessionRuntime.completedRunIDs.delete(removed);
+  }
+}
+
+class AsyncInputQueue {
+  constructor() {
+    this.items = [];
+    this.waiters = [];
+    this.closed = false;
+  }
+
+  push(items) {
+    if (this.closed) {
+      throw new Error('claude input queue is closed');
+    }
+    for (const item of items ?? []) {
+      const waiter = this.waiters.shift();
+      if (waiter) {
+        waiter({ value: item, done: false });
+      } else {
+        this.items.push(item);
+      }
+    }
+  }
+
+  close() {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator]() {
+    return this;
+  }
+
+  next() {
+    if (this.items.length > 0) {
+      return Promise.resolve({ value: this.items.shift(), done: false });
+    }
+    if (this.closed) {
+      return Promise.resolve({ value: undefined, done: true });
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
 }
 
 function isClaudeSDKFailureSystemMessage(message, subtype) {
