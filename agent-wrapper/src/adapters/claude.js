@@ -43,6 +43,27 @@ export function querySkillNames(session) {
   return names.length > 0 ? names : undefined;
 }
 
+export function sessionErrorEventForClaudeSDKSystemMessage(message) {
+  if (!message || typeof message !== 'object' || message.type !== 'system') {
+    return null;
+  }
+  const subtype = String(message.subtype ?? '').trim();
+  if (subtype === 'api_retry') {
+    const event = sessionErrorEventForError(claudeSDKSystemErrorMessage(message, 'Claude SDK model request retrying'));
+    return {
+      ...event,
+      error: {
+        ...event.error,
+        retry_status: { type: 'retrying' },
+      },
+    };
+  }
+  if (!isClaudeSDKFailureSystemMessage(message, subtype)) {
+    return null;
+  }
+  return sessionErrorEventForError(claudeSDKSystemErrorMessage(message, 'Claude SDK model request failed'));
+}
+
 export function allowToolUseDecision(input, toolUseID) {
   const decision = {
     behavior: 'allow',
@@ -113,13 +134,25 @@ export class ClaudeRuntime extends AgentRuntime {
       }
     } catch (error) {
       const latestSession = sessionStore.getSession?.() ?? currentSession;
+      const errorEvent = sessionErrorEventForError(error);
+      logWarn('claude run failed', {
+        session_id: latestSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: latestSession.vendor_session_id ?? null,
+        error: errorEvent.error.message,
+        error_type: errorEvent.error.type,
+        retry_status: errorEvent.error.retry_status?.type ?? null,
+      });
       await callbackClient.send(latestSession, {
         session_id: latestSession.session_id,
         run_id: run.run_id,
         vendor_session_id: latestSession.vendor_session_id,
-        events: [buildModelRequestEndEvent(modelRequestStartID, null, true)],
-      }).catch(() => {});
-      throw error;
+        events: [
+          buildModelRequestEndEvent(modelRequestStartID, null, true),
+          errorEvent,
+          finalStatusEventForSessionError(errorEvent),
+        ],
+      });
     } finally {
       this.pendingActions.delete(session.session_id);
       this.emittedToolUses.delete(session.session_id);
@@ -552,6 +585,18 @@ export class ClaudeRuntime extends AgentRuntime {
     if (!message || typeof message !== 'object') {
       return null;
     }
+    if (message.type === 'system') {
+      const errorEvent = sessionErrorEventForClaudeSDKSystemMessage(message);
+      if (!errorEvent) {
+        return null;
+      }
+      return {
+        session_id: session.session_id,
+        run_id: run.run_id,
+        vendor_session_id: message.session_id,
+        events: [errorEvent],
+      };
+    }
     if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
       const events = [];
       for (const block of message.message.content) {
@@ -682,6 +727,57 @@ function buildPromptInput(events) {
 
 function filteredPromptEvents(events) {
   return (events ?? []).filter((event) => event?.type !== 'user.tool_confirmation');
+}
+
+function isClaudeSDKFailureSystemMessage(message, subtype) {
+  const normalizedSubtype = String(subtype ?? '').trim().toLowerCase();
+  if (normalizedSubtype === 'init') {
+    return false;
+  }
+  return normalizedSubtype.includes('error')
+    || normalizedSubtype.includes('failed')
+    || normalizedSubtype.includes('failure')
+    || firstNonEmptyString(message?.error_status, message?.status, message?.status_code, message?.error_code, message?.error);
+}
+
+function claudeSDKSystemErrorMessage(message, fallback) {
+  const parts = [];
+  appendDetail(parts, 'subtype', message.subtype);
+  appendDetail(parts, 'status', firstNonEmptyString(message.status, message.status_code, message.error_status));
+  appendDetail(parts, 'error', message.error);
+  appendDetail(parts, 'code', firstNonEmptyString(message.code, message.error_code));
+  appendDetail(parts, 'message', firstNonEmptyString(message.message, message.error_message));
+  appendDetail(parts, 'attempt', message.attempt);
+  appendDetail(parts, 'max_attempts', firstNonEmptyString(message.max_attempts, message.maxAttempts));
+  appendDetail(parts, 'retry_after_ms', firstNonEmptyString(message.retry_after_ms, message.retryAfterMs, message.delay_ms));
+  return parts.length > 0 ? `Claude SDK API error: ${parts.join('; ')}` : fallback;
+}
+
+function appendDetail(parts, label, value) {
+  const normalized = detailString(value);
+  if (normalized) {
+    parts.push(`${label}=${normalized}`);
+  }
+}
+
+function detailString(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (value instanceof Error) {
+    return value.message;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function normalizeToolName(toolName) {

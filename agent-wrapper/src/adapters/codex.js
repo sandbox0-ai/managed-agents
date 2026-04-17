@@ -3,10 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { inputEventsToPrompt } from '../lib/prompt.js';
 import { newID } from '../lib/ids.js';
-import { logInfo, logWarn } from '../lib/log.js';
+import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
 import { buildToolPlan, resolveToolPolicy } from './claude.js';
 import { CodexAppServerClient } from './codex-app-server.js';
-import { AgentRuntime, agentWrapperStateDir, runtimeEnvForEngine, runtimeModelForSession, sessionErrorEventForError } from './runtime.js';
+import {
+  AgentRuntime,
+  agentWrapperStateDir,
+  finalStatusEventForSessionError,
+  runtimeEnvForEngine,
+  runtimeModelForSession,
+  sessionErrorEventForError,
+} from './runtime.js';
 
 export class CodexRuntime extends AgentRuntime {
   constructor({ clientFactory } = {}) {
@@ -61,13 +68,26 @@ export class CodexRuntime extends AgentRuntime {
       await watcher.promise;
     } catch (error) {
       watcher.cleanup();
-      await callbackClient.send(sessionStore.getSession?.() ?? currentSession, {
-        session_id: currentSession.session_id,
+      const latestSession = sessionStore.getSession?.() ?? currentSession;
+      const errorEvent = sessionErrorEventForError(error);
+      logWarn('codex run failed', {
+        session_id: latestSession.session_id,
         run_id: run.run_id,
-        vendor_session_id: currentSession.vendor_session_id,
-        events: [buildModelRequestEndEvent(modelRequestStartID, null, true)],
-      }).catch(() => {});
-      throw error;
+        vendor_session_id: latestSession.vendor_session_id ?? null,
+        error: errorEvent.error.message,
+        error_type: errorEvent.error.type,
+        retry_status: errorEvent.error.retry_status?.type ?? null,
+      });
+      await callbackClient.send(latestSession, {
+        session_id: latestSession.session_id,
+        run_id: run.run_id,
+        vendor_session_id: latestSession.vendor_session_id,
+        events: [
+          buildModelRequestEndEvent(modelRequestStartID, null, true),
+          errorEvent,
+          finalStatusEventForSessionError(errorEvent),
+        ],
+      });
     } finally {
       this.activeRuns.delete(run.run_id);
       this.pendingActions.delete(currentSession.session_id);
@@ -101,54 +121,90 @@ export class CodexRuntime extends AgentRuntime {
 
   async resolveActions(sessionID, events, sessionStore) {
     const currentSession = sessionStore.getSession?.();
-    const pending = this.pendingActions.get(sessionID);
-    if (!pending || pending.size === 0) {
+    const pendingSnapshots = pendingActionSnapshotMap(currentSession?.pending_actions);
+    const pendingPromises = this.pendingActions.get(sessionID);
+    const hasVendorSession = typeof currentSession?.vendor_session_id === 'string' && currentSession.vendor_session_id.trim() !== '';
+    const hasToolConfirmationInput = (events ?? []).some((event) => event?.type === 'user.tool_confirmation');
+    if (pendingSnapshots.size === 0 && (!pendingPromises || pendingPromises.size === 0) && !(hasVendorSession && hasToolConfirmationInput)) {
+      logWarn('codex resolve actions without pending state', {
+        session_id: sessionID,
+        vendor_session_id: currentSession?.vendor_session_id ?? null,
+        ...summarizePendingActions(currentSession?.pending_actions),
+        in_memory_pending_count: pendingPromises?.size ?? 0,
+        input_event_types: (events ?? []).map((event) => event?.type ?? null),
+      });
       return { resolved_count: 0, remaining_action_ids: [], resume_required: false };
     }
     let resolved = 0;
+    let resumeRequired = false;
+    const toolConfirmationResolutions = {
+      ...(currentSession?.tool_confirmation_resolutions ?? {}),
+    };
     for (const event of events ?? []) {
       if (!event || typeof event !== 'object') {
         continue;
       }
       if (event.type === 'user.tool_confirmation') {
         const actionID = String(event.tool_use_id ?? '');
-        const action = pending.get(actionID);
-        if (!action || action.kind !== 'tool_confirmation') {
+        const pendingAction = pendingPromises?.get(actionID);
+        const action = pendingAction ?? pendingSnapshots.get(actionID);
+        if ((!action || action.kind !== 'tool_confirmation') && !hasVendorSession) {
           continue;
         }
-        pending.delete(actionID);
+        const decision = toolConfirmationDecision(event, action);
+        if (pendingAction && pendingAction.kind === 'tool_confirmation') {
+          pendingPromises.delete(actionID);
+          pendingSnapshots.delete(actionID);
+          resolved += 1;
+          pendingAction.resolve(decision);
+          continue;
+        }
+        if (action && action.kind === 'tool_confirmation') {
+          pendingSnapshots.delete(action.id);
+        }
         resolved += 1;
-        action.resolve(toolConfirmationDecision(event, action));
+        resumeRequired = true;
+        toolConfirmationResolutions[actionID] = {
+          result: decision,
+        };
         continue;
       }
       if (event.type === 'user.custom_tool_result') {
         const actionID = String(event.custom_tool_use_id ?? '');
-        const action = pending.get(actionID);
+        const action = pendingPromises?.get(actionID);
         if (!action || action.kind !== 'custom_tool_result') {
           continue;
         }
-        pending.delete(actionID);
+        pendingPromises.delete(actionID);
+        pendingSnapshots.delete(actionID);
         resolved += 1;
         action.resolve(customToolResult(event));
       }
     }
-    if (pending.size === 0) {
+    if (!pendingPromises || pendingPromises.size === 0) {
       this.pendingActions.delete(sessionID);
     }
-    const remainingActionIDs = Array.from(pending.keys());
+    const remainingActionIDs = Array.from(pendingSnapshots.keys());
     sessionStore.persistSession((current) => ({
       ...current,
-      pending_actions: remainingActionIDs.map((id) => pending.get(id)?.snapshot).filter(Boolean),
+      pending_actions: pendingActionSnapshots(pendingSnapshots),
+      tool_confirmation_resolutions: toolConfirmationResolutions,
       updated_at: new Date().toISOString(),
     }));
+    const response = {
+      resolved_count: resolved,
+      remaining_action_ids: remainingActionIDs,
+      resume_required: resumeRequired && remainingActionIDs.length === 0,
+    };
     logInfo('codex resolve actions', {
       session_id: sessionID,
       vendor_session_id: currentSession?.vendor_session_id ?? null,
-      resolved_count: resolved,
-      remaining_action_ids: remainingActionIDs,
+      resolved_count: response.resolved_count,
+      remaining_action_ids: response.remaining_action_ids,
+      resume_required: response.resume_required,
       input_event_types: (events ?? []).map((event) => event?.type ?? null),
     });
-    return { resolved_count: resolved, remaining_action_ids: remainingActionIDs, resume_required: false };
+    return response;
   }
 
   async #clientForSession(session) {
@@ -297,6 +353,16 @@ export class CodexRuntime extends AgentRuntime {
     const evaluatedPermission = resolvedTool.enabled
       ? (resolvedTool.policy === 'always_allow' ? 'allow' : 'ask')
       : 'deny';
+    const existingResolution = session?.tool_confirmation_resolutions?.[actionID]?.result;
+    if (existingResolution) {
+      sessionStore.persistSession((latest) => ({
+        ...latest,
+        pending_actions: pendingActionSnapshots(removePendingAction(latest?.pending_actions, actionID)),
+        tool_confirmation_resolutions: omitActionResolution(latest?.tool_confirmation_resolutions, actionID),
+        updated_at: new Date().toISOString(),
+      }));
+      return existingResolution;
+    }
     rememberToolUse(this, session.session_id, params.itemId, actionID);
     if (!this.wasToolUseEmitted(session.session_id, actionID)) {
       this.markToolUseEmitted(session.session_id, actionID);
@@ -328,6 +394,7 @@ export class CodexRuntime extends AgentRuntime {
         tool_use_id: actionID,
         name: resolvedTool.name,
         input: input.tool_input,
+        response_kind: toolName === 'edit' ? 'file_change' : 'command',
       },
     }, sessionStore).promise;
   }
@@ -367,7 +434,7 @@ export class CodexRuntime extends AgentRuntime {
     this.pendingActions.set(session.session_id, pending);
     sessionStore.persistSession((current) => ({
       ...current,
-      pending_actions: Array.from(pending.values()).map((entry) => entry.snapshot).filter(Boolean),
+      pending_actions: pendingActionSnapshots(mergePendingSnapshots(current?.pending_actions, pending)),
       updated_at: new Date().toISOString(),
     }));
     return deferred;
@@ -441,7 +508,7 @@ function buildTurnStartParams(session, run) {
   const engine = session.engine ?? {};
   return omitUndefined({
     threadId: session.vendor_session_id,
-    input: inputEventsToCodexInput(run.input_events),
+    input: inputEventsToCodexInput(run.input_events, session),
     model: runtimeModelForSession(session),
     cwd: session.working_directory,
     approvalPolicy: codexApprovalPolicy(engine),
@@ -487,7 +554,7 @@ function workspaceSandboxPolicy(workingDirectory, engine) {
   };
 }
 
-function inputEventsToCodexInput(events) {
+function inputEventsToCodexInput(events, session) {
   const items = [];
   for (const event of events ?? []) {
     if (!event || typeof event !== 'object' || event.type === 'user.tool_confirmation' || event.type === 'user.custom_tool_result') {
@@ -508,7 +575,7 @@ function inputEventsToCodexInput(events) {
   if (items.length === 0) {
     items.push({ type: 'text', text: '' });
   }
-  return items;
+  return [...items, ...skillInputItemsForSession(session)];
 }
 
 function userMessageText(content) {
@@ -549,6 +616,21 @@ function dynamicToolsForAgent(tools) {
     });
   }
   return out;
+}
+
+function skillInputItemsForSession(session) {
+  if (!Array.isArray(session?.skill_names)) {
+    return [];
+  }
+  const workingDirectory = firstNonEmptyString(session.working_directory, '/workspace');
+  return session.skill_names
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value.length > 0)
+    .map((name) => ({
+      type: 'skill',
+      name,
+      path: path.join(workingDirectory, '.claude', 'skills', name, 'SKILL.md'),
+    }));
 }
 
 function notificationMatchesTurn(message, turnRef) {
@@ -704,7 +786,7 @@ function toolConfirmationDecision(event, action) {
   if (event.result === 'allow') {
     return { decision: 'accept' };
   }
-  return { decision: action.responseKind === 'file_change' ? 'cancel' : 'cancel' };
+  return { decision: action?.responseKind === 'file_change' ? 'cancel' : 'cancel' };
 }
 
 function customToolResult(event) {
@@ -729,6 +811,7 @@ function buildTurnCompletedPayload(session, run, turn, modelRequestStartID, usag
     };
   }
   const message = turn?.error?.message ?? turn?.error?.type ?? `Codex turn ${status}`;
+  const errorEvent = sessionErrorEventForError(message, 'Codex run failed');
   return {
     session_id: session.session_id,
     run_id: run.run_id,
@@ -736,8 +819,8 @@ function buildTurnCompletedPayload(session, run, turn, modelRequestStartID, usag
     usage_delta: buildUsageDelta(usage),
     events: [
       buildModelRequestEndEvent(modelRequestStartID, usage, true),
-      sessionErrorEventForError(message, 'Codex run failed'),
-      { type: 'session.status_terminated' },
+      errorEvent,
+      finalStatusEventForSessionError(errorEvent),
     ],
   };
 }
@@ -778,6 +861,75 @@ function toolResultContent(content) {
     });
   }
   return [{ type: 'text', text: String(content ?? '') }];
+}
+
+function pendingActionSnapshots(pending) {
+  if (pending instanceof Map) {
+    return Array.from(pending.values()).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      tool_use_id: action.tool_use_id,
+      custom_tool_use_id: action.custom_tool_use_id,
+      name: action.name,
+      input: action.input === undefined ? undefined : asStruct(action.input),
+      response_kind: action.responseKind ?? action.response_kind,
+    }));
+  }
+  if (!pending || pending.size === 0) {
+    return [];
+  }
+  return Array.from(pending).map((action) => ({
+    id: action.id,
+    kind: action.kind,
+    tool_use_id: action.tool_use_id,
+    custom_tool_use_id: action.custom_tool_use_id,
+    name: action.name,
+    input: action.input === undefined ? undefined : asStruct(action.input),
+    response_kind: action.responseKind ?? action.response_kind,
+  }));
+}
+
+function pendingActionSnapshotMap(pending) {
+  const map = new Map();
+  for (const action of pending ?? []) {
+    if (!action || typeof action !== 'object') {
+      continue;
+    }
+    const id = String(action.id ?? '').trim();
+    if (!id) {
+      continue;
+    }
+    map.set(id, {
+      id,
+      kind: String(action.kind ?? ''),
+      tool_use_id: String(action.tool_use_id ?? ''),
+      custom_tool_use_id: String(action.custom_tool_use_id ?? ''),
+      name: String(action.name ?? ''),
+      input: action.input === undefined ? undefined : asStruct(action.input),
+      responseKind: String(action.response_kind ?? action.responseKind ?? ''),
+    });
+  }
+  return map;
+}
+
+function removePendingAction(pending, actionID) {
+  const map = pendingActionSnapshotMap(pending);
+  map.delete(String(actionID ?? ''));
+  return map;
+}
+
+function mergePendingSnapshots(existing, pendingPromises) {
+  const map = pendingActionSnapshotMap(existing);
+  for (const action of pendingPromises?.values?.() ?? []) {
+    map.set(action.id, action);
+  }
+  return map;
+}
+
+function omitActionResolution(resolutions, actionID) {
+  const next = { ...(resolutions ?? {}) };
+  delete next[String(actionID ?? '')];
+  return next;
 }
 
 function rememberToolUse(runtime, sessionID, itemID, actionID) {

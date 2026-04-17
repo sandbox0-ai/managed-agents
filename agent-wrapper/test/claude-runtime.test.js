@@ -15,6 +15,7 @@ import {
   runtimeEnvForClaudeEngine,
   runtimeEnvForEngine,
   runtimeModelForSession,
+  sessionErrorEventForClaudeSDKSystemMessage,
   sessionErrorEventForError,
 } from '../src/adapters/claude.js';
 
@@ -423,6 +424,64 @@ test('providerErrorEventForText detects SDK assistant-text API errors', () => {
     stop_reason: { type: 'retries_exhausted' },
   });
   assert.equal(providerErrorEventForText('I can explain what a rate limit is.'), null);
+});
+
+test('sessionErrorEventForClaudeSDKSystemMessage maps API retry to retrying session error', () => {
+  const event = sessionErrorEventForClaudeSDKSystemMessage({
+    type: 'system',
+    subtype: 'api_retry',
+    error_status: 401,
+    error: 'authentication_failed',
+    message: 'invalid API key',
+    attempt: 1,
+    max_attempts: 3,
+  });
+
+  assert.equal(event.type, 'session.error');
+  assert.equal(event.error.type, 'model_request_failed_error');
+  assert.deepEqual(event.error.retry_status, { type: 'retrying' });
+  assert.match(event.error.message, /status=401/);
+  assert.match(event.error.message, /authentication_failed/);
+  assert.match(event.error.message, /attempt=1/);
+});
+
+test('sessionErrorEventForClaudeSDKSystemMessage keeps retry error classification contract-shaped', () => {
+  const rateLimit = sessionErrorEventForClaudeSDKSystemMessage({
+    type: 'system',
+    subtype: 'api_retry',
+    status: 429,
+    error: { type: 'rate_limit_error', message: 'too many requests' },
+  });
+  const overloaded = sessionErrorEventForClaudeSDKSystemMessage({
+    type: 'system',
+    subtype: 'api_retry',
+    status: 529,
+    error: 'overloaded',
+  });
+
+  assert.equal(rateLimit.error.type, 'model_rate_limited_error');
+  assert.deepEqual(rateLimit.error.retry_status, { type: 'retrying' });
+  assert.equal(overloaded.error.type, 'model_overloaded_error');
+  assert.deepEqual(overloaded.error.retry_status, { type: 'retrying' });
+});
+
+test('sessionErrorEventForClaudeSDKSystemMessage maps SDK final errors to session errors', () => {
+  const event = sessionErrorEventForClaudeSDKSystemMessage({
+    type: 'system',
+    subtype: 'api_error',
+    status: 500,
+    error: 'upstream failed',
+  });
+
+  assert.equal(event.type, 'session.error');
+  assert.equal(event.error.type, 'model_request_failed_error');
+  assert.deepEqual(event.error.retry_status, { type: 'exhausted' });
+  assert.match(event.error.message, /subtype=api_error/);
+});
+
+test('sessionErrorEventForClaudeSDKSystemMessage ignores non-error system events', () => {
+  assert.equal(sessionErrorEventForClaudeSDKSystemMessage({ type: 'system', subtype: 'init' }), null);
+  assert.equal(sessionErrorEventForClaudeSDKSystemMessage({ type: 'assistant' }), null);
 });
 
 test('querySkillNames trims and filters preload skill names', () => {
