@@ -283,14 +283,35 @@ func TestApplyManagedLLMEnvInjectsAnthropicCredential(t *testing.T) {
 		t.Fatalf("ANTHROPIC_BASE_URL = %q, want https://api.anthropic.com", got)
 	}
 	extraArgs := mapValue(engine["extra_args"])
-	if got, ok := extraArgs["bare"]; !ok || got != nil {
-		t.Fatalf("extra_args.bare = %#v, want explicit null flag", got)
+	if _, ok := extraArgs["bare"]; ok {
+		t.Fatalf("extra_args.bare is set, want omitted")
 	}
 	if credential.VaultID != "vlt_llm" {
 		t.Fatalf("credential vault id = %q, want vlt_llm", credential.VaultID)
 	}
 	if credential.Token != "secret-token" {
 		t.Fatalf("credential token = %q, want secret-token", credential.Token)
+	}
+}
+
+func TestApplyManagedLLMEnvRemovesBareMode(t *testing.T) {
+	engine, _, err := applyManagedLLMEnv("claude", map[string]any{
+		"extra_args": map[string]any{
+			"bare":       nil,
+			"debug-file": "/tmp/debug.log",
+		},
+	}, testLLMVaultCredentials(
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	extraArgs := mapValue(engine["extra_args"])
+	if got := stringValue(extraArgs["debug-file"]); got != "/tmp/debug.log" {
+		t.Fatalf("extra_args[debug-file] = %q, want /tmp/debug.log", got)
+	}
+	if _, ok := extraArgs["bare"]; ok {
+		t.Fatalf("extra_args.bare is set, want omitted")
 	}
 }
 
@@ -316,8 +337,8 @@ func TestApplyManagedLLMEnvOverwritesExplicitEngineCredentialWithFakeKey(t *test
 		t.Fatalf("ANTHROPIC_BASE_URL = %q, want canonical managed base URL", got)
 	}
 	extraArgs := mapValue(engine["extra_args"])
-	if got, ok := extraArgs["bare"]; !ok || got != nil {
-		t.Fatalf("extra_args.bare = %#v, want explicit null flag", got)
+	if _, ok := extraArgs["bare"]; ok {
+		t.Fatalf("extra_args.bare is set, want omitted")
 	}
 }
 
@@ -334,8 +355,8 @@ func TestApplyManagedLLMEnvPreservesExistingExtraArgs(t *testing.T) {
 	if got := stringValue(extraArgs["debug-file"]); got != "/tmp/debug.log" {
 		t.Fatalf("extra_args[debug-file] = %q, want /tmp/debug.log", got)
 	}
-	if got, ok := extraArgs["bare"]; !ok || got != nil {
-		t.Fatalf("extra_args.bare = %#v, want explicit null flag", got)
+	if _, ok := extraArgs["bare"]; ok {
+		t.Fatalf("extra_args.bare is set, want omitted")
 	}
 }
 

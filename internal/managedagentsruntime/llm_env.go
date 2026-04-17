@@ -59,8 +59,7 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 	env["ANTHROPIC_BASE_URL"] = resolvedBaseURL
 	out["env"] = env
 	extraArgs := cloneMap(mapValue(out["extra_args"]))
-	// Claude Code only honors env-based Anthropic auth reliably in bare mode.
-	extraArgs["bare"] = nil
+	delete(extraArgs, "bare")
 	out["extra_args"] = extraArgs
 	credentialCopy := *credential
 	credentialCopy.BaseURL = resolvedBaseURL
