@@ -43,6 +43,7 @@ type config struct {
 	DatabaseMaxConns       int32
 	DatabaseMinConns       int32
 	Sandbox0BaseURL        string
+	Sandbox0AuthBaseURL    string
 	Sandbox0AdminAPIKey    string
 	RuntimeCallbackBaseURL string
 	Sandbox0Timeout        time.Duration
@@ -140,7 +141,7 @@ func main() {
 	}
 
 	authenticator, err := httpauth.NewSandbox0Authenticator(httpauth.Sandbox0AuthenticatorConfig{
-		BaseURL: cfg.Sandbox0BaseURL,
+		BaseURL: cfg.Sandbox0AuthBaseURL,
 		Timeout: cfg.Sandbox0Timeout,
 		Logger:  logger,
 	})
@@ -208,6 +209,7 @@ func main() {
 		logger.Info("starting agent-gateway",
 			zap.String("addr", cfg.HTTPAddr),
 			zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL),
+			zap.String("sandbox0_auth_base_url", cfg.Sandbox0AuthBaseURL),
 			zap.Bool("observability_enabled", cfg.ObservabilityEnabled),
 			zap.Bool("metrics_enabled", metricsEnabled),
 			zap.String("trace_exporter", cfg.TraceExporter),
@@ -235,6 +237,7 @@ func main() {
 }
 
 func loadConfig() (config, error) {
+	sandbox0BaseURL := trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL))
 	cfg := config{
 		HTTPAddr:               envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
 		LogLevel:               envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
@@ -242,7 +245,8 @@ func loadConfig() (config, error) {
 		DatabaseSchema:         envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
 		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
 		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
-		Sandbox0BaseURL:        strings.TrimRight(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL), "/"),
+		Sandbox0BaseURL:        sandbox0BaseURL,
+		Sandbox0AuthBaseURL:    trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL", sandbox0BaseURL)),
 		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
 		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
 		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
@@ -384,6 +388,10 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func trimURL(value string) string {
+	return strings.TrimRight(strings.TrimSpace(value), "/")
 }
 
 func firstEnv(keys ...string) string {
