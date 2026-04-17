@@ -4,10 +4,13 @@ import { EventEmitter } from 'node:events';
 import { CodexRuntime } from '../src/adapters/codex.js';
 
 class FakeCodexClient extends EventEmitter {
-  constructor({ approval = false, stderrLine = null } = {}) {
+  constructor({ approval = false, stderrLine = null, startError = null, completionStatus = 'completed', completionError = null } = {}) {
     super();
     this.approval = approval;
     this.stderrLine = stderrLine;
+    this.startError = startError;
+    this.completionStatus = completionStatus;
+    this.completionError = completionError;
     this.requests = [];
     this.responses = [];
   }
@@ -27,6 +30,9 @@ class FakeCodexClient extends EventEmitter {
       return { thread: { id: params.threadId } };
     }
     if (method === 'turn/start') {
+      if (this.startError) {
+        throw this.startError;
+      }
       const turn = { id: 'turn_codex', status: 'inProgress', items: [] };
       setImmediate(() => {
         this.emit('notification', { method: 'turn/started', params: { threadId: 'thr_codex', turn } });
@@ -108,7 +114,7 @@ class FakeCodexClient extends EventEmitter {
       method: 'turn/completed',
       params: {
         threadId: 'thr_codex',
-        turn: { id: 'turn_codex', status: 'completed', items: [] },
+        turn: { id: 'turn_codex', status: this.completionStatus, error: this.completionError, items: [] },
       },
     });
   }
@@ -130,6 +136,22 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.message'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
+});
+
+test('CodexRuntime passes preloaded skills as app-server skill input items', async () => {
+  const client = new FakeCodexClient();
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession({ skill_names: ['workspace-map', ' regression-check '] });
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  assert.deepEqual(client.requests[1].params.input, [
+    { type: 'text', text: 'hello' },
+    { type: 'skill', name: 'workspace-map', path: '/workspace/.claude/skills/workspace-map/SKILL.md' },
+    { type: 'skill', name: 'regression-check', path: '/workspace/.claude/skills/regression-check/SKILL.md' },
+  ]);
 });
 
 test('CodexRuntime maps app-server approvals to managed-agent required actions', async () => {
@@ -161,6 +183,95 @@ test('CodexRuntime maps app-server approvals to managed-agent required actions',
   assert.deepEqual(client.responses, [{ id: 101, result: { decision: 'accept' } }]);
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.tool_use' && event.evaluated_permission === 'ask'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.tool_result' && event.tool_use_id === 'cmd_1'));
+});
+
+test('CodexRuntime resolves persisted tool confirmations like Claude', async () => {
+  const runtime = new CodexRuntime({ clientFactory: () => new FakeCodexClient() });
+  let storedSession = codexSession({
+    vendor_session_id: 'thr_codex',
+    pending_actions: [{
+      id: 'cmd_1',
+      kind: 'tool_confirmation',
+      tool_use_id: 'cmd_1',
+      name: 'bash',
+      input: { command: 'date' },
+      response_kind: 'command',
+    }],
+    tool_confirmation_resolutions: {},
+  });
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  const result = await runtime.resolveActions(storedSession.session_id, [{
+    type: 'user.tool_confirmation',
+    tool_use_id: 'cmd_1',
+    result: 'allow',
+  }], sessionStore);
+
+  assert.deepEqual(result, { resolved_count: 1, remaining_action_ids: [], resume_required: true });
+  assert.deepEqual(storedSession.pending_actions, []);
+  assert.deepEqual(storedSession.tool_confirmation_resolutions.cmd_1.result, { decision: 'accept' });
+});
+
+test('CodexRuntime consumes persisted tool confirmation resolutions on resume', async () => {
+  const client = new FakeCodexClient({ approval: true });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession({
+    vendor_session_id: 'thr_codex',
+    pending_actions: [{
+      id: 'cmd_1',
+      kind: 'tool_confirmation',
+      tool_use_id: 'cmd_1',
+      name: 'bash',
+      input: { command: 'date' },
+      response_kind: 'command',
+    }],
+    tool_confirmation_resolutions: {
+      cmd_1: { result: { decision: 'accept' } },
+    },
+  });
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  assert.deepEqual(client.responses, [{ id: 101, result: { decision: 'accept' } }]);
+  assert.deepEqual(storedSession.pending_actions, []);
+  assert.deepEqual(storedSession.tool_confirmation_resolutions, {});
+  assert.equal(callbacks.flatMap((payload) => payload.events).some((event) => event.stop_reason?.type === 'requires_action'), false);
+});
+
+test('CodexRuntime reports app-server start failures as managed-agent session errors', async () => {
+  const client = new FakeCodexClient({
+    startError: new Error('API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}'),
+  });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'span.model_request_end' && event.is_error === true));
+  assert(events.some((event) => event.type === 'session.error' && event.error.type === 'model_rate_limited_error'));
+  assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'retries_exhausted'));
+});
+
+test('CodexRuntime maps failed turns through the shared final status helper', async () => {
+  const client = new FakeCodexClient({
+    completionStatus: 'failed',
+    completionError: { message: 'API Error: 429 rate limit reached' },
+  });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'session.error' && event.error.type === 'model_rate_limited_error'));
+  assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'retries_exhausted'));
 });
 
 test('CodexRuntime forwards app-server stderr to redacted wrapper logs', async () => {
