@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -17,6 +18,7 @@ import {
 const MAIN_AGENT_NAME = 'managed-agent';
 const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
 const DEFAULT_MAIN_AGENT_PROMPT = 'You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.';
+const DEFAULT_LOCAL_CLAUDE_STATE_ROOT = path.join(os.tmpdir(), 'sandbox0', 'agent-wrapper');
 
 export {
   finalStatusEventForSessionError,
@@ -29,7 +31,8 @@ export {
 export function runtimeEnvForClaudeEngine(engine) {
   const env = runtimeEnvForEngine(engine);
   if (!env.CLAUDE_CONFIG_DIR) {
-    env.CLAUDE_CONFIG_DIR = path.join(agentWrapperStateDir(env), 'claude');
+    const localStateRoot = env.AGENT_WRAPPER_LOCAL_STATE_DIR || DEFAULT_LOCAL_CLAUDE_STATE_ROOT;
+    env.CLAUDE_CONFIG_DIR = path.join(localStateRoot, 'claude');
   }
   fs.mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true });
   return env;

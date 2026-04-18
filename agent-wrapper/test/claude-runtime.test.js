@@ -459,27 +459,27 @@ test('runtimeEnvForEngine preserves base process environment', () => {
   assert.equal(merged.HOME, process.env.HOME);
 });
 
-test('runtimeEnvForClaudeEngine stores Claude config under wrapper state dir', () => {
-  const previousStateDir = process.env.AGENT_WRAPPER_STATE_DIR;
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-wrapper-state-'));
+test('runtimeEnvForClaudeEngine stores Claude config under local tmp state by default', () => {
+  const previousLocalStateDir = process.env.AGENT_WRAPPER_LOCAL_STATE_DIR;
+  const localStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-wrapper-local-state-'));
   try {
-    process.env.AGENT_WRAPPER_STATE_DIR = stateDir;
+    process.env.AGENT_WRAPPER_LOCAL_STATE_DIR = localStateDir;
     const env = runtimeEnvForClaudeEngine({
       env: {
         ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
       },
     });
 
-    assert.equal(env.CLAUDE_CONFIG_DIR, path.join(stateDir, 'claude'));
+    assert.equal(env.CLAUDE_CONFIG_DIR, path.join(localStateDir, 'claude'));
     assert.equal(fs.existsSync(env.CLAUDE_CONFIG_DIR), true);
     assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
   } finally {
-    if (previousStateDir === undefined) {
-      delete process.env.AGENT_WRAPPER_STATE_DIR;
+    if (previousLocalStateDir === undefined) {
+      delete process.env.AGENT_WRAPPER_LOCAL_STATE_DIR;
     } else {
-      process.env.AGENT_WRAPPER_STATE_DIR = previousStateDir;
+      process.env.AGENT_WRAPPER_LOCAL_STATE_DIR = previousLocalStateDir;
     }
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    fs.rmSync(localStateDir, { recursive: true, force: true });
   }
 });
 
