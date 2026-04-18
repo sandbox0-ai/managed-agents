@@ -270,6 +270,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			zap.String("workspace_volume_id", workspaceVolumeID),
 		)
 	} else {
+		op.AddFields(zap.String("workspace_volume_id", workspaceVolumeID))
 		op.ObservePhase("reuse_workspace_volume", 0, nil,
 			zap.String("workspace_volume_id", workspaceVolumeID),
 		)
@@ -331,6 +332,10 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		return nil, fmt.Errorf("claim sandbox: %w", err)
 	}
 	sandboxID = sandbox.ID
+	op.AddFields(
+		zap.String("sandbox_id", sandboxID),
+		zap.String("workspace_volume_id", workspaceVolumeID),
+	)
 	op.ObservePhase("claim_sandbox", time.Since(phaseStarted), nil,
 		zap.String("sandbox_id", sandboxID),
 		zap.Int("bootstrap_mount_count", len(packageMounts)+1),
@@ -380,6 +385,10 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		CreatedAt:         createdAt,
 		UpdatedAt:         now,
 	}
+	op.AddFields(
+		zap.String("runtime_region_id", regionID),
+		zap.String("wrapper_url", publicURL),
+	)
 	phaseStarted = time.Now()
 	if err := m.repo.UpsertRuntime(ctx, runtime); err != nil {
 		op.ObservePhase("upsert_runtime_record", time.Since(phaseStarted), err,
@@ -407,6 +416,10 @@ func (m *SDKRuntimeManager) BootstrapSession(ctx context.Context, credential gat
 		return err
 	}
 	op.ObservePhase("sync_bootstrap_state", time.Since(phaseStarted), nil,
+		zap.Int("bootstrap_event_count", len(bootstrapReq.BootstrapEvents)),
+		zap.Int("skill_count", len(bootstrapReq.SkillNames)),
+	)
+	op.AddFields(
 		zap.Int("bootstrap_event_count", len(bootstrapReq.BootstrapEvents)),
 		zap.Int("skill_count", len(bootstrapReq.SkillNames)),
 	)
@@ -457,27 +470,72 @@ func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymana
 }
 
 func (m *SDKRuntimeManager) ResolveActions(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperResolveActionsRequest) (*gatewaymanagedagents.WrapperResolveActionsResponse, error) {
+	var err error
+	ctx, op := m.observability.StartOperation(ctx, "runtime_resolve_actions", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+		zap.Int("input_event_count", len(req.Events)),
+	)
+	defer func() { op.End(err) }()
 	var response gatewaymanagedagents.WrapperResolveActionsResponse
-	if err := m.wrapperJSONDecode(ctx, credential, runtime, http.MethodPost, "/v1/runtime/session/"+url.PathEscape(req.SessionID)+"/actions/resolve", req, &response); err != nil {
+	phaseStarted := time.Now()
+	if err = m.wrapperJSONDecode(ctx, credential, runtime, http.MethodPost, "/v1/runtime/session/"+url.PathEscape(req.SessionID)+"/actions/resolve", req, &response); err != nil {
+		op.ObservePhase("wrapper_resolve_actions", time.Since(phaseStarted), err)
 		return nil, err
 	}
+	op.ObservePhase("wrapper_resolve_actions", time.Since(phaseStarted), nil,
+		zap.Int("remaining_action_count", len(response.RemainingActionIDs)),
+		zap.Bool("resume_required", response.ResumeRequired),
+	)
 	return &response, nil
 }
 
 func (m *SDKRuntimeManager) InterruptRun(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, runID string) error {
-	return m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/interrupt", nil)
+	var err error
+	ctx, op := m.observability.StartOperation(ctx, "runtime_interrupt_run", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+		zap.String("run_id", strings.TrimSpace(runID)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
+	err = m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/interrupt", nil)
+	op.ObservePhase("wrapper_interrupt_run", time.Since(phaseStarted), err)
+	return err
 }
 
 func (m *SDKRuntimeManager) DeleteWrapperSession(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, sessionID string) error {
-	return m.wrapperJSON(ctx, credential, runtime, http.MethodDelete, "/v1/runtime/session/"+url.PathEscape(sessionID), nil)
+	var err error
+	ctx, op := m.observability.StartOperation(ctx, "runtime_delete_wrapper_session", runtimeVendorForLog(runtime),
+		zap.String("session_id", strings.TrimSpace(sessionID)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
+	err = m.wrapperJSON(ctx, credential, runtime, http.MethodDelete, "/v1/runtime/session/"+url.PathEscape(sessionID), nil)
+	op.ObservePhase("wrapper_delete_session", time.Since(phaseStarted), err)
+	return err
 }
 
 func (m *SDKRuntimeManager) DestroyRuntime(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord) error {
+	var err error
+	ctx, op := m.observability.StartOperation(ctx, "runtime_destroy", runtimeVendorForLog(runtime),
+		zap.String("session_id", runtimeSessionID(runtime)),
+		zap.String("sandbox_id", runtimeSandboxID(runtime)),
+		zap.String("workspace_volume_id", runtimeWorkspaceVolumeID(runtime)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
 	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
 	if err != nil {
+		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return err
 	}
-	return m.cleanupRuntimeSandboxResources(ctx, client, runtime, true)
+	op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
+	err = m.cleanupRuntimeSandboxResources(ctx, client, runtime, true)
+	op.ObservePhase("cleanup_runtime_resources", time.Since(phaseStarted), err)
+	return err
 }
 
 func (m *SDKRuntimeManager) cleanupRuntimeSandboxResources(ctx context.Context, client *sandbox0sdk.Client, runtime *gatewaymanagedagents.RuntimeRecord, deleteWorkspaceVolume bool) error {
@@ -683,6 +741,13 @@ func runtimeSandboxID(runtime *gatewaymanagedagents.RuntimeRecord) string {
 		return ""
 	}
 	return runtime.SandboxID
+}
+
+func runtimeWorkspaceVolumeID(runtime *gatewaymanagedagents.RuntimeRecord) string {
+	if runtime == nil {
+		return ""
+	}
+	return runtime.WorkspaceVolumeID
 }
 
 func runtimeVendorForLog(runtime *gatewaymanagedagents.RuntimeRecord) string {
