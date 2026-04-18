@@ -864,19 +864,29 @@ func (s *Service) runtimeWebhookWorkerLoop(ctx context.Context, owner string) {
 }
 
 func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string) (bool, error) {
-	var err error
-	ctx, op := s.observability.StartOperation(ctx, "runtime_process_webhook_job", "",
+	phaseStarted := time.Now()
+	job, err := s.repo.LeaseNextRuntimeWebhookJob(ctx, owner, time.Now().UTC().Add(runtimeWebhookLeaseDuration))
+	leaseDuration := time.Since(phaseStarted)
+	if err != nil {
+		_, op := s.observability.StartOperation(ctx, "runtime_process_webhook_job", "",
+			zap.String("worker", owner),
+		)
+		defer func() { op.End(err) }()
+		op.ObservePhase("lease_webhook_job", leaseDuration, err,
+			zap.Bool("job_present", false),
+		)
+		return false, err
+	}
+	if job == nil {
+		return false, nil
+	}
+	_, op := s.observability.StartOperation(ctx, "runtime_process_webhook_job", "",
 		zap.String("worker", owner),
 	)
 	defer func() { op.End(err) }()
-	phaseStarted := time.Now()
-	job, err := s.repo.LeaseNextRuntimeWebhookJob(ctx, owner, time.Now().UTC().Add(runtimeWebhookLeaseDuration))
-	op.ObservePhase("lease_webhook_job", time.Since(phaseStarted), err,
-		zap.Bool("job_present", job != nil),
+	op.ObservePhase("lease_webhook_job", leaseDuration, nil,
+		zap.Bool("job_present", true),
 	)
-	if err != nil || job == nil {
-		return job != nil, err
-	}
 	op.AddFields(
 		zap.String("job_id", job.ID),
 		zap.String("session_id", job.SessionID),
