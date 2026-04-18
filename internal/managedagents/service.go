@@ -176,6 +176,11 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
+	op.AddFields(
+		zap.String("session_id", record.ID),
+		zap.Int("vault_count", len(vaultIDs)),
+		zap.Int("resource_count", len(resources)),
+	)
 	lockStarted := time.Now()
 	if err := s.repo.WithSessionLock(ctx, record.ID, func(ctx context.Context) error {
 		return s.repo.WithTransaction(ctx, func(ctx context.Context) error {
@@ -711,19 +716,32 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	return stampedEvents, nil
 }
 
-func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, signature string) error {
+func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, signature string) (err error) {
+	var (
+		envelope  sandboxWebhookEnvelope
+		eventType string
+		sandboxID string
+	)
+	ctx, op := s.observability.StartOperation(ctx, "runtime_receive_webhook", "",
+		zap.Int("payload_bytes", len(rawBody)),
+	)
+	defer func() { op.End(err) }()
 	if len(bytesTrimSpace(rawBody)) == 0 {
 		return errors.New("webhook body is required")
 	}
-	var envelope sandboxWebhookEnvelope
 	if err := json.Unmarshal(rawBody, &envelope); err != nil {
 		return errors.New("invalid webhook body")
 	}
-	eventType := strings.TrimSpace(envelope.EventType)
-	if strings.TrimSpace(envelope.SandboxID) == "" {
+	eventType = strings.TrimSpace(envelope.EventType)
+	sandboxID = strings.TrimSpace(envelope.SandboxID)
+	op.AddFields(
+		zap.String("event_type", eventType),
+		zap.String("sandbox_id", sandboxID),
+	)
+	if sandboxID == "" {
 		return errors.New("webhook sandbox_id is required")
 	}
-	runtime, err := s.repo.GetRuntimeBySandboxID(ctx, envelope.SandboxID)
+	runtime, err := s.repo.GetRuntimeBySandboxID(ctx, sandboxID)
 	if err != nil {
 		if errors.Is(err, ErrRuntimeNotFound) && sandboxWebhookEventMarksRuntimeLost(eventType) {
 			return nil
@@ -814,10 +832,23 @@ func (s *Service) runtimeWebhookWorkerLoop(ctx context.Context, owner string) {
 }
 
 func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string) (bool, error) {
+	var err error
+	ctx, op := s.observability.StartOperation(ctx, "runtime_process_webhook_job", "",
+		zap.String("worker", owner),
+	)
+	defer func() { op.End(err) }()
 	job, err := s.repo.LeaseNextRuntimeWebhookJob(ctx, owner, time.Now().UTC().Add(runtimeWebhookLeaseDuration))
 	if err != nil || job == nil {
 		return job != nil, err
 	}
+	op.AddFields(
+		zap.String("job_id", job.ID),
+		zap.String("session_id", job.SessionID),
+		zap.String("sandbox_id", job.SandboxID),
+		zap.String("run_id", job.RunID),
+		zap.String("event_type", job.EventType),
+		zap.Int("attempts", job.Attempts),
+	)
 	if err := s.applyRuntimeWebhookJob(ctx, job); err != nil {
 		retry := job.Attempts < runtimeWebhookMaxAttempts
 		if releaseErr := s.repo.ReleaseRuntimeWebhookJob(ctx, job.ID, err, retry); releaseErr != nil {

@@ -2,7 +2,11 @@ package managedagents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -13,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Observability records managed-agent operation spans, metrics, and structured phase logs.
@@ -99,10 +104,19 @@ func (o *Observability) StartOperation(ctx context.Context, name, vendor string,
 		attribute.String("managed_agent.vendor", vendor),
 	}
 	ctx, span := o.tracer.Start(ctx, "managed-agent."+name, trace.WithAttributes(attrs...))
+	setSpanAttributesFromLogFields(span, "managed_agent.field.", fields...)
 	if o.activeOperations != nil {
 		o.activeOperations.WithLabelValues(name, vendor).Inc()
 	}
 	return ctx, &Operation{obs: o, name: name, vendor: vendor, start: time.Now(), span: span, logFields: fields}
+}
+
+func (op *Operation) AddFields(fields ...zap.Field) {
+	if op == nil || op.obs == nil || len(fields) == 0 {
+		return
+	}
+	op.logFields = append(op.logFields, fields...)
+	setSpanAttributesFromLogFields(op.span, "managed_agent.field.", fields...)
 }
 
 func (op *Operation) End(err error) {
@@ -158,6 +172,7 @@ func (op *Operation) ObservePhase(phase string, duration time.Duration, err erro
 		attribute.String("managed_agent.phase.status", status),
 		attribute.Float64("managed_agent.phase.duration_ms", float64(duration.Microseconds())/1000),
 	}
+	attrs = append(attrs, attributesFromLogFields("managed_agent.phase.field.", fields...)...)
 	if err != nil {
 		attrs = append(attrs, attribute.String("managed_agent.phase.error", err.Error()))
 	}
@@ -243,6 +258,111 @@ func registerCounterVec(reg prometheus.Registerer, opts prometheus.CounterOpts, 
 		}
 	}
 	return collector
+}
+
+func setSpanAttributesFromLogFields(span trace.Span, prefix string, fields ...zap.Field) {
+	if span == nil || len(fields) == 0 {
+		return
+	}
+	attrs := attributesFromLogFields(prefix, fields...)
+	if len(attrs) == 0 {
+		return
+	}
+	span.SetAttributes(attrs...)
+}
+
+func attributesFromLogFields(prefix string, fields ...zap.Field) []attribute.KeyValue {
+	if len(fields) == 0 {
+		return nil
+	}
+	encoder := zapcore.NewMapObjectEncoder()
+	for _, field := range fields {
+		field.AddTo(encoder)
+	}
+	return attributesFromMap(prefix, encoder.Fields)
+}
+
+func attributesFromMap(prefix string, values map[string]any) []attribute.KeyValue {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	attrs := make([]attribute.KeyValue, 0, len(keys))
+	for _, key := range keys {
+		attr, ok := attributeFromValue(prefix+key, values[key])
+		if !ok {
+			continue
+		}
+		attrs = append(attrs, attr)
+	}
+	return attrs
+}
+
+func attributeFromValue(key string, value any) (attribute.KeyValue, bool) {
+	switch typed := value.(type) {
+	case nil:
+		return attribute.String(key, "null"), true
+	case string:
+		return attribute.String(key, typed), true
+	case bool:
+		return attribute.Bool(key, typed), true
+	case int:
+		return attribute.Int64(key, int64(typed)), true
+	case int8:
+		return attribute.Int64(key, int64(typed)), true
+	case int16:
+		return attribute.Int64(key, int64(typed)), true
+	case int32:
+		return attribute.Int64(key, int64(typed)), true
+	case int64:
+		return attribute.Int64(key, typed), true
+	case uint:
+		return attribute.Int64(key, int64(typed)), true
+	case uint8:
+		return attribute.Int64(key, int64(typed)), true
+	case uint16:
+		return attribute.Int64(key, int64(typed)), true
+	case uint32:
+		return attribute.Int64(key, int64(typed)), true
+	case uint64:
+		if typed > math.MaxInt64 {
+			return attribute.String(key, fmt.Sprint(typed)), true
+		}
+		return attribute.Int64(key, int64(typed)), true
+	case float32:
+		return attribute.Float64(key, float64(typed)), true
+	case float64:
+		return attribute.Float64(key, typed), true
+	case []string:
+		return attribute.StringSlice(key, typed), true
+	case []bool:
+		return attribute.BoolSlice(key, typed), true
+	case []int:
+		values := make([]int64, 0, len(typed))
+		for _, value := range typed {
+			values = append(values, int64(value))
+		}
+		return attribute.Int64Slice(key, values), true
+	case []int64:
+		return attribute.Int64Slice(key, typed), true
+	case []float64:
+		return attribute.Float64Slice(key, typed), true
+	case time.Duration:
+		return attribute.Float64(key, float64(typed)/float64(time.Millisecond)), true
+	case time.Time:
+		return attribute.String(key, typed.Format(time.RFC3339Nano)), true
+	case error:
+		return attribute.String(key, typed.Error()), true
+	}
+	encoded, err := json.Marshal(value)
+	if err == nil {
+		return attribute.String(key, string(encoded)), true
+	}
+	return attribute.String(key, fmt.Sprint(value)), true
 }
 
 func registerHistogramVec(reg prometheus.Registerer, opts prometheus.HistogramOpts, labels []string) *prometheus.HistogramVec {

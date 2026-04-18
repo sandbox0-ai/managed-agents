@@ -96,6 +96,21 @@ test('agent-warper bootstraps a session and starts a run', async () => {
 
   assert.equal(callbacks.length, 1);
   assert.equal(callbacks[0].vendor_session_id, 'vendor_123');
+  assert.ok(logs.some((entry) => entry.msg === 'wrapper operation completed'
+    && entry.operation === 'wrapper_request'
+    && entry.route === 'put_session'
+    && entry.session_id === 'sesn_123'
+    && entry.status === 'success'));
+  assert.ok(logs.some((entry) => entry.msg === 'wrapper operation completed'
+    && entry.operation === 'wrapper_request'
+    && entry.route === 'start_run'
+    && entry.run_id === 'run_123'
+    && entry.status_code === 202));
+  assert.ok(logs.some((entry) => entry.msg === 'wrapper phase completed'
+    && entry.operation === 'wrapper_run'
+    && entry.phase === 'runtime_start_run'
+    && entry.run_id === 'run_123'
+    && entry.status === 'success'));
   assert.ok(logs.some((entry) => entry.msg === 'wrapper starting runtime run' && entry.session_id === 'sesn_123' && entry.run_id === 'run_123'));
   assert.ok(logs.some((entry) => entry.msg === 'wrapper runtime run completed' && entry.session_id === 'sesn_123' && entry.run_id === 'run_123'));
 
