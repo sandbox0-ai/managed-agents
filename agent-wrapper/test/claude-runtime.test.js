@@ -234,6 +234,92 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
   assert.equal(callbackPayloads.at(-1).events.at(-1).type, 'session.status_idle');
 });
 
+test('ClaudeRuntime can prestart a resident SDK query before the first run', async () => {
+  const sdkCalls = [];
+  const prompts = [];
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      sdkCalls.push({ prompt, options });
+      return sdkResidentResultStream(prompt, prompts, 'vendor_sesn_prestart');
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_prestart',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+
+  await runtime.prestartSession(currentSession, sessionStore);
+  assert.equal(sdkCalls.length, 1);
+  assert.equal(sdkCalls[0].options.resume, undefined);
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_prestart',
+    input_events: [{ type: 'user.message', content: 'first after prestart' }],
+  }, {
+    send: async () => {},
+  }, sessionStore);
+
+  assert.equal(sdkCalls.length, 1);
+  assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['first after prestart']);
+  assert.equal(currentSession.vendor_session_id, 'vendor_sesn_prestart');
+  await runtime.deleteSession(currentSession.session_id, currentSession);
+});
+
+test('ClaudeRuntime deduplicates concurrent prestart requests', async () => {
+  const sdkCalls = [];
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      sdkCalls.push({ prompt, options });
+      return sdkResidentResultStream(prompt, [], 'vendor_sesn_prestart_dedupe');
+    },
+  });
+  const currentSession = {
+    session_id: 'sesn_prestart_dedupe',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => updater(currentSession),
+  };
+
+  await Promise.all([
+    runtime.prestartSession(currentSession, sessionStore),
+    runtime.prestartSession(currentSession, sessionStore),
+  ]);
+
+  assert.equal(sdkCalls.length, 1);
+  await runtime.deleteSession(currentSession.session_id, currentSession);
+});
+
 test('ClaudeRuntime reuses a resident SDK query across runs in a session', async () => {
   const sdkCalls = [];
   const prompts = [];
@@ -283,7 +369,7 @@ test('ClaudeRuntime reuses a resident SDK query across runs in a session', async
   assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['first', 'second']);
   assert.equal(currentSession.vendor_session_id, 'vendor_sesn_resident');
   assert.equal(callbackPayloads.filter((payload) => payload.events.some((event) => event.type === 'session.status_idle')).length, 2);
-  runtime.deleteSession(currentSession.session_id);
+  await runtime.deleteSession(currentSession.session_id, currentSession);
 });
 
 test('ClaudeRuntime emits timing logs around resident query startup and first stream message', async () => {
@@ -400,7 +486,7 @@ test('ClaudeRuntime restarts a resident SDK query when session resources change'
   assert.equal(sdkCalls.length, 2);
   assert.equal(sdkCalls[1].options.resume, 'vendor_sesn_resources_1');
   assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['before remount', 'after remount', 'same mount']);
-  runtime.deleteSession(currentSession.session_id);
+  await runtime.deleteSession(currentSession.session_id, currentSession);
 });
 
 test('ClaudeRuntime strips bare mode even without attached skills', async () => {
