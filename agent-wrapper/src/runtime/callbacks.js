@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { postJSON } from '../lib/http.js';
 import { logError, logWarn, safeErrorMessage } from '../lib/log.js';
+import { startOperation } from '../lib/observability.js';
 
 const managedAgentWebhookRetryDelays = [250, 500, 1000, 2000, 4000];
 
@@ -47,9 +48,21 @@ export class ProcdWebhookClient {
   async send(session, payload) {
     const callbackURL = String(session?.callback_url ?? '').trim();
     if (callbackURL) {
+      const webhookOp = startOperation('wrapper_managed_agent_webhook', {
+        session_id: session?.session_id ?? null,
+        sandbox_id: session?.sandbox_id ?? null,
+        callback_url: callbackURL,
+        event_count: Array.isArray(payload?.events) ? payload.events.length : 0,
+        event_types: Array.isArray(payload?.events) ? payload.events.map((event) => event?.type ?? null) : [],
+        run_id: payload?.run_id ?? null,
+        has_control_token: Boolean(String(session?.control_token ?? this.controlToken ?? '').trim()),
+      });
       try {
-        return await this.sendManagedAgentWebhook(session, payload, callbackURL);
+        const result = await this.sendManagedAgentWebhook(session, payload, callbackURL, webhookOp);
+        webhookOp.end(null);
+        return result;
       } catch (error) {
+        webhookOp.end(error);
         logError('wrapper managed-agent webhook publish failed', {
           session_id: session?.session_id ?? null,
           sandbox_id: session?.sandbox_id ?? null,
@@ -75,10 +88,16 @@ export class ProcdWebhookClient {
     }
   }
 
-  async sendManagedAgentWebhook(session, payload, callbackURL) {
+  async sendManagedAgentWebhook(session, payload, callbackURL, webhookOp = null) {
     let lastError = null;
     for (let attempt = 0; attempt <= managedAgentWebhookRetryDelays.length; attempt += 1) {
       try {
+        if (webhookOp) {
+          webhookOp.addFields({ attempts: attempt + 1 });
+          return await webhookOp.runPhase('post_callback', () => this.postManagedAgentWebhook(session, payload, callbackURL), {
+            attempt: attempt + 1,
+          });
+        }
         return await this.postManagedAgentWebhook(session, payload, callbackURL);
       } catch (error) {
         lastError = error;
