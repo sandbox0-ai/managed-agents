@@ -100,6 +100,23 @@ export function claudeSettingSourcesForSession(session) {
   return next;
 }
 
+function elapsedMsSince(startedAtMs) {
+  if (typeof startedAtMs !== 'number' || !Number.isFinite(startedAtMs)) {
+    return null;
+  }
+  return Math.max(0, Date.now() - startedAtMs);
+}
+
+function timingFieldsForActiveRun(activeRun, extra = {}) {
+  return {
+    session_id: activeRun?.session?.session_id ?? null,
+    run_id: activeRun?.run?.run_id ?? null,
+    vendor_session_id: activeRun?.session?.vendor_session_id ?? null,
+    elapsed_ms: elapsedMsSince(activeRun?.startedAtMs),
+    ...extra,
+  };
+}
+
 export function sessionErrorEventForClaudeSDKSystemMessage(message) {
   if (!message || typeof message !== 'object' || message.type !== 'system') {
     return null;
@@ -204,9 +221,15 @@ export class ClaudeRuntime extends AgentRuntime {
       callbackClient,
       sessionStore,
       modelRequestStartID,
+      startedAtMs: Date.now(),
+      firstMessageLogged: false,
       done,
       resolve: resolveRun,
     };
+    logInfo('claude resident run starting', timingFieldsForActiveRun(sessionRuntime.activeRun, {
+      has_stream: Boolean(sessionRuntime.stream),
+      bootstrap_event_count: bootstrapEvents.length,
+    }));
 
     try {
       if (!sessionRuntime.stream) {
@@ -222,6 +245,9 @@ export class ClaudeRuntime extends AgentRuntime {
 
       this.activeRuns.set(run.run_id, { stream: sessionRuntime.stream, sessionID: session.session_id });
       sessionRuntime.inputQueue.push(runInputMessages(run.input_events));
+      logInfo('claude runtime input enqueued', timingFieldsForActiveRun(sessionRuntime.activeRun, {
+        input_event_types: (run.input_events ?? []).map((event) => event?.type ?? null),
+      }));
     } catch (error) {
       sessionRuntime.activeRun = null;
       this.activeRuns.delete(run.run_id);
@@ -238,7 +264,21 @@ export class ClaudeRuntime extends AgentRuntime {
     if (session.vendor_session_id) {
       options.resume = session.vendor_session_id;
     }
+    const queryStartedAtMs = Date.now();
+    logInfo('claude query starting', {
+      session_id: session.session_id,
+      run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
+      vendor_session_id: session.vendor_session_id ?? null,
+      resume: Boolean(session.vendor_session_id),
+    });
     const stream = this.queryFn({ prompt: sessionRuntime.inputQueue, options });
+    logInfo('claude query stream created', {
+      session_id: session.session_id,
+      run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
+      vendor_session_id: session.vendor_session_id ?? null,
+      elapsed_ms: elapsedMsSince(queryStartedAtMs),
+      resume: Boolean(session.vendor_session_id),
+    });
     sessionRuntime.stream = stream;
     sessionRuntime.pump = this.#pumpSessionRuntime(sessionRuntime).catch((error) => {
       logWarn('claude resident runtime failed', {
@@ -263,11 +303,22 @@ export class ClaudeRuntime extends AgentRuntime {
           }));
           activeRun.session = currentSession;
         }
+        if (!activeRun.firstMessageLogged) {
+          activeRun.firstMessageLogged = true;
+          logInfo('claude first stream message', timingFieldsForActiveRun(activeRun, {
+            message_type: message?.type ?? null,
+            message_subtype: message?.subtype ?? null,
+            vendor_session_id: currentSession.vendor_session_id ?? message?.session_id ?? null,
+          }));
+        }
         const callbackPayload = this.#mapMessage(currentSession, activeRun.run, message, activeRun.modelRequestStartID);
         if (callbackPayload) {
           await activeRun.callbackClient.send(currentSession, callbackPayload);
         }
         if (message?.type === 'result') {
+          logInfo('claude result received', timingFieldsForActiveRun(activeRun, {
+            stop_reason: message?.stop_reason ?? null,
+          }));
           this.#finishResidentRun(sessionRuntime);
         }
       }
@@ -279,9 +330,9 @@ export class ClaudeRuntime extends AgentRuntime {
       const latestSession = activeRun.sessionStore.getSession?.() ?? activeRun.session;
       const errorEvent = sessionErrorEventForError(error);
       logWarn('claude run failed', {
-        session_id: latestSession.session_id,
-        run_id: activeRun.run.run_id,
-        vendor_session_id: latestSession.vendor_session_id ?? null,
+        ...timingFieldsForActiveRun(activeRun, {
+          vendor_session_id: latestSession.vendor_session_id ?? null,
+        }),
         error: errorEvent.error.message,
         error_type: errorEvent.error.type,
         retry_status: errorEvent.error.retry_status?.type ?? null,

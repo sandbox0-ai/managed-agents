@@ -23,6 +23,20 @@ import {
   sessionErrorEventForError,
 } from '../src/adapters/claude.js';
 
+async function captureStructuredLogs(fn) {
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (line) => {
+    logs.push(JSON.parse(String(line)));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return logs;
+}
+
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
   const resolved = [];
@@ -269,6 +283,61 @@ test('ClaudeRuntime reuses a resident SDK query across runs in a session', async
   assert.equal(currentSession.vendor_session_id, 'vendor_sesn_resident');
   assert.equal(callbackPayloads.filter((payload) => payload.events.some((event) => event.type === 'session.status_idle')).length, 2);
   runtime.deleteSession(currentSession.session_id);
+});
+
+test('ClaudeRuntime emits timing logs around resident query startup and first stream message', async () => {
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      void options;
+      return sdkResidentResultStream(prompt, [], 'vendor_sesn_timing');
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_timing',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+  const callbackClient = {
+    send: async () => {},
+  };
+
+  const logs = await captureStructuredLogs(async () => {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_timing',
+      input_events: [{ type: 'user.message', content: 'hello timing' }],
+    }, callbackClient, sessionStore);
+  });
+
+  const messages = logs.map((entry) => entry.msg);
+  assert.ok(messages.includes('claude resident run starting'));
+  assert.ok(messages.includes('claude query starting'));
+  assert.ok(messages.includes('claude query stream created'));
+  assert.ok(messages.includes('claude runtime input enqueued'));
+  assert.ok(messages.includes('claude first stream message'));
+  assert.ok(messages.includes('claude result received'));
+
+  const firstMessageLog = logs.find((entry) => entry.msg === 'claude first stream message');
+  assert.equal(firstMessageLog.session_id, 'sesn_timing');
+  assert.equal(firstMessageLog.run_id, 'run_timing');
+  assert.ok(['assistant', 'system'].includes(firstMessageLog.message_type));
+  assert.equal(firstMessageLog.vendor_session_id, 'vendor_sesn_timing');
 });
 
 test('ClaudeRuntime restarts a resident SDK query when session resources change', async () => {
