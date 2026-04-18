@@ -1304,12 +1304,18 @@ func (s *Service) resolveFileBackedInputEvents(ctx context.Context, principal Pr
 			continue
 		}
 		for _, rawBlock := range anySlice(event["content"]) {
-			block := mapValue(rawBlock)
+			block, ok := rawBlock.(map[string]any)
+			if !ok {
+				continue
+			}
 			blockType := stringValue(block["type"])
 			if blockType != "image" && blockType != "document" {
 				continue
 			}
-			source := mapValue(block["source"])
+			source, ok := block["source"].(map[string]any)
+			if !ok {
+				continue
+			}
 			if stringValue(source["type"]) != "file" {
 				continue
 			}

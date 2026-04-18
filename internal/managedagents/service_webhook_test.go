@@ -108,6 +108,84 @@ func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
 	}
 }
 
+func TestHandleSandboxWebhookAcceptsSessionErrorRetryStatusObject(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, &recordingRuntimeManager{}, nil)
+	now := time.Date(2026, 4, 10, 6, 15, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:               "sesn_webhook_error_retry_status",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activeRunID := "run_error_retry_status"
+	runtime := &RuntimeRecord{
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_error_retry_status",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "secret_retry_status",
+		RuntimeGeneration: 1,
+		ActiveRunID:       &activeRunID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	payloadJSON, _ := json.Marshal(RuntimeCallbackPayload{
+		SessionID: record.ID,
+		RunID:     activeRunID,
+		Events: []SessionEvent{
+			{
+				Type: "session.error",
+				Error: &SessionErrorDetail{
+					Type:        "unknown_error",
+					Message:     "retry budget exhausted",
+					RetryStatus: map[string]any{"type": "exhausted"},
+				},
+			},
+			{Type: "session.status_idle", StopReason: &SessionStopReason{Type: "retries_exhausted"}},
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"event_id":   "evt_hook_error_retry_status",
+		"event_type": "agent.event",
+		"sandbox_id": runtime.SandboxID,
+		"payload":    json.RawMessage(payloadJSON),
+	})
+
+	if err := service.HandleSandboxWebhook(context.Background(), body, webhookSignature(runtime.ControlToken, body)); err != nil {
+		t.Fatalf("HandleSandboxWebhook: %v", err)
+	}
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil || !processed {
+		t.Fatalf("ProcessNextRuntimeWebhookJob processed=%v err=%v, want processed", processed, err)
+	}
+	events, _, err := repo.ListEvents(context.Background(), record.ID, EventListOptions{Limit: 10, Order: "asc"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 2 || stringValue(events[0]["type"]) != "session.error" {
+		t.Fatalf("events = %#v, want session.error then session.status_idle", events)
+	}
+	retryStatus := mapValue(mapValue(events[0]["error"])["retry_status"])
+	if stringValue(retryStatus["type"]) != "exhausted" {
+		t.Fatalf("retry_status = %#v, want exhausted object", retryStatus)
+	}
+}
+
 func TestHandleSandboxWebhookKeepsRequiresActionRunActive(t *testing.T) {
 	repo := newTestRepository(t)
 	runtimeManager := &recordingRuntimeManager{}

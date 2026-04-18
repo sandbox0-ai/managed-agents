@@ -46,6 +46,8 @@ type managedProjectedHeader struct {
 	valueTemplate string
 }
 
+const volumeFileOperationAttempts = 3
+
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
 	_ = credential
 	ctx, op := m.observability.StartOperation(ctx, "runtime_sync_bootstrap_state", runtimeVendorForLog(runtime),
@@ -243,15 +245,48 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 		}
 		parent := path.Dir(mountPath)
 		if parent != "." && parent != "/" {
-			if _, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true); err != nil {
+			err := retryVolumeFileOperation(ctx, func() error {
+				_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
+				return err
+			})
+			if err != nil {
 				return fmt.Errorf("mkdir resource path %s: %w", parent, err)
 			}
 		}
-		if _, err := client.WriteVolumeFile(ctx, workspaceVolumeID, mountPath, content); err != nil {
+		err = retryVolumeFileOperation(ctx, func() error {
+			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, mountPath, content)
+			return err
+		})
+		if err != nil {
 			return fmt.Errorf("write file resource %s to %s: %w", fileID, mountPath, err)
 		}
 	}
 	return nil
+}
+
+func retryVolumeFileOperation(ctx context.Context, operation func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= volumeFileOperationAttempts; attempt++ {
+		if err := operation(); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			lastErr = err
+			if attempt == volumeFileOperationAttempts {
+				return lastErr
+			}
+			timer := time.NewTimer(time.Duration(attempt) * 200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID, workingDirectory, vendor string, engine map[string]any, agent map[string]any) ([]string, error) {
@@ -797,11 +832,19 @@ func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, work
 		}
 		parent := path.Dir(targetPath)
 		if parent != "." && parent != "/" {
-			if _, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true); err != nil {
+			err := retryVolumeFileOperation(ctx, func() error {
+				_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
+				return err
+			})
+			if err != nil {
 				return fmt.Errorf("mkdir skill path %s: %w", parent, err)
 			}
 		}
-		if _, err := client.WriteVolumeFile(ctx, workspaceVolumeID, targetPath, file.Content); err != nil {
+		err := retryVolumeFileOperation(ctx, func() error {
+			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, targetPath, file.Content)
+			return err
+		})
+		if err != nil {
 			return fmt.Errorf("write skill file %s: %w", targetPath, err)
 		}
 	}

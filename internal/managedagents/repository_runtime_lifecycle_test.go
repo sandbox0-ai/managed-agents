@@ -55,7 +55,7 @@ func TestRuntimeSandboxDeletionKeepsRebuildState(t *testing.T) {
 		t.Fatalf("candidates = %#v, want runtime with sandbox sbx_123", candidates)
 	}
 
-	deletedAt := now
+	deletedAt := now.Truncate(time.Microsecond)
 	if err := repo.MarkRuntimeSandboxDeleted(ctx, session.ID, "sbx_123", deletedAt); err != nil {
 		t.Fatalf("MarkRuntimeSandboxDeleted: %v", err)
 	}

@@ -45,6 +45,8 @@ agentGateway:
     sandbox0BaseURL: https://api.sandbox0.ai
     # Defaults to sandbox0BaseURL when empty. Set this to the global gateway when sandbox0BaseURL points at a region gateway.
     sandbox0AuthBaseURL: ""
+    # Optional internal gateway URL for sandbox public exposure forwarding.
+    sandbox0ExposureBaseURL: ""
     sandbox0Timeout: 90s
     runtimeEnabled: true
     runtimeCallbackBaseURL: ""

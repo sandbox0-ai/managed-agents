@@ -51,6 +51,22 @@ func TestParseSkillUploadRejectsRootLevelSkillMarkdown(t *testing.T) {
 	}
 }
 
+func TestParseSkillUploadUsesFallbackDirectoryForFlatUploads(t *testing.T) {
+	parsed, err := parseSkillUpload([]uploadedSkillFile{{
+		Path:    "SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill\n---\n"),
+	}}, "skill_123")
+	if err != nil {
+		t.Fatalf("parseSkillUpload returned error: %v", err)
+	}
+	if parsed.Directory != "skill_123" {
+		t.Fatalf("directory = %q, want skill_123", parsed.Directory)
+	}
+	if len(parsed.Files) != 1 || parsed.Files[0].Path != "skill_123/SKILL.md" {
+		t.Fatalf("files = %#v, want fallback-prefixed SKILL.md", parsed.Files)
+	}
+}
+
 func TestParseSkillUploadRejectsParentDirectorySegments(t *testing.T) {
 	_, err := parseSkillUpload([]uploadedSkillFile{{
 		Path:    "demo-skill/../other-skill/SKILL.md",

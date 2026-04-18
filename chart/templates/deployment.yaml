@@ -51,6 +51,8 @@ spec:
               value: {{ .Values.agentGateway.env.sandbox0BaseURL | quote }}
             - name: MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL
               value: {{ $sandbox0AuthBaseURL | quote }}
+            - name: MANAGED_AGENT_SANDBOX0_EXPOSURE_BASE_URL
+              value: {{ .Values.agentGateway.env.sandbox0ExposureBaseURL | quote }}
             - name: MANAGED_AGENT_SANDBOX0_TIMEOUT
               value: {{ .Values.agentGateway.env.sandbox0Timeout | quote }}
             - name: MANAGED_AGENT_RUNTIME_ENABLED

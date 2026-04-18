@@ -147,6 +147,20 @@ func TestWrapperRequestTargetUsesDirectWrapperURLByDefault(t *testing.T) {
 	}
 }
 
+func TestWrapperRequestTargetUsesExposureBaseURL(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxExposureBaseURL: "http://fullmode-cluster-gateway.sandbox0-system.svc.cluster.local:30080"}}
+	requestURL, hostHeader, err := mgr.wrapperRequestTarget("https://rs-example--p8080.aws-us-east-1.sandbox0.app", "/v1/runtime/session")
+	if err != nil {
+		t.Fatalf("wrapperRequestTarget returned error: %v", err)
+	}
+	if requestURL != "http://fullmode-cluster-gateway.sandbox0-system.svc.cluster.local:30080/v1/runtime/session" {
+		t.Fatalf("requestURL = %q, want cluster gateway target", requestURL)
+	}
+	if hostHeader != "rs-example--p8080.aws-us-east-1.sandbox0.app" {
+		t.Fatalf("hostHeader = %q, want public exposure host", hostHeader)
+	}
+}
+
 func TestRuntimeWebhookURLPrefersConfiguredCallbackBaseURL(t *testing.T) {
 	mgr := &SDKRuntimeManager{cfg: Config{RuntimeCallbackBaseURL: "http://172.18.0.1:8088"}}
 	got := mgr.runtimeWebhookURL("http://127.0.0.1:18088")

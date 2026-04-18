@@ -34,7 +34,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
 	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
 verify: verify-format verify-tidy verify-generated test-unit test-wrapper helm-lint helm-template
 
@@ -55,7 +55,16 @@ verify-tidy:
 generate:
 	$(GO) generate ./internal/apicontract/generated
 
-verify-generated: generate
+verify-generated:
+	@if [ ! -f "../managed-agents-spec/specs/managed-agent-openapi.sdk-compatible.yaml" ]; then \
+		if [ "$$SKIP_GENERATED_WHEN_SPEC_MISSING" = "1" ]; then \
+			echo "Skipping generated API verification because ../managed-agents-spec is unavailable."; \
+			exit 0; \
+		fi; \
+		echo "../managed-agents-spec/specs/managed-agent-openapi.sdk-compatible.yaml is required"; \
+		exit 1; \
+	fi; \
+	$(MAKE) generate; \
 	git diff --exit-code -- internal/apicontract/generated
 
 test-unit:
@@ -71,6 +80,9 @@ test-wrapper:
 
 test-e2e:
 	GOTOOLCHAIN=go1.25.0+auto $(GO) test -count=1 -v ./tests/e2e/... -timeout=20m
+
+test-sdk-compat:
+	cd tests/sdk-compat && $(NPM) ci && $(NPM) test
 
 docker-build-gateway:
 	@test -f "$(SDK_GO_DIR)/go.mod" || { echo "SDK_GO_DIR must point to sdk-go checkout"; exit 1; }

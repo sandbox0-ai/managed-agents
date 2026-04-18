@@ -56,6 +56,19 @@ func TestLoadConfigUsesSandbox0AuthBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesSandbox0ExposureBaseURL(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
+	t.Setenv("MANAGED_AGENT_SANDBOX0_EXPOSURE_BASE_URL", "http://cluster-gateway.svc.cluster.local:30080/")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Sandbox0ExposureBaseURL != "http://cluster-gateway.svc.cluster.local:30080" {
+		t.Fatalf("Sandbox0ExposureBaseURL = %q, want trimmed URL", cfg.Sandbox0ExposureBaseURL)
+	}
+}
+
 func TestLoadConfigParsesRuntimeAllowedDomains(t *testing.T) {
 	t.Setenv("MANAGED_AGENT_DATABASE_URL", "postgres://example")
 	t.Setenv("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS", "api.search.test, https://gateway.example.test/path\nextra.example.test")

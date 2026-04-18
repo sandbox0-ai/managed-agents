@@ -36,31 +36,32 @@ import (
 )
 
 type config struct {
-	HTTPAddr               string
-	LogLevel               string
-	DatabaseURL            string
-	DatabaseSchema         string
-	DatabaseMaxConns       int32
-	DatabaseMinConns       int32
-	Sandbox0BaseURL        string
-	Sandbox0AuthBaseURL    string
-	Sandbox0AdminAPIKey    string
-	RuntimeCallbackBaseURL string
-	Sandbox0Timeout        time.Duration
-	RuntimeEnabled         bool
-	RuntimeAllowedDomains  []string
-	TemplateID             string
-	TemplateManifestPath   string
-	TemplateMainImage      string
-	WrapperPort            int
-	WorkspaceMountPath     string
-	SandboxTTLSeconds      int
-	ObservabilityEnabled   bool
-	MetricsEnabled         bool
-	TraceExporter          string
-	TraceOTLPEndpoint      string
-	TraceOTLPInsecure      bool
-	TraceSampleRate        float64
+	HTTPAddr                string
+	LogLevel                string
+	DatabaseURL             string
+	DatabaseSchema          string
+	DatabaseMaxConns        int32
+	DatabaseMinConns        int32
+	Sandbox0BaseURL         string
+	Sandbox0AuthBaseURL     string
+	Sandbox0ExposureBaseURL string
+	Sandbox0AdminAPIKey     string
+	RuntimeCallbackBaseURL  string
+	Sandbox0Timeout         time.Duration
+	RuntimeEnabled          bool
+	RuntimeAllowedDomains   []string
+	TemplateID              string
+	TemplateManifestPath    string
+	TemplateMainImage       string
+	WrapperPort             int
+	WorkspaceMountPath      string
+	SandboxTTLSeconds       int
+	ObservabilityEnabled    bool
+	MetricsEnabled          bool
+	TraceExporter           string
+	TraceOTLPEndpoint       string
+	TraceOTLPInsecure       bool
+	TraceSampleRate         float64
 }
 
 const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
@@ -161,6 +162,7 @@ func main() {
 		SandboxTTLSeconds:      cfg.SandboxTTLSeconds,
 		SandboxRequestTimeout:  cfg.Sandbox0Timeout,
 		SandboxBaseURL:         cfg.Sandbox0BaseURL,
+		SandboxExposureBaseURL: cfg.Sandbox0ExposureBaseURL,
 		SandboxAdminAPIKey:     cfg.Sandbox0AdminAPIKey,
 		RuntimeCallbackBaseURL: cfg.RuntimeCallbackBaseURL,
 		RuntimeAllowedDomains:  cfg.RuntimeAllowedDomains,
@@ -210,6 +212,7 @@ func main() {
 			zap.String("addr", cfg.HTTPAddr),
 			zap.String("sandbox0_base_url", cfg.Sandbox0BaseURL),
 			zap.String("sandbox0_auth_base_url", cfg.Sandbox0AuthBaseURL),
+			zap.String("sandbox0_exposure_base_url", cfg.Sandbox0ExposureBaseURL),
 			zap.Bool("observability_enabled", cfg.ObservabilityEnabled),
 			zap.Bool("metrics_enabled", metricsEnabled),
 			zap.String("trace_exporter", cfg.TraceExporter),
@@ -239,31 +242,32 @@ func main() {
 func loadConfig() (config, error) {
 	sandbox0BaseURL := trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL))
 	cfg := config{
-		HTTPAddr:               envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
-		LogLevel:               envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
-		DatabaseURL:            strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
-		DatabaseSchema:         envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
-		DatabaseMaxConns:       int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
-		DatabaseMinConns:       int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
-		Sandbox0BaseURL:        sandbox0BaseURL,
-		Sandbox0AuthBaseURL:    trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL", sandbox0BaseURL)),
-		Sandbox0AdminAPIKey:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
-		RuntimeCallbackBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
-		Sandbox0Timeout:        envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
-		RuntimeEnabled:         !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
-		RuntimeAllowedDomains:  envStringList("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS"),
-		TemplateID:             firstEnv("MANAGED_AGENT_TEMPLATE_ID", "MANAGED_AGENT_CLAUDE_TEMPLATE"),
-		TemplateManifestPath:   strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
-		TemplateMainImage:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
-		WrapperPort:            envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
-		WorkspaceMountPath:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
-		SandboxTTLSeconds:      envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
-		ObservabilityEnabled:   envBool("MANAGED_AGENT_OBSERVABILITY_ENABLED", true),
-		MetricsEnabled:         envBool("MANAGED_AGENT_METRICS_ENABLED", true),
-		TraceExporter:          strings.ToLower(envOrDefault("MANAGED_AGENT_TRACE_EXPORTER", "noop")),
-		TraceOTLPEndpoint:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_TRACE_OTLP_ENDPOINT")),
-		TraceOTLPInsecure:      envBool("MANAGED_AGENT_TRACE_OTLP_INSECURE", true),
-		TraceSampleRate:        envFloat("MANAGED_AGENT_TRACE_SAMPLE_RATE", 1),
+		HTTPAddr:                envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
+		LogLevel:                envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
+		DatabaseURL:             strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
+		DatabaseSchema:          envOrDefault("MANAGED_AGENT_DATABASE_SCHEMA", "managed_agent"),
+		DatabaseMaxConns:        int32(envInt("MANAGED_AGENT_DATABASE_MAX_CONNS", 10)),
+		DatabaseMinConns:        int32(envInt("MANAGED_AGENT_DATABASE_MIN_CONNS", 1)),
+		Sandbox0BaseURL:         sandbox0BaseURL,
+		Sandbox0AuthBaseURL:     trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_AUTH_BASE_URL", sandbox0BaseURL)),
+		Sandbox0ExposureBaseURL: trimURL(os.Getenv("MANAGED_AGENT_SANDBOX0_EXPOSURE_BASE_URL")),
+		Sandbox0AdminAPIKey:     strings.TrimSpace(os.Getenv("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY")),
+		RuntimeCallbackBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_CALLBACK_BASE_URL")), "/"),
+		Sandbox0Timeout:         envDuration("MANAGED_AGENT_SANDBOX0_TIMEOUT", 90*time.Second),
+		RuntimeEnabled:          !strings.EqualFold(strings.TrimSpace(os.Getenv("MANAGED_AGENT_RUNTIME_ENABLED")), "false"),
+		RuntimeAllowedDomains:   envStringList("MANAGED_AGENT_RUNTIME_ALLOWED_DOMAINS"),
+		TemplateID:              firstEnv("MANAGED_AGENT_TEMPLATE_ID", "MANAGED_AGENT_CLAUDE_TEMPLATE"),
+		TemplateManifestPath:    strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MANIFEST_PATH")),
+		TemplateMainImage:       strings.TrimSpace(os.Getenv("MANAGED_AGENT_TEMPLATE_MAIN_IMAGE")),
+		WrapperPort:             envInt("MANAGED_AGENT_WRAPPER_PORT", 8080),
+		WorkspaceMountPath:      strings.TrimSpace(os.Getenv("MANAGED_AGENT_WORKSPACE_MOUNT_PATH")),
+		SandboxTTLSeconds:       envInt("MANAGED_AGENT_SANDBOX_TTL_SECONDS", managedagentsruntime.DefaultSandboxTTLSeconds),
+		ObservabilityEnabled:    envBool("MANAGED_AGENT_OBSERVABILITY_ENABLED", true),
+		MetricsEnabled:          envBool("MANAGED_AGENT_METRICS_ENABLED", true),
+		TraceExporter:           strings.ToLower(envOrDefault("MANAGED_AGENT_TRACE_EXPORTER", "noop")),
+		TraceOTLPEndpoint:       strings.TrimSpace(os.Getenv("MANAGED_AGENT_TRACE_OTLP_ENDPOINT")),
+		TraceOTLPInsecure:       envBool("MANAGED_AGENT_TRACE_OTLP_INSECURE", true),
+		TraceSampleRate:         envFloat("MANAGED_AGENT_TRACE_SAMPLE_RATE", 1),
 	}
 	if cfg.TraceExporter == "noop" && cfg.TraceOTLPEndpoint != "" {
 		cfg.TraceExporter = "otlp"

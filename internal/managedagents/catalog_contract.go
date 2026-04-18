@@ -608,7 +608,7 @@ func resolveCloudConfig(existing map[string]any, patch map[string]any) (map[stri
 	if err := validateAllowedFields(patch, []string{"type", "networking", "packages"}); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(stringValue(patch["type"])) != "cloud" {
+	if rawType, ok := patch["type"]; ok && strings.TrimSpace(stringValue(rawType)) != "cloud" {
 		return nil, errors.New("config.type must be cloud")
 	}
 	base := defaultEnvironmentConfig()
