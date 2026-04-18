@@ -219,28 +219,39 @@ func TestTemplateClientUsesAdminKeyWithoutTeamHeader(t *testing.T) {
 	}
 }
 
-func TestTemplateClientFallsBackToUserTeamHeader(t *testing.T) {
+func TestTemplateClientRequiresRuntimeAPIKey(t *testing.T) {
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: "http://127.0.0.1:1", SandboxRequestTimeout: 5 * time.Second}}
+	_, err := mgr.templateClient(context.Background(), gatewayCredential("user_123"), "team_123")
+	if err == nil || !strings.Contains(err.Error(), "runtime api key") {
+		t.Fatalf("templateClient error = %v, want missing runtime api key", err)
+	}
+}
+
+func TestSandboxClientForRuntimeUsesRuntimeKeyWithoutTeamHeader(t *testing.T) {
 	seen := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = true
-		if got := r.Header.Get("Authorization"); got != "Bearer user_123" {
-			t.Fatalf("Authorization = %q, want user token", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer runtime_123" {
+			t.Fatalf("Authorization = %q, want runtime token", got)
 		}
-		if got := r.Header.Get("X-Team-ID"); got != "team_123" {
-			t.Fatalf("X-Team-ID = %q, want team header", got)
+		if got := r.Header.Get("X-Team-ID"); got != "" {
+			t.Fatalf("X-Team-ID = %q, want no caller team header", got)
 		}
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":[]}`))
 	}))
 	t.Cleanup(server.Close)
 
-	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
-	client, err := mgr.templateClient(context.Background(), gatewayCredential("user_123"), "team_123")
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second, SandboxAdminAPIKey: " runtime_123 "}}
+	client, err := mgr.sandboxClientForRuntime(context.Background(), &gatewaymanagedagents.RuntimeRecord{SessionID: "sesn_123"})
 	if err != nil {
-		t.Fatalf("templateClient returned error: %v", err)
+		t.Fatalf("sandboxClientForRuntime returned error: %v", err)
 	}
-	_, _ = client.GetTemplate(context.Background(), "managed-agents")
+	if _, err := client.ListVolume(context.Background()); err != nil {
+		t.Fatalf("ListVolume returned error: %v", err)
+	}
 	if !seen {
-		t.Fatal("expected template client to issue a request")
+		t.Fatal("expected sandbox client to issue a request")
 	}
 }
 

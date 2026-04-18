@@ -175,7 +175,7 @@ func main() {
 	}
 	runtimeManager.StartManagedTemplateSync(ctx)
 	runtimeManager.StartRuntimeLifecycleWorker(ctx)
-	serviceOpts = append(serviceOpts, managedagents.WithFileStore(managedagentsruntime.NewVolumeFileStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout)))
+	serviceOpts = append(serviceOpts, managedagents.WithFileStore(managedagentsruntime.NewVolumeFileStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout, cfg.Sandbox0AdminAPIKey)))
 	serviceOpts = append(serviceOpts, managedagents.WithObservability(managedObservability))
 	service := managedagents.NewService(repo, runtimeManager, logger, serviceOpts...)
 	service.StartRuntimeWebhookWorker(ctx)

@@ -64,7 +64,7 @@ func (m *SDKRuntimeManager) ReconcileRuntimeSandboxes(ctx context.Context) error
 		if sandboxID == "" {
 			continue
 		}
-		client, err := m.sandboxClientForRuntime(ctx, gatewaymanagedagents.RequestCredential{}, runtime)
+		client, err := m.sandboxClientForRuntime(ctx, runtime)
 		if err != nil {
 			m.logger.Warn("create sandbox client for runtime reconcile failed",
 				zap.Error(err),
