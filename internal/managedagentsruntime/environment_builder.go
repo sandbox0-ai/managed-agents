@@ -29,6 +29,7 @@ func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context,
 }
 
 func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) error {
+	_ = credential
 	if !m.cfg.Enabled || environment == nil {
 		return nil
 	}
@@ -39,14 +40,10 @@ func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, cre
 	if teamID == "" {
 		return errors.New("team id is required")
 	}
-	buildCredential := credential
-	if strings.TrimSpace(buildCredential.Token) == "" {
-		buildCredential.Token = strings.TrimSpace(m.cfg.SandboxAdminAPIKey)
-	}
-	if strings.TrimSpace(buildCredential.Token) == "" {
+	if _, err := m.runtimeSandboxToken(); err != nil {
 		return nil
 	}
-	templateClient, err := m.templateClient(ctx, buildCredential, teamID)
+	templateClient, err := m.templateClient(ctx, gatewaymanagedagents.RequestCredential{}, teamID)
 	if err != nil {
 		return err
 	}
@@ -64,11 +61,12 @@ func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, cre
 	if err != nil {
 		return fmt.Errorf("resolve environment artifact: %w", err)
 	}
-	_, err = m.ensureEnvironmentArtifactReady(ctx, buildCredential, artifact, environment, templateRequest, templateClient)
+	_, err = m.ensureEnvironmentArtifactReady(ctx, gatewaymanagedagents.RequestCredential{}, artifact, environment, templateRequest, templateClient)
 	return err
 }
 
 func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID, environmentID string) error {
+	_ = credential
 	if !m.cfg.Enabled {
 		return nil
 	}
@@ -83,12 +81,8 @@ func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, cre
 	if environmentID == "" {
 		return errors.New("environment id is required")
 	}
-	cleanupCredential := credential
-	if strings.TrimSpace(cleanupCredential.Token) == "" {
-		cleanupCredential.Token = strings.TrimSpace(m.cfg.SandboxAdminAPIKey)
-	}
-	if strings.TrimSpace(cleanupCredential.Token) == "" {
-		return errors.New("request credential is required")
+	if _, err := m.runtimeSandboxToken(); err != nil {
+		return err
 	}
 	artifacts, err := m.repo.ListEnvironmentArtifacts(ctx, teamID, environmentID)
 	if err != nil {
@@ -99,7 +93,7 @@ func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, cre
 			return fmt.Errorf("environment artifact %s is still building", artifact.ID)
 		}
 	}
-	client, err := m.newSandboxClient(cleanupCredential.Token, teamID)
+	client, err := m.runtimeSandboxClient()
 	if err != nil {
 		return err
 	}
@@ -239,6 +233,7 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 }
 
 func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (built *gatewaymanagedagents.EnvironmentArtifact, err error) {
+	_ = credential
 	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_build", "",
 		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
 		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
@@ -246,7 +241,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, creden
 	)
 	defer func() { op.End(err) }()
 	phaseStarted := time.Now()
-	client, err := m.newSandboxClient(credential.Token, artifact.TeamID)
+	client, err := m.runtimeSandboxClient()
 	if err != nil {
 		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return nil, err

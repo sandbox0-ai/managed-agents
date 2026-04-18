@@ -47,6 +47,7 @@ type managedProjectedHeader struct {
 }
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
+	_ = credential
 	ctx, op := m.observability.StartOperation(ctx, "runtime_sync_bootstrap_state", runtimeVendorForLog(runtime),
 		zap.String("session_id", runtimeSessionID(runtime)),
 		zap.String("sandbox_id", runtimeSandboxID(runtime)),
@@ -60,7 +61,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	}
 	op.ObservePhase("load_session", time.Since(phaseStarted), nil)
 	phaseStarted = time.Now()
-	client, err := m.sandboxClientForRuntime(ctx, credential, runtime)
+	client, err := m.sandboxClientForRuntime(ctx, runtime)
 	if err != nil {
 		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
 		return err
