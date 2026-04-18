@@ -741,18 +741,32 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 	if sandboxID == "" {
 		return errors.New("webhook sandbox_id is required")
 	}
+	phaseStarted := time.Now()
 	runtime, err := s.repo.GetRuntimeBySandboxID(ctx, sandboxID)
 	if err != nil {
+		op.ObservePhase("load_runtime_by_sandbox", time.Since(phaseStarted), err)
 		if errors.Is(err, ErrRuntimeNotFound) && sandboxWebhookEventMarksRuntimeLost(eventType) {
 			return nil
 		}
 		return err
 	}
+	op.ObservePhase("load_runtime_by_sandbox", time.Since(phaseStarted), nil,
+		zap.String("session_id", runtime.SessionID),
+		zap.Int64("runtime_generation", runtime.RuntimeGeneration),
+	)
+	op.AddFields(
+		zap.String("session_id", runtime.SessionID),
+		zap.Int64("runtime_generation", runtime.RuntimeGeneration),
+	)
+	phaseStarted = time.Now()
 	if subtleTrim(runtime.ControlToken) == "" || !sandbox0sdk.VerifyWebhookSignature(runtime.ControlToken, rawBody, signature) {
+		op.ObservePhase("verify_webhook_signature", time.Since(phaseStarted), errors.New("invalid webhook signature"))
 		return errors.New("invalid webhook signature")
 	}
+	op.ObservePhase("verify_webhook_signature", time.Since(phaseStarted), nil)
 	if sandboxWebhookEventMarksRuntimeLost(eventType) {
-		return s.repo.WithSessionLock(ctx, runtime.SessionID, func(ctx context.Context) error {
+		phaseStarted = time.Now()
+		err = s.repo.WithSessionLock(ctx, runtime.SessionID, func(ctx context.Context) error {
 			current, err := s.repo.GetRuntime(ctx, runtime.SessionID)
 			if err != nil {
 				if errors.Is(err, ErrRuntimeNotFound) {
@@ -762,6 +776,8 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 			}
 			return s.repo.MarkRuntimeSandboxLost(ctx, current, eventType, time.Now().UTC())
 		})
+		op.ObservePhase("mark_runtime_lost", time.Since(phaseStarted), err)
+		return err
 	}
 	if eventType != "agent.event" {
 		return nil
@@ -770,9 +786,15 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 	if len(envelope.Payload) == 0 {
 		return errors.New("webhook payload is required")
 	}
+	phaseStarted = time.Now()
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		op.ObservePhase("decode_webhook_payload", time.Since(phaseStarted), err)
 		return errors.New("invalid webhook payload")
 	}
+	op.ObservePhase("decode_webhook_payload", time.Since(phaseStarted), nil,
+		zap.Int("event_count", len(payload.Events)),
+		zap.String("run_id", strings.TrimSpace(payload.RunID)),
+	)
 	if trimmedSessionID := strings.TrimSpace(payload.SessionID); trimmedSessionID != "" && trimmedSessionID != runtime.SessionID {
 		return errors.New("runtime payload session_id mismatch")
 	}
@@ -784,6 +806,12 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 		jobID = NewID("whjob")
 	}
 	now := time.Now().UTC()
+	op.AddFields(
+		zap.String("job_id", jobID),
+		zap.String("run_id", strings.TrimSpace(payload.RunID)),
+		zap.Int("event_count", len(payload.Events)),
+	)
+	phaseStarted = time.Now()
 	_, err = s.repo.CreateRuntimeWebhookJob(ctx, &runtimeWebhookJob{
 		ID:                jobID,
 		SessionID:         runtime.SessionID,
@@ -795,6 +823,10 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	})
+	op.ObservePhase("enqueue_webhook_job", time.Since(phaseStarted), err,
+		zap.String("job_id", jobID),
+		zap.Int("event_count", len(payload.Events)),
+	)
 	return err
 }
 
@@ -837,7 +869,11 @@ func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string
 		zap.String("worker", owner),
 	)
 	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
 	job, err := s.repo.LeaseNextRuntimeWebhookJob(ctx, owner, time.Now().UTC().Add(runtimeWebhookLeaseDuration))
+	op.ObservePhase("lease_webhook_job", time.Since(phaseStarted), err,
+		zap.Bool("job_present", job != nil),
+	)
 	if err != nil || job == nil {
 		return job != nil, err
 	}
@@ -848,12 +884,23 @@ func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string
 		zap.String("run_id", job.RunID),
 		zap.String("event_type", job.EventType),
 		zap.Int("attempts", job.Attempts),
+		zap.Int("event_count", len(job.Payload.Events)),
+		zap.Duration("queue_delay", time.Since(job.CreatedAt)),
 	)
+	phaseStarted = time.Now()
 	if err := s.applyRuntimeWebhookJob(ctx, job); err != nil {
+		op.ObservePhase("apply_webhook_job", time.Since(phaseStarted), err)
 		retry := job.Attempts < runtimeWebhookMaxAttempts
+		releaseStarted := time.Now()
 		if releaseErr := s.repo.ReleaseRuntimeWebhookJob(ctx, job.ID, err, retry); releaseErr != nil {
+			op.ObservePhase("release_webhook_job", time.Since(releaseStarted), releaseErr,
+				zap.Bool("retry", retry),
+			)
 			return true, releaseErr
 		}
+		op.ObservePhase("release_webhook_job", time.Since(releaseStarted), nil,
+			zap.Bool("retry", retry),
+		)
 		s.logger.Warn("runtime webhook job failed",
 			zap.Error(err),
 			zap.String("job_id", job.ID),
@@ -863,17 +910,31 @@ func (s *Service) ProcessNextRuntimeWebhookJob(ctx context.Context, owner string
 		)
 		return true, nil
 	}
+	op.ObservePhase("apply_webhook_job", time.Since(phaseStarted), nil)
+	phaseStarted = time.Now()
 	if err := s.repo.CompleteRuntimeWebhookJob(ctx, job.ID); err != nil {
+		op.ObservePhase("complete_webhook_job", time.Since(phaseStarted), err)
 		return true, err
 	}
+	op.ObservePhase("complete_webhook_job", time.Since(phaseStarted), nil)
 	return true, nil
 }
 
-func (s *Service) applyRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) error {
+func (s *Service) applyRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) (err error) {
 	if job == nil {
 		return nil
 	}
-	return s.repo.WithSessionLock(ctx, job.SessionID, func(ctx context.Context) error {
+	ctx, op := s.observability.StartOperation(ctx, "runtime_apply_webhook_job", "",
+		zap.String("job_id", job.ID),
+		zap.String("session_id", job.SessionID),
+		zap.String("sandbox_id", job.SandboxID),
+		zap.String("run_id", job.RunID),
+		zap.Int64("runtime_generation", job.RuntimeGeneration),
+		zap.Int("event_count", len(job.Payload.Events)),
+	)
+	defer func() { op.End(err) }()
+	phaseStarted := time.Now()
+	err = s.repo.WithSessionLock(ctx, job.SessionID, func(ctx context.Context) error {
 		runtime, err := s.repo.GetRuntime(ctx, job.SessionID)
 		if err != nil {
 			if errors.Is(err, ErrRuntimeNotFound) {
@@ -892,6 +953,8 @@ func (s *Service) applyRuntimeWebhookJob(ctx context.Context, job *runtimeWebhoo
 		}
 		return s.applyRuntimePayloadLocked(ctx, runtime, job.Payload)
 	})
+	op.ObservePhase("lock_and_apply_payload", time.Since(phaseStarted), err)
+	return err
 }
 
 func runtimeWebhookJobIsStale(runtime *RuntimeRecord, job *runtimeWebhookJob) bool {
