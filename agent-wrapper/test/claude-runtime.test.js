@@ -592,6 +592,151 @@ test('ClaudeRuntime hydrates and flushes mirrored Claude state around SDK runs',
   }
 });
 
+test('ClaudeRuntime resolves runs before background Claude state flush completes', async () => {
+  let resolveFlush;
+  const flushReleased = new Promise((resolve) => {
+    resolveFlush = resolve;
+  });
+  const mirrorCalls = [];
+  const stateMirror = {
+    hydrate: async () => ({ restored: true }),
+    flush: async (paths) => {
+      mirrorCalls.push({ type: 'flush', paths });
+      await flushReleased;
+      return { flushed: true, generation: 'gen-background' };
+    },
+  };
+  const runtime = new ClaudeRuntime({
+    stateMirror,
+    queryFn: () => sdkResultStream(),
+  });
+  const localDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-local-'));
+  const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mirror-'));
+  let currentSession = {
+    session_id: 'sesn_background_flush',
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: localDir,
+        AGENT_WRAPPER_CLAUDE_MIRROR_DIR: mirrorDir,
+      },
+    },
+  };
+
+  try {
+    const runPromise = runtime.startRun(currentSession, {
+      run_id: 'run_background_flush',
+      input_events: [{ type: 'user.message', content: 'hi' }],
+    }, {
+      send: async () => {},
+    }, {
+      getSession: () => currentSession,
+      persistSession: (updater) => {
+        currentSession = updater(currentSession);
+        return currentSession;
+      },
+    });
+
+    const outcome = await Promise.race([
+      runPromise.then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
+    ]);
+
+    assert.equal(outcome, 'resolved');
+    assert.equal(mirrorCalls.length, 1);
+
+    resolveFlush();
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    fs.rmSync(localDir, { recursive: true, force: true });
+    fs.rmSync(mirrorDir, { recursive: true, force: true });
+  }
+});
+
+test('ClaudeRuntime waits for pending Claude state flush before starting the next run', async () => {
+  let releaseFirstFlush;
+  const firstFlushReleased = new Promise((resolve) => {
+    releaseFirstFlush = resolve;
+  });
+  let flushCount = 0;
+  const prompts = [];
+  const stateMirror = {
+    hydrate: async () => ({ restored: true }),
+    flush: async () => {
+      flushCount += 1;
+      if (flushCount === 1) {
+        await firstFlushReleased;
+      }
+      return { flushed: true, generation: `gen-${flushCount}` };
+    },
+  };
+  const runtime = new ClaudeRuntime({
+    stateMirror,
+    queryFn: ({ prompt, options }) => {
+      void options;
+      return sdkResidentResultStream(prompt, prompts, 'vendor_sesn_wait_for_flush');
+    },
+  });
+  const localDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-local-'));
+  const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mirror-'));
+  let currentSession = {
+    session_id: 'sesn_wait_for_flush',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: localDir,
+        AGENT_WRAPPER_CLAUDE_MIRROR_DIR: mirrorDir,
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+
+  try {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_wait_for_flush_1',
+      input_events: [{ type: 'user.message', content: 'first' }],
+    }, {
+      send: async () => {},
+    }, sessionStore);
+
+    const secondRunPromise = runtime.startRun(currentSession, {
+      run_id: 'run_wait_for_flush_2',
+      input_events: [{ type: 'user.message', content: 'second' }],
+    }, {
+      send: async () => {},
+    }, sessionStore);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['first']);
+
+    releaseFirstFlush();
+    await secondRunPromise;
+
+    assert.deepEqual(prompts.map((message) => message.message.content[0].text), ['first', 'second']);
+  } finally {
+    await runtime.deleteSession(currentSession.session_id, currentSession);
+    fs.rmSync(localDir, { recursive: true, force: true });
+    fs.rmSync(mirrorDir, { recursive: true, force: true });
+  }
+});
+
 test('runtimeEnvForEngine preserves base process environment', () => {
   const merged = runtimeEnvForEngine({
     env: {

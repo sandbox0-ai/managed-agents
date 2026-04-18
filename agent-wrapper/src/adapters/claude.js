@@ -5,6 +5,7 @@ import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
+import { startOperation } from '../lib/observability.js';
 import { ClaudeStateMirror, claudeMirrorDir } from './claude-state-mirror.js';
 import {
   AgentRuntime,
@@ -174,10 +175,12 @@ export class ClaudeRuntime extends AgentRuntime {
     this.deferredRunErrors = new Map();
     this.hydratedMirrorKeys = new Set();
     this.dirtyMirrorPaths = new Map();
+    this.flushPromise = null;
   }
 
   async prestartSession(session, sessionStore) {
     await this.#hydrateClaudeState(session);
+    await this.#waitForPendingClaudeStateFlush({ source: 'prestart', session });
     let sessionRuntime;
     try {
       sessionRuntime = this.#runtimeForSession(session);
@@ -192,6 +195,7 @@ export class ClaudeRuntime extends AgentRuntime {
 
   async startRun(session, run, callbackClient, sessionStore) {
     await this.#hydrateClaudeState(session);
+    await this.#waitForPendingClaudeStateFlush({ source: 'run', session, run });
     const sessionRuntime = this.#runtimeForSession(session);
     this.#markClaudeStateDirty(session);
     return this.#startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore);
@@ -212,7 +216,7 @@ export class ClaudeRuntime extends AgentRuntime {
     this.emittedToolUses.delete(sessionID);
     if (session) {
       this.#markClaudeStateDirty(session);
-      await this.#flushDirtyClaudeStateIfIdle();
+      await this.#flushDirtyClaudeStateIfIdle({ reason: 'delete_session', session });
     }
   }
 
@@ -428,8 +432,12 @@ export class ClaudeRuntime extends AgentRuntime {
     rememberCompletedRunID(sessionRuntime, activeRun.run.run_id);
     sessionRuntime.activeRun = null;
     this.#markClaudeStateDirty(activeRun.session);
-    await this.#flushDirtyClaudeStateIfIdle();
     activeRun.resolve();
+    this.#scheduleDirtyClaudeStateFlush({
+      reason: 'run_complete',
+      session: activeRun.session,
+      run: activeRun.run,
+    });
   }
 
   #runtimeForSession(session) {
@@ -504,23 +512,112 @@ export class ClaudeRuntime extends AgentRuntime {
     this.dirtyMirrorPaths.set(mirrorKey, paths);
   }
 
-  async #flushDirtyClaudeStateIfIdle() {
-    if (this.activeRuns.size > 0 || this.dirtyMirrorPaths.size === 0) {
+  async #waitForPendingClaudeStateFlush({ source, session, run } = {}) {
+    let waited = false;
+    const waitStartedAtMs = Date.now();
+    while (this.flushPromise) {
+      waited = true;
+      try {
+        await this.flushPromise;
+      } catch {
+        // Preserve existing retry-on-next-idle behavior without failing the caller here.
+      }
+    }
+    if (waited) {
+      logInfo('claude state flush wait completed', {
+        session_id: session?.session_id ?? null,
+        run_id: run?.run_id ?? null,
+        source: source ?? null,
+        elapsed_ms: elapsedMsSince(waitStartedAtMs),
+      });
+    }
+  }
+
+  #scheduleDirtyClaudeStateFlush(fields = {}) {
+    const flushPromise = this.#startDirtyClaudeStateFlush(fields);
+    if (!flushPromise) {
       return;
+    }
+    flushPromise.catch((error) => {
+      logWarn('claude state flush worker failed', {
+        session_id: fields.session?.session_id ?? null,
+        run_id: fields.run?.run_id ?? null,
+        reason: fields.reason ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  async #flushDirtyClaudeStateIfIdle(fields = {}) {
+    const flushPromise = this.#startDirtyClaudeStateFlush(fields);
+    if (flushPromise) {
+      await flushPromise;
+    }
+  }
+
+  #startDirtyClaudeStateFlush(fields = {}) {
+    if (this.flushPromise) {
+      return this.flushPromise;
+    }
+    if (this.activeRuns.size > 0 || this.dirtyMirrorPaths.size === 0) {
+      return null;
     }
     const pending = [...this.dirtyMirrorPaths.entries()];
     this.dirtyMirrorPaths.clear();
-    for (const [mirrorKey, paths] of pending) {
-      try {
-        await this.stateMirror.flush(paths);
-      } catch (error) {
-        this.dirtyMirrorPaths.set(mirrorKey, paths);
-        logWarn('claude state flush failed', {
+    const flushPromise = this.#flushDirtyMirrorPaths(pending, fields).finally(() => {
+      if (this.flushPromise === flushPromise) {
+        this.flushPromise = null;
+      }
+      if (this.activeRuns.size === 0 && this.dirtyMirrorPaths.size > 0) {
+        this.#scheduleDirtyClaudeStateFlush(fields);
+      }
+    });
+    this.flushPromise = flushPromise;
+    return flushPromise;
+  }
+
+  async #flushDirtyMirrorPaths(pending, fields = {}) {
+    const flushOp = startOperation('wrapper_claude_state_flush', {
+      session_id: fields.session?.session_id ?? null,
+      run_id: fields.run?.run_id ?? null,
+      reason: fields.reason ?? null,
+      mirror_count: pending.length,
+    });
+    try {
+      for (const [mirrorKey, paths] of pending) {
+        const flushStartedAtMs = Date.now();
+        const phaseFields = {
+          mirror_key: mirrorKey,
           local_dir: paths.localDir,
           mirror_dir: paths.mirrorDir,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        };
+        try {
+          const result = await this.stateMirror.flush(paths);
+          flushOp.addFields({ generation: result?.generation ?? null });
+          logInfo('claude state flush completed', {
+            ...phaseFields,
+            session_id: fields.session?.session_id ?? null,
+            run_id: fields.run?.run_id ?? null,
+            reason: fields.reason ?? null,
+            duration_ms: elapsedMsSince(flushStartedAtMs),
+            generation: result?.generation ?? null,
+          });
+        } catch (error) {
+          this.dirtyMirrorPaths.set(mirrorKey, paths);
+          logWarn('claude state flush failed', {
+            ...phaseFields,
+            session_id: fields.session?.session_id ?? null,
+            run_id: fields.run?.run_id ?? null,
+            reason: fields.reason ?? null,
+            duration_ms: elapsedMsSince(flushStartedAtMs),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
+      flushOp.end();
+    } catch (error) {
+      flushOp.end(error);
+      throw error;
     }
   }
 
