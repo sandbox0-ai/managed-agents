@@ -176,6 +176,20 @@ export class ClaudeRuntime extends AgentRuntime {
     this.dirtyMirrorPaths = new Map();
   }
 
+  async prestartSession(session, sessionStore) {
+    await this.#hydrateClaudeState(session);
+    let sessionRuntime;
+    try {
+      sessionRuntime = this.#runtimeForSession(session);
+    } catch (error) {
+      if (isConfigChangeDuringActiveRunError(error)) {
+        return;
+      }
+      throw error;
+    }
+    await this.#ensureSessionRuntimeStarted(sessionRuntime, session, { source: 'prestart', sessionStore });
+  }
+
   async startRun(session, run, callbackClient, sessionStore) {
     await this.#hydrateClaudeState(session);
     const sessionRuntime = this.#runtimeForSession(session);
@@ -253,9 +267,7 @@ export class ClaudeRuntime extends AgentRuntime {
     }));
 
     try {
-      if (!sessionRuntime.stream) {
-        this.#startSessionRuntime(sessionRuntime, currentSession);
-      }
+      await this.#ensureSessionRuntimeStarted(sessionRuntime, currentSession, { source: 'run', sessionStore });
 
       await callbackClient.send(currentSession, {
         session_id: currentSession.session_id,
@@ -278,7 +290,31 @@ export class ClaudeRuntime extends AgentRuntime {
     return done;
   }
 
-  #startSessionRuntime(sessionRuntime, session) {
+  async #ensureSessionRuntimeStarted(sessionRuntime, session, { source } = {}) {
+    if (sessionRuntime.stream) {
+      return sessionRuntime.stream;
+    }
+    if (sessionRuntime.startPromise) {
+      return sessionRuntime.startPromise;
+    }
+    let startup;
+    startup = (async () => {
+      try {
+        return this.#startSessionRuntime(sessionRuntime, session, { source });
+      } catch (error) {
+        this.#closeSessionRuntime(sessionRuntime.sessionID);
+        throw error;
+      } finally {
+        if (sessionRuntime.startPromise === startup) {
+          sessionRuntime.startPromise = null;
+        }
+      }
+    })();
+    sessionRuntime.startPromise = startup;
+    return startup;
+  }
+
+  #startSessionRuntime(sessionRuntime, session, { source } = {}) {
     const options = this.#buildOptions(session, {
       getActiveRun: () => sessionRuntime.activeRun,
     });
@@ -290,6 +326,7 @@ export class ClaudeRuntime extends AgentRuntime {
       session_id: session.session_id,
       run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
       vendor_session_id: session.vendor_session_id ?? null,
+      source: source ?? 'run',
       resume: Boolean(session.vendor_session_id),
     });
     const stream = this.queryFn({ prompt: sessionRuntime.inputQueue, options });
@@ -298,6 +335,7 @@ export class ClaudeRuntime extends AgentRuntime {
       run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
       vendor_session_id: session.vendor_session_id ?? null,
       elapsed_ms: elapsedMsSince(queryStartedAtMs),
+      source: source ?? 'run',
       resume: Boolean(session.vendor_session_id),
     });
     sessionRuntime.stream = stream;
@@ -412,6 +450,7 @@ export class ClaudeRuntime extends AgentRuntime {
       inputQueue: new AsyncInputQueue(),
       stream: null,
       pump: null,
+      startPromise: null,
       activeRun: null,
       completedRunIDs: new Set(),
       completedRunOrder: [],
@@ -1075,6 +1114,10 @@ function mirrorKeyForPaths(paths) {
   const localDir = String(paths?.localDir ?? '').trim();
   const mirrorDir = String(paths?.mirrorDir ?? '').trim();
   return localDir && mirrorDir ? `${localDir}\u0000${mirrorDir}` : null;
+}
+
+function isConfigChangeDuringActiveRunError(error) {
+  return error instanceof Error && /configuration changed during an active run/i.test(error.message);
 }
 
 function stableStringify(value) {

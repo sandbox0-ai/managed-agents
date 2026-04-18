@@ -36,6 +36,11 @@ function closeServer(server) {
 class FakeRuntime {
   constructor() {
     this.interrupted = new Set();
+    this.prestarted = [];
+  }
+
+  async prestartSession(session) {
+    this.prestarted.push(session?.session_id ?? null);
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
@@ -276,6 +281,30 @@ test('agent-warper persists bootstrap diagnostic events during bootstrap', async
 
   const store = new RuntimeStore(stateDir);
   assert.deepEqual(store.getSession('sesn_bootstrap')?.bootstrap_events, bootstrapEvents);
+
+  await closeServer(server);
+});
+
+test('agent-warper prestarts runtime after session bootstrap', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-warper-'));
+  const runtime = new FakeRuntime();
+  const server = createServer({
+    stateDir,
+    runtime,
+    callbackClient: { send: async () => {} },
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: 'sesn_prestart', vendor: 'claude' }),
+  });
+  assert.equal(response.status, 200);
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(runtime.prestarted, ['sesn_prestart']);
 
   await closeServer(server);
 });

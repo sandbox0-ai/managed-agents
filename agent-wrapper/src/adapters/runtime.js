@@ -19,6 +19,8 @@ export class AgentRuntime {
     this.vendor = normalizeVendor(vendor);
   }
 
+  async prestartSession() {}
+
   async startRun() {
     throw new Error(`${this.vendor} runtime does not implement startRun`);
   }
@@ -63,6 +65,10 @@ export class RuntimeRouter extends AgentRuntime {
     return this.runtimeForSession(session).startRun(session, run, callbackClient, sessionStore);
   }
 
+  async prestartSession(session, sessionStore) {
+    return this.runtimeForSession(session).prestartSession(session, sessionStore);
+  }
+
   async interruptRun(runID) {
     for (const runtime of this.runtimes.values()) {
       if (await runtime.interruptRun(runID)) {
@@ -88,7 +94,7 @@ export class RuntimeRouter extends AgentRuntime {
 }
 
 export function assertRuntimeContract(vendor, runtime) {
-  for (const method of ['startRun', 'interruptRun', 'deleteSession', 'resolveActions']) {
+  for (const method of ['prestartSession', 'startRun', 'interruptRun', 'deleteSession', 'resolveActions']) {
     if (typeof runtime?.[method] !== 'function') {
       throw new Error(`${vendor} runtime is missing ${method}`);
     }

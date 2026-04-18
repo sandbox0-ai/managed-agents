@@ -6,7 +6,7 @@ import { materializeSessionEnvironment } from './runtime/environment.js';
 import { materializeSessionResources } from './runtime/resources.js';
 import { createDefaultRuntime, finalStatusEventForSessionError, normalizeVendor, sessionErrorEventForError } from './adapters/index.js';
 import { agentWrapperStateDir } from './adapters/runtime.js';
-import { logError, logInfo, summarizePendingActions, safeErrorMessage } from './lib/log.js';
+import { logError, logInfo, logWarn, summarizePendingActions, safeErrorMessage } from './lib/log.js';
 
 function sessionPathname(pathname) {
   const match = pathname.match(/^\/v1\/runtime\/session\/([^/]+)$/);
@@ -84,6 +84,20 @@ export function createServer({
         await materializeSessionEnvironment(session, { stateDir });
         await materializeSessionResources(session);
         store.upsertSession(body.session_id, () => session);
+        const sessionStore = {
+          getSession: () => store.getSession(session.session_id),
+          persistSession: (updater) => store.upsertSession(session.session_id, updater),
+        };
+        queueMicrotask(() => {
+          void runtime.prestartSession(store.getSession(session.session_id), sessionStore).catch((error) => {
+            logWarn('wrapper runtime prestart failed', {
+              session_id: session.session_id,
+              sandbox_id: session.sandbox_id ?? null,
+              vendor: session.vendor ?? null,
+              error: safeErrorMessage(error),
+            });
+          });
+        });
         writeJSON(res, 200, { session_id: session.session_id, vendor_session_id: session.vendor_session_id });
         return;
       }
