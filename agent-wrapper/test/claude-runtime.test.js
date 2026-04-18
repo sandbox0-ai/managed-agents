@@ -10,6 +10,7 @@ import {
   claudeAgentContextOptions,
   claudeExtraArgsForSession,
   claudeSettingSourcesForSession,
+  claudeStatePathsForSession,
   claudeToolsForSession,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
@@ -444,6 +445,65 @@ test('ClaudeRuntime strips bare mode even without attached skills', async () => 
   assert.equal(sdkCall.options.agent, undefined);
   assert.deepEqual(sdkCall.options.tools, []);
   assert.equal(sdkCall.options.settingSources, undefined);
+});
+
+test('ClaudeRuntime hydrates and flushes mirrored Claude state around SDK runs', async () => {
+  const mirrorCalls = [];
+  const stateMirror = {
+    hydrate: async (paths) => {
+      mirrorCalls.push({ type: 'hydrate', paths });
+      return { restored: true };
+    },
+    flush: async (paths) => {
+      mirrorCalls.push({ type: 'flush', paths });
+      return { flushed: true };
+    },
+  };
+  const runtime = new ClaudeRuntime({
+    stateMirror,
+    queryFn: () => sdkResultStream(),
+  });
+  const localDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-local-'));
+  const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mirror-'));
+  let currentSession = {
+    session_id: 'sesn_mirror',
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: localDir,
+        AGENT_WRAPPER_CLAUDE_MIRROR_DIR: mirrorDir,
+      },
+    },
+  };
+
+  try {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_mirror',
+      input_events: [{ type: 'user.message', content: 'hi' }],
+    }, {
+      send: async () => {},
+    }, {
+      getSession: () => currentSession,
+      persistSession: (updater) => {
+        currentSession = updater(currentSession);
+        return currentSession;
+      },
+    });
+
+    const expectedPaths = claudeStatePathsForSession(currentSession);
+    assert.deepEqual(mirrorCalls, [
+      { type: 'hydrate', paths: expectedPaths },
+      { type: 'flush', paths: expectedPaths },
+    ]);
+  } finally {
+    fs.rmSync(localDir, { recursive: true, force: true });
+    fs.rmSync(mirrorDir, { recursive: true, force: true });
+  }
 });
 
 test('runtimeEnvForEngine preserves base process environment', () => {

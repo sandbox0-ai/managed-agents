@@ -5,6 +5,7 @@ import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
+import { ClaudeStateMirror, claudeMirrorDir } from './claude-state-mirror.js';
 import {
   AgentRuntime,
   agentWrapperStateDir,
@@ -36,6 +37,14 @@ export function runtimeEnvForClaudeEngine(engine) {
   }
   fs.mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true });
   return env;
+}
+
+export function claudeStatePathsForSession(session) {
+  const env = runtimeEnvForClaudeEngine(session?.engine ?? {});
+  return {
+    localDir: env.CLAUDE_CONFIG_DIR,
+    mirrorDir: claudeMirrorDir(env, agentWrapperStateDir(env)),
+  };
 }
 
 export function querySkillNames(session) {
@@ -154,18 +163,23 @@ export function allowToolUseDecision(input, toolUseID) {
 }
 
 export class ClaudeRuntime extends AgentRuntime {
-  constructor({ queryFn = query } = {}) {
+  constructor({ queryFn = query, stateMirror = new ClaudeStateMirror() } = {}) {
     super('claude');
     this.queryFn = queryFn;
+    this.stateMirror = stateMirror;
     this.sessions = new Map();
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
     this.deferredRunErrors = new Map();
+    this.hydratedMirrorKeys = new Set();
+    this.dirtyMirrorPaths = new Map();
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
+    await this.#hydrateClaudeState(session);
     const sessionRuntime = this.#runtimeForSession(session);
+    this.#markClaudeStateDirty(session);
     return this.#startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore);
   }
 
@@ -178,10 +192,14 @@ export class ClaudeRuntime extends AgentRuntime {
     return true;
   }
 
-  deleteSession(sessionID) {
+  async deleteSession(sessionID, session) {
     this.#closeSessionRuntime(sessionID);
     this.pendingActions.delete(sessionID);
     this.emittedToolUses.delete(sessionID);
+    if (session) {
+      this.#markClaudeStateDirty(session);
+      await this.#flushDirtyClaudeStateIfIdle();
+    }
   }
 
   async #startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore) {
@@ -322,7 +340,7 @@ export class ClaudeRuntime extends AgentRuntime {
           logInfo('claude result received', timingFieldsForActiveRun(activeRun, {
             stop_reason: message?.stop_reason ?? null,
           }));
-          this.#finishResidentRun(sessionRuntime);
+          await this.#finishResidentRun(sessionRuntime);
         }
       }
     } catch (error) {
@@ -350,7 +368,7 @@ export class ClaudeRuntime extends AgentRuntime {
           finalStatusEventForSessionError(errorEvent),
         ],
       });
-      this.#finishResidentRun(sessionRuntime);
+      await this.#finishResidentRun(sessionRuntime);
     } finally {
       sessionRuntime.closed = true;
       sessionRuntime.inputQueue.close();
@@ -360,7 +378,7 @@ export class ClaudeRuntime extends AgentRuntime {
     }
   }
 
-  #finishResidentRun(sessionRuntime) {
+  async #finishResidentRun(sessionRuntime) {
     const activeRun = sessionRuntime.activeRun;
     if (!activeRun) {
       return;
@@ -371,6 +389,8 @@ export class ClaudeRuntime extends AgentRuntime {
     this.activeRuns.delete(activeRun.run.run_id);
     rememberCompletedRunID(sessionRuntime, activeRun.run.run_id);
     sessionRuntime.activeRun = null;
+    this.#markClaudeStateDirty(activeRun.session);
+    await this.#flushDirtyClaudeStateIfIdle();
     activeRun.resolve();
   }
 
@@ -414,6 +434,55 @@ export class ClaudeRuntime extends AgentRuntime {
       sessionRuntime.activeRun.resolve();
     }
     this.sessions.delete(sessionID);
+  }
+
+  async #hydrateClaudeState(session) {
+    const paths = claudeStatePathsForSession(session);
+    const mirrorKey = mirrorKeyForPaths(paths);
+    if (!mirrorKey || this.hydratedMirrorKeys.has(mirrorKey) || this.activeRuns.size > 0) {
+      return;
+    }
+    try {
+      await this.stateMirror.hydrate(paths);
+    } catch (error) {
+      logWarn('claude state hydrate failed', {
+        session_id: session?.session_id ?? null,
+        local_dir: paths.localDir,
+        mirror_dir: paths.mirrorDir,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.hydratedMirrorKeys.add(mirrorKey);
+    }
+  }
+
+  #markClaudeStateDirty(session) {
+    const paths = claudeStatePathsForSession(session);
+    const mirrorKey = mirrorKeyForPaths(paths);
+    if (!mirrorKey) {
+      return;
+    }
+    this.dirtyMirrorPaths.set(mirrorKey, paths);
+  }
+
+  async #flushDirtyClaudeStateIfIdle() {
+    if (this.activeRuns.size > 0 || this.dirtyMirrorPaths.size === 0) {
+      return;
+    }
+    const pending = [...this.dirtyMirrorPaths.entries()];
+    this.dirtyMirrorPaths.clear();
+    for (const [mirrorKey, paths] of pending) {
+      try {
+        await this.stateMirror.flush(paths);
+      } catch (error) {
+        this.dirtyMirrorPaths.set(mirrorKey, paths);
+        logWarn('claude state flush failed', {
+          local_dir: paths.localDir,
+          mirror_dir: paths.mirrorDir,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   resolveActions(sessionID, events, sessionStore) {
@@ -1000,6 +1069,12 @@ function residentSessionSignature(session) {
     skill_names: session?.skill_names,
     engine: session?.engine,
   });
+}
+
+function mirrorKeyForPaths(paths) {
+  const localDir = String(paths?.localDir ?? '').trim();
+  const mirrorDir = String(paths?.mirrorDir ?? '').trim();
+  return localDir && mirrorDir ? `${localDir}\u0000${mirrorDir}` : null;
 }
 
 function stableStringify(value) {
