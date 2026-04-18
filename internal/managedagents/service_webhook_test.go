@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestHandleSandboxWebhookAppliesAgentEvents(t *testing.T) {
@@ -381,6 +384,27 @@ func TestHandleSandboxWebhookPreservesDeletedRequiresActionRun(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("events len = %d, want 0", len(events))
+	}
+}
+
+func TestProcessNextRuntimeWebhookJobDoesNotLogIdlePolls(t *testing.T) {
+	repo := newTestRepository(t)
+	logCore, logs := observer.New(zap.InfoLevel)
+	obs := NewObservability(ObservabilityConfig{
+		ServiceName: "managed-agents",
+		Logger:      zap.New(logCore),
+	})
+	service := NewService(repo, &recordingRuntimeManager{}, zap.NewNop(), WithObservability(obs))
+
+	processed, err := service.ProcessNextRuntimeWebhookJob(context.Background(), "test_worker")
+	if err != nil {
+		t.Fatalf("ProcessNextRuntimeWebhookJob err = %v, want nil", err)
+	}
+	if processed {
+		t.Fatal("ProcessNextRuntimeWebhookJob processed = true, want false")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no logs for idle webhook poll, got %d entries: %#v", logs.Len(), logs.AllUntimed())
 	}
 }
 
