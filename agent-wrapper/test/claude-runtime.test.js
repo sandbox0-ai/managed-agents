@@ -10,6 +10,7 @@ import {
   claudeAgentContextOptions,
   claudeExtraArgsForSession,
   claudeSettingSourcesForSession,
+  claudeStatePathsForSession,
   claudeToolsForSession,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
@@ -22,6 +23,20 @@ import {
   sessionErrorEventForClaudeSDKSystemMessage,
   sessionErrorEventForError,
 } from '../src/adapters/claude.js';
+
+async function captureStructuredLogs(fn) {
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (line) => {
+    logs.push(JSON.parse(String(line)));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return logs;
+}
 
 test('ClaudeRuntime resolves custom tool results as pending actions', () => {
   const runtime = new ClaudeRuntime();
@@ -271,6 +286,61 @@ test('ClaudeRuntime reuses a resident SDK query across runs in a session', async
   runtime.deleteSession(currentSession.session_id);
 });
 
+test('ClaudeRuntime emits timing logs around resident query startup and first stream message', async () => {
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => {
+      void options;
+      return sdkResidentResultStream(prompt, [], 'vendor_sesn_timing');
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_timing',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+  const callbackClient = {
+    send: async () => {},
+  };
+
+  const logs = await captureStructuredLogs(async () => {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_timing',
+      input_events: [{ type: 'user.message', content: 'hello timing' }],
+    }, callbackClient, sessionStore);
+  });
+
+  const messages = logs.map((entry) => entry.msg);
+  assert.ok(messages.includes('claude resident run starting'));
+  assert.ok(messages.includes('claude query starting'));
+  assert.ok(messages.includes('claude query stream created'));
+  assert.ok(messages.includes('claude runtime input enqueued'));
+  assert.ok(messages.includes('claude first stream message'));
+  assert.ok(messages.includes('claude result received'));
+
+  const firstMessageLog = logs.find((entry) => entry.msg === 'claude first stream message');
+  assert.equal(firstMessageLog.session_id, 'sesn_timing');
+  assert.equal(firstMessageLog.run_id, 'run_timing');
+  assert.ok(['assistant', 'system'].includes(firstMessageLog.message_type));
+  assert.equal(firstMessageLog.vendor_session_id, 'vendor_sesn_timing');
+});
+
 test('ClaudeRuntime restarts a resident SDK query when session resources change', async () => {
   const sdkCalls = [];
   const prompts = [];
@@ -377,6 +447,65 @@ test('ClaudeRuntime strips bare mode even without attached skills', async () => 
   assert.equal(sdkCall.options.settingSources, undefined);
 });
 
+test('ClaudeRuntime hydrates and flushes mirrored Claude state around SDK runs', async () => {
+  const mirrorCalls = [];
+  const stateMirror = {
+    hydrate: async (paths) => {
+      mirrorCalls.push({ type: 'hydrate', paths });
+      return { restored: true };
+    },
+    flush: async (paths) => {
+      mirrorCalls.push({ type: 'flush', paths });
+      return { flushed: true };
+    },
+  };
+  const runtime = new ClaudeRuntime({
+    stateMirror,
+    queryFn: () => sdkResultStream(),
+  });
+  const localDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-local-'));
+  const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mirror-'));
+  let currentSession = {
+    session_id: 'sesn_mirror',
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: localDir,
+        AGENT_WRAPPER_CLAUDE_MIRROR_DIR: mirrorDir,
+      },
+    },
+  };
+
+  try {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_mirror',
+      input_events: [{ type: 'user.message', content: 'hi' }],
+    }, {
+      send: async () => {},
+    }, {
+      getSession: () => currentSession,
+      persistSession: (updater) => {
+        currentSession = updater(currentSession);
+        return currentSession;
+      },
+    });
+
+    const expectedPaths = claudeStatePathsForSession(currentSession);
+    assert.deepEqual(mirrorCalls, [
+      { type: 'hydrate', paths: expectedPaths },
+      { type: 'flush', paths: expectedPaths },
+    ]);
+  } finally {
+    fs.rmSync(localDir, { recursive: true, force: true });
+    fs.rmSync(mirrorDir, { recursive: true, force: true });
+  }
+});
+
 test('runtimeEnvForEngine preserves base process environment', () => {
   const merged = runtimeEnvForEngine({
     env: {
@@ -390,27 +519,27 @@ test('runtimeEnvForEngine preserves base process environment', () => {
   assert.equal(merged.HOME, process.env.HOME);
 });
 
-test('runtimeEnvForClaudeEngine stores Claude config under wrapper state dir', () => {
-  const previousStateDir = process.env.AGENT_WRAPPER_STATE_DIR;
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-wrapper-state-'));
+test('runtimeEnvForClaudeEngine stores Claude config under local tmp state by default', () => {
+  const previousLocalStateDir = process.env.AGENT_WRAPPER_LOCAL_STATE_DIR;
+  const localStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-wrapper-local-state-'));
   try {
-    process.env.AGENT_WRAPPER_STATE_DIR = stateDir;
+    process.env.AGENT_WRAPPER_LOCAL_STATE_DIR = localStateDir;
     const env = runtimeEnvForClaudeEngine({
       env: {
         ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
       },
     });
 
-    assert.equal(env.CLAUDE_CONFIG_DIR, path.join(stateDir, 'claude'));
+    assert.equal(env.CLAUDE_CONFIG_DIR, path.join(localStateDir, 'claude'));
     assert.equal(fs.existsSync(env.CLAUDE_CONFIG_DIR), true);
     assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
   } finally {
-    if (previousStateDir === undefined) {
-      delete process.env.AGENT_WRAPPER_STATE_DIR;
+    if (previousLocalStateDir === undefined) {
+      delete process.env.AGENT_WRAPPER_LOCAL_STATE_DIR;
     } else {
-      process.env.AGENT_WRAPPER_STATE_DIR = previousStateDir;
+      process.env.AGENT_WRAPPER_LOCAL_STATE_DIR = previousLocalStateDir;
     }
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    fs.rmSync(localStateDir, { recursive: true, force: true });
   }
 });
 

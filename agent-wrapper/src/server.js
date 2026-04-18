@@ -149,9 +149,25 @@ export function createServer({
           getSession: () => store.getSession(session.session_id),
           persistSession: (updater) => store.upsertSession(session.session_id, updater),
         };
+        const acceptedAtMs = Date.now();
         queueMicrotask(async () => {
+          logInfo('wrapper starting runtime run', {
+            session_id: body.session_id,
+            run_id: body.run_id,
+            sandbox_id: session.sandbox_id ?? null,
+            vendor_session_id: session.vendor_session_id ?? null,
+            queue_delay_ms: Date.now() - acceptedAtMs,
+          });
           try {
             await runtime.startRun(store.getSession(session.session_id), body, callbackClient, sessionStore);
+            const latest = store.getSession(session.session_id);
+            logInfo('wrapper runtime run completed', {
+              session_id: body.session_id,
+              run_id: body.run_id,
+              sandbox_id: latest?.sandbox_id ?? session.sandbox_id ?? null,
+              vendor_session_id: latest?.vendor_session_id ?? session.vendor_session_id ?? null,
+              elapsed_ms: Date.now() - acceptedAtMs,
+            });
           } catch (error) {
             logError('wrapper run failed', {
               session_id: body.session_id,

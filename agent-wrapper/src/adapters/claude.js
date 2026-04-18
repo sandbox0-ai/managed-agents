@@ -1,9 +1,11 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
+import { ClaudeStateMirror, claudeMirrorDir } from './claude-state-mirror.js';
 import {
   AgentRuntime,
   agentWrapperStateDir,
@@ -17,6 +19,7 @@ import {
 const MAIN_AGENT_NAME = 'managed-agent';
 const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
 const DEFAULT_MAIN_AGENT_PROMPT = 'You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.';
+const DEFAULT_LOCAL_CLAUDE_STATE_ROOT = path.join(os.tmpdir(), 'sandbox0', 'agent-wrapper');
 
 export {
   finalStatusEventForSessionError,
@@ -29,10 +32,19 @@ export {
 export function runtimeEnvForClaudeEngine(engine) {
   const env = runtimeEnvForEngine(engine);
   if (!env.CLAUDE_CONFIG_DIR) {
-    env.CLAUDE_CONFIG_DIR = path.join(agentWrapperStateDir(env), 'claude');
+    const localStateRoot = env.AGENT_WRAPPER_LOCAL_STATE_DIR || DEFAULT_LOCAL_CLAUDE_STATE_ROOT;
+    env.CLAUDE_CONFIG_DIR = path.join(localStateRoot, 'claude');
   }
   fs.mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true });
   return env;
+}
+
+export function claudeStatePathsForSession(session) {
+  const env = runtimeEnvForClaudeEngine(session?.engine ?? {});
+  return {
+    localDir: env.CLAUDE_CONFIG_DIR,
+    mirrorDir: claudeMirrorDir(env, agentWrapperStateDir(env)),
+  };
 }
 
 export function querySkillNames(session) {
@@ -100,6 +112,23 @@ export function claudeSettingSourcesForSession(session) {
   return next;
 }
 
+function elapsedMsSince(startedAtMs) {
+  if (typeof startedAtMs !== 'number' || !Number.isFinite(startedAtMs)) {
+    return null;
+  }
+  return Math.max(0, Date.now() - startedAtMs);
+}
+
+function timingFieldsForActiveRun(activeRun, extra = {}) {
+  return {
+    session_id: activeRun?.session?.session_id ?? null,
+    run_id: activeRun?.run?.run_id ?? null,
+    vendor_session_id: activeRun?.session?.vendor_session_id ?? null,
+    elapsed_ms: elapsedMsSince(activeRun?.startedAtMs),
+    ...extra,
+  };
+}
+
 export function sessionErrorEventForClaudeSDKSystemMessage(message) {
   if (!message || typeof message !== 'object' || message.type !== 'system') {
     return null;
@@ -134,18 +163,23 @@ export function allowToolUseDecision(input, toolUseID) {
 }
 
 export class ClaudeRuntime extends AgentRuntime {
-  constructor({ queryFn = query } = {}) {
+  constructor({ queryFn = query, stateMirror = new ClaudeStateMirror() } = {}) {
     super('claude');
     this.queryFn = queryFn;
+    this.stateMirror = stateMirror;
     this.sessions = new Map();
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
     this.deferredRunErrors = new Map();
+    this.hydratedMirrorKeys = new Set();
+    this.dirtyMirrorPaths = new Map();
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
+    await this.#hydrateClaudeState(session);
     const sessionRuntime = this.#runtimeForSession(session);
+    this.#markClaudeStateDirty(session);
     return this.#startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore);
   }
 
@@ -158,10 +192,14 @@ export class ClaudeRuntime extends AgentRuntime {
     return true;
   }
 
-  deleteSession(sessionID) {
+  async deleteSession(sessionID, session) {
     this.#closeSessionRuntime(sessionID);
     this.pendingActions.delete(sessionID);
     this.emittedToolUses.delete(sessionID);
+    if (session) {
+      this.#markClaudeStateDirty(session);
+      await this.#flushDirtyClaudeStateIfIdle();
+    }
   }
 
   async #startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore) {
@@ -204,9 +242,15 @@ export class ClaudeRuntime extends AgentRuntime {
       callbackClient,
       sessionStore,
       modelRequestStartID,
+      startedAtMs: Date.now(),
+      firstMessageLogged: false,
       done,
       resolve: resolveRun,
     };
+    logInfo('claude resident run starting', timingFieldsForActiveRun(sessionRuntime.activeRun, {
+      has_stream: Boolean(sessionRuntime.stream),
+      bootstrap_event_count: bootstrapEvents.length,
+    }));
 
     try {
       if (!sessionRuntime.stream) {
@@ -222,6 +266,9 @@ export class ClaudeRuntime extends AgentRuntime {
 
       this.activeRuns.set(run.run_id, { stream: sessionRuntime.stream, sessionID: session.session_id });
       sessionRuntime.inputQueue.push(runInputMessages(run.input_events));
+      logInfo('claude runtime input enqueued', timingFieldsForActiveRun(sessionRuntime.activeRun, {
+        input_event_types: (run.input_events ?? []).map((event) => event?.type ?? null),
+      }));
     } catch (error) {
       sessionRuntime.activeRun = null;
       this.activeRuns.delete(run.run_id);
@@ -238,7 +285,21 @@ export class ClaudeRuntime extends AgentRuntime {
     if (session.vendor_session_id) {
       options.resume = session.vendor_session_id;
     }
+    const queryStartedAtMs = Date.now();
+    logInfo('claude query starting', {
+      session_id: session.session_id,
+      run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
+      vendor_session_id: session.vendor_session_id ?? null,
+      resume: Boolean(session.vendor_session_id),
+    });
     const stream = this.queryFn({ prompt: sessionRuntime.inputQueue, options });
+    logInfo('claude query stream created', {
+      session_id: session.session_id,
+      run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
+      vendor_session_id: session.vendor_session_id ?? null,
+      elapsed_ms: elapsedMsSince(queryStartedAtMs),
+      resume: Boolean(session.vendor_session_id),
+    });
     sessionRuntime.stream = stream;
     sessionRuntime.pump = this.#pumpSessionRuntime(sessionRuntime).catch((error) => {
       logWarn('claude resident runtime failed', {
@@ -263,12 +324,23 @@ export class ClaudeRuntime extends AgentRuntime {
           }));
           activeRun.session = currentSession;
         }
+        if (!activeRun.firstMessageLogged) {
+          activeRun.firstMessageLogged = true;
+          logInfo('claude first stream message', timingFieldsForActiveRun(activeRun, {
+            message_type: message?.type ?? null,
+            message_subtype: message?.subtype ?? null,
+            vendor_session_id: currentSession.vendor_session_id ?? message?.session_id ?? null,
+          }));
+        }
         const callbackPayload = this.#mapMessage(currentSession, activeRun.run, message, activeRun.modelRequestStartID);
         if (callbackPayload) {
           await activeRun.callbackClient.send(currentSession, callbackPayload);
         }
         if (message?.type === 'result') {
-          this.#finishResidentRun(sessionRuntime);
+          logInfo('claude result received', timingFieldsForActiveRun(activeRun, {
+            stop_reason: message?.stop_reason ?? null,
+          }));
+          await this.#finishResidentRun(sessionRuntime);
         }
       }
     } catch (error) {
@@ -279,9 +351,9 @@ export class ClaudeRuntime extends AgentRuntime {
       const latestSession = activeRun.sessionStore.getSession?.() ?? activeRun.session;
       const errorEvent = sessionErrorEventForError(error);
       logWarn('claude run failed', {
-        session_id: latestSession.session_id,
-        run_id: activeRun.run.run_id,
-        vendor_session_id: latestSession.vendor_session_id ?? null,
+        ...timingFieldsForActiveRun(activeRun, {
+          vendor_session_id: latestSession.vendor_session_id ?? null,
+        }),
         error: errorEvent.error.message,
         error_type: errorEvent.error.type,
         retry_status: errorEvent.error.retry_status?.type ?? null,
@@ -296,7 +368,7 @@ export class ClaudeRuntime extends AgentRuntime {
           finalStatusEventForSessionError(errorEvent),
         ],
       });
-      this.#finishResidentRun(sessionRuntime);
+      await this.#finishResidentRun(sessionRuntime);
     } finally {
       sessionRuntime.closed = true;
       sessionRuntime.inputQueue.close();
@@ -306,7 +378,7 @@ export class ClaudeRuntime extends AgentRuntime {
     }
   }
 
-  #finishResidentRun(sessionRuntime) {
+  async #finishResidentRun(sessionRuntime) {
     const activeRun = sessionRuntime.activeRun;
     if (!activeRun) {
       return;
@@ -317,6 +389,8 @@ export class ClaudeRuntime extends AgentRuntime {
     this.activeRuns.delete(activeRun.run.run_id);
     rememberCompletedRunID(sessionRuntime, activeRun.run.run_id);
     sessionRuntime.activeRun = null;
+    this.#markClaudeStateDirty(activeRun.session);
+    await this.#flushDirtyClaudeStateIfIdle();
     activeRun.resolve();
   }
 
@@ -360,6 +434,55 @@ export class ClaudeRuntime extends AgentRuntime {
       sessionRuntime.activeRun.resolve();
     }
     this.sessions.delete(sessionID);
+  }
+
+  async #hydrateClaudeState(session) {
+    const paths = claudeStatePathsForSession(session);
+    const mirrorKey = mirrorKeyForPaths(paths);
+    if (!mirrorKey || this.hydratedMirrorKeys.has(mirrorKey) || this.activeRuns.size > 0) {
+      return;
+    }
+    try {
+      await this.stateMirror.hydrate(paths);
+    } catch (error) {
+      logWarn('claude state hydrate failed', {
+        session_id: session?.session_id ?? null,
+        local_dir: paths.localDir,
+        mirror_dir: paths.mirrorDir,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.hydratedMirrorKeys.add(mirrorKey);
+    }
+  }
+
+  #markClaudeStateDirty(session) {
+    const paths = claudeStatePathsForSession(session);
+    const mirrorKey = mirrorKeyForPaths(paths);
+    if (!mirrorKey) {
+      return;
+    }
+    this.dirtyMirrorPaths.set(mirrorKey, paths);
+  }
+
+  async #flushDirtyClaudeStateIfIdle() {
+    if (this.activeRuns.size > 0 || this.dirtyMirrorPaths.size === 0) {
+      return;
+    }
+    const pending = [...this.dirtyMirrorPaths.entries()];
+    this.dirtyMirrorPaths.clear();
+    for (const [mirrorKey, paths] of pending) {
+      try {
+        await this.stateMirror.flush(paths);
+      } catch (error) {
+        this.dirtyMirrorPaths.set(mirrorKey, paths);
+        logWarn('claude state flush failed', {
+          local_dir: paths.localDir,
+          mirror_dir: paths.mirrorDir,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   resolveActions(sessionID, events, sessionStore) {
@@ -946,6 +1069,12 @@ function residentSessionSignature(session) {
     skill_names: session?.skill_names,
     engine: session?.engine,
   });
+}
+
+function mirrorKeyForPaths(paths) {
+  const localDir = String(paths?.localDir ?? '').trim();
+  const mirrorDir = String(paths?.mirrorDir ?? '').trim();
+  return localDir && mirrorDir ? `${localDir}\u0000${mirrorDir}` : null;
 }
 
 function stableStringify(value) {

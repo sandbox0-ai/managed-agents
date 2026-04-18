@@ -6,6 +6,20 @@ import path from 'node:path';
 import { createServer } from '../src/server.js';
 import { RuntimeStore } from '../src/runtime/store.js';
 
+async function captureStructuredLogs(fn) {
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (line) => {
+    logs.push(JSON.parse(String(line)));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = originalLog;
+  }
+  return logs;
+}
+
 function closeServer(server) {
   server.closeAllConnections?.();
   return new Promise((resolve, reject) => {
@@ -57,23 +71,28 @@ test('agent-warper bootstraps a session and starts a run', async () => {
   await new Promise((resolve) => server.listen(0, resolve));
   const port = server.address().port;
 
-  let response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ session_id: 'sesn_123', vendor: 'claude' }),
-  });
-  assert.equal(response.status, 200);
+  const logs = await captureStructuredLogs(async () => {
+    let response = await fetch(`http://127.0.0.1:${port}/v1/runtime/session`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sesn_123', vendor: 'claude' }),
+    });
+    assert.equal(response.status, 200);
 
-  response = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ session_id: 'sesn_123', run_id: 'run_123', input_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }] }),
-  });
-  assert.equal(response.status, 202);
+    response = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sesn_123', run_id: 'run_123', input_events: [{ type: 'user.message', content: [{ type: 'text', text: 'hi' }] }] }),
+    });
+    assert.equal(response.status, 202);
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+
   assert.equal(callbacks.length, 1);
   assert.equal(callbacks[0].vendor_session_id, 'vendor_123');
+  assert.ok(logs.some((entry) => entry.msg === 'wrapper starting runtime run' && entry.session_id === 'sesn_123' && entry.run_id === 'run_123'));
+  assert.ok(logs.some((entry) => entry.msg === 'wrapper runtime run completed' && entry.session_id === 'sesn_123' && entry.run_id === 'run_123'));
 
   await closeServer(server);
 });
