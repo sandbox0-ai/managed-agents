@@ -14,7 +14,6 @@ type managedLLMCredential struct {
 	Token        string
 	BaseURL      string
 	Provider     string
-	DirectEnv    bool
 }
 
 const (
@@ -53,9 +52,10 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 		credentialCopy.Provider = resolvedProvider
 		if resolvedProvider == "minimax" {
 			out["model_provider"] = resolvedProvider
-			env["MINIMAX_API_KEY"] = credential.Token
-			env["MINIMAX_TOKEN"] = credential.Token
-			credentialCopy.DirectEnv = true
+			env["MINIMAX_API_KEY"] = managedCodexFakeAPIKey
+			delete(env, "MINIMAX_TOKEN")
+			delete(env, "CODEX_API_KEY")
+			delete(env, "OPENAI_API_KEY")
 		} else {
 			env["CODEX_API_KEY"] = managedCodexFakeAPIKey
 			env["OPENAI_API_KEY"] = managedCodexFakeAPIKey

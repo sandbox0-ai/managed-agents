@@ -461,8 +461,15 @@ func TestApplyManagedLLMEnvDefaultsCodexBaseURL(t *testing.T) {
 	}
 }
 
-func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
-	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.minimax.io/v1",
+func TestApplyManagedLLMEnvUsesVaultBackedMiniMaxCodexCredential(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{
+		"env": map[string]any{
+			"MINIMAX_API_KEY": "direct-minimax-key",
+			"MINIMAX_TOKEN":   "direct-minimax-token",
+			"CODEX_API_KEY":   "direct-codex-key",
+			"OPENAI_API_KEY":  "direct-openai-key",
+		},
+	}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.minimax.io/v1",
 		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
 	))
 	if err != nil {
@@ -472,11 +479,11 @@ func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
 		t.Fatal("expected managed llm credential")
 	}
 	env := mapValue(engine["env"])
-	if got := stringValue(env["MINIMAX_API_KEY"]); got != "secret-token" {
-		t.Fatalf("MINIMAX_API_KEY = %q, want credential token", got)
+	if got := stringValue(env["MINIMAX_API_KEY"]); got != managedCodexFakeAPIKey {
+		t.Fatalf("MINIMAX_API_KEY = %q, want fake sandbox key", got)
 	}
-	if got := stringValue(env["MINIMAX_TOKEN"]); got != "secret-token" {
-		t.Fatalf("MINIMAX_TOKEN = %q, want credential token", got)
+	if got := stringValue(env["MINIMAX_TOKEN"]); got != "" {
+		t.Fatalf("MINIMAX_TOKEN = %q, want empty", got)
 	}
 	if got := stringValue(env["CODEX_API_KEY"]); got != "" {
 		t.Fatalf("CODEX_API_KEY = %q, want empty for MiniMax provider", got)
@@ -493,8 +500,11 @@ func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
 	if credential.BaseURL != "https://api.minimax.io/v1" {
 		t.Fatalf("credential base URL = %q, want MiniMax base URL", credential.BaseURL)
 	}
-	if !credential.DirectEnv {
-		t.Fatal("expected MiniMax credential to inject token directly")
+	if credential.Provider != "minimax" {
+		t.Fatalf("credential provider = %q, want minimax", credential.Provider)
+	}
+	if credential.Token != "secret-token" {
+		t.Fatalf("credential token = %q, want original vault token", credential.Token)
 	}
 }
 
@@ -560,22 +570,23 @@ func TestManagedLLMCredentialBindingAllowsVaultBaseURLDomain(t *testing.T) {
 	}
 }
 
-func TestAllowManagedCredentialDomainsAddsDirectEnvHostForBlockAll(t *testing.T) {
-	policy := allowManagedCredentialDomains(apispec.SandboxNetworkPolicy{
-		Mode: apispec.SandboxNetworkPolicyModeBlockAll,
-	}, []string{"api.minimax.io"})
-	egress, ok := policy.Egress.Get()
-	if !ok || !containsString(egress.AllowedDomains, "api.minimax.io") {
-		t.Fatalf("allowed domains = %#v, want api.minimax.io", egress.AllowedDomains)
-	}
-}
-
-func TestManagedLLMAllowedDomainsUsesCredentialBaseURLHost(t *testing.T) {
-	domains := managedLLMAllowedDomains("codex", &managedLLMCredential{
-		BaseURL: "https://API.MINIMAX.IO/v1",
+func TestManagedLLMCredentialBindingUsesMiniMaxVaultToken(t *testing.T) {
+	binding, err := managedLLMCredentialBinding("sesn_123", "codex", &managedLLMCredential{
+		CredentialID: "vcrd_123",
+		Token:        "secret-token",
+		BaseURL:      "https://API.MINIMAX.IO/v1",
 	})
-	if len(domains) != 1 || domains[0] != "api.minimax.io" {
-		t.Fatalf("domains = %#v, want api.minimax.io", domains)
+	if err != nil {
+		t.Fatalf("managedLLMCredentialBinding: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected binding")
+	}
+	if len(binding.domains) != 1 || binding.domains[0] != "api.minimax.io" {
+		t.Fatalf("binding domains = %#v, want api.minimax.io", binding.domains)
+	}
+	if binding.secretValues["x_api_key"] != "secret-token" || binding.secretValues["authorization"] != "Bearer secret-token" {
+		t.Fatalf("binding secrets = %#v", binding.secretValues)
 	}
 }
 
