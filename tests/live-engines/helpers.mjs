@@ -163,6 +163,13 @@ export async function waitForCompletedTurn(client, sessionID, timeoutMs = 300_00
   })(), timeoutMs, `session ${sessionID} turn`);
 }
 
+const retryableLiveEngineErrorPattern = /\b(connection failed|error sending request|network error|timed out|timeout|tls|econnreset|econnrefused|enotfound|eai_again)\b/i;
+
+export function isRetryableLiveEngineError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return retryableLiveEngineErrorPattern.test(message);
+}
+
 export function textFromAgentMessages(events) {
   return events
     .filter((event) => event?.type === 'agent.message')
