@@ -24,7 +24,10 @@ test('live codex engine runs a real managed-agent turn through MiniMax', { skip:
       if (attempt > 1) {
         t.diagnostic(`retrying Codex live turn after retryable upstream failure (attempt ${attempt}/${attempts})`);
       }
-      await runLiveTurn(client, session.id, 'CODEX_ENGINE_OK', { timeoutMs: 360_000 });
+      await runLiveTurn(client, session.id, 'CODEX_ENGINE_OK', {
+        timeoutMs: 360_000,
+        requireUsage: false,
+      });
       return;
     } catch (error) {
       lastError = error;

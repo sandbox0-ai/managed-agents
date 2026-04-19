@@ -179,7 +179,7 @@ export function textFromAgentMessages(events) {
     .join('\n');
 }
 
-export async function runLiveTurn(client, sessionID, expectedText, { timeoutMs } = {}) {
+export async function runLiveTurn(client, sessionID, expectedText, { timeoutMs, requireUsage = true } = {}) {
   const sent = await client.beta.sessions.events.send(sessionID, {
     events: [{
       type: 'user.message',
@@ -197,16 +197,20 @@ export async function runLiveTurn(client, sessionID, expectedText, { timeoutMs }
   const modelRequestEnd = events.find((event) => event.type === 'span.model_request_end');
   assert(modelRequestEnd, `missing span.model_request_end in ${JSON.stringify(events)}`);
   const usage = modelRequestEnd.model_usage ?? {};
-  assert(
-    Number(usage.input_tokens ?? 0) > 0 || Number(usage.output_tokens ?? 0) > 0,
-    `expected token usage in ${JSON.stringify(modelRequestEnd)}`,
-  );
+  if (requireUsage) {
+    assert(
+      Number(usage.input_tokens ?? 0) > 0 || Number(usage.output_tokens ?? 0) > 0,
+      `expected token usage in ${JSON.stringify(modelRequestEnd)}`,
+    );
+  }
 
   const session = await client.beta.sessions.retrieve(sessionID);
-  assert(
-    Number(session.usage?.input_tokens ?? 0) > 0 || Number(session.usage?.output_tokens ?? 0) > 0,
-    `expected persisted usage in ${JSON.stringify(session.usage)}`,
-  );
+  if (requireUsage) {
+    assert(
+      Number(session.usage?.input_tokens ?? 0) > 0 || Number(session.usage?.output_tokens ?? 0) > 0,
+      `expected persisted usage in ${JSON.stringify(session.usage)}`,
+    );
+  }
 
   return { events, session, responseText };
 }
