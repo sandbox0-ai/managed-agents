@@ -540,7 +540,7 @@ function buildThreadParams(session, { includeDynamicTools, includeServiceName })
     personality: engine.personality ?? 'none',
     config: codexConfigForSession(session),
   };
-  if (typeof session.agent?.system === 'string' && session.agent.system.trim() !== '') {
+  if (codexSupportsDeveloperInstructions(session) && typeof session.agent?.system === 'string' && session.agent.system.trim() !== '') {
     params.developerInstructions = session.agent.system;
   }
   const dynamicTools = includeDynamicTools ? dynamicToolsForAgent(session.agent?.tools) : [];
@@ -725,7 +725,40 @@ function inputEventsToCodexInput(events, session) {
   if (items.length === 0) {
     items.push({ type: 'text', text: '' });
   }
-  return [...items, ...skillInputItemsForSession(session)];
+  return [...applyInlineSystemInstructions(items, session), ...skillInputItemsForSession(session)];
+}
+
+function applyInlineSystemInstructions(items, session) {
+  const systemInstructions = inlineSystemInstructions(session);
+  if (!systemInstructions) {
+    return items;
+  }
+  const nextItems = items.map((item) => ({ ...item }));
+  const firstTextIndex = nextItems.findIndex((item) => item?.type === 'text');
+  if (firstTextIndex === -1) {
+    nextItems.unshift({ type: 'text', text: formatInlineSystemInstructions(systemInstructions) });
+    return nextItems;
+  }
+  nextItems[firstTextIndex] = {
+    ...nextItems[firstTextIndex],
+    text: formatInlineSystemInstructions(systemInstructions, nextItems[firstTextIndex].text),
+  };
+  return nextItems;
+}
+
+function inlineSystemInstructions(session) {
+  if (codexSupportsDeveloperInstructions(session)) {
+    return '';
+  }
+  return typeof session?.agent?.system === 'string' ? session.agent.system.trim() : '';
+}
+
+function formatInlineSystemInstructions(systemInstructions, userInput = '') {
+  const normalizedInput = String(userInput ?? '').trim();
+  if (!normalizedInput) {
+    return `System instructions:\n${systemInstructions}`;
+  }
+  return `System instructions:\n${systemInstructions}\n\nUser input:\n${normalizedInput}`;
 }
 
 function userMessageText(content) {
@@ -1285,6 +1318,10 @@ export function codexModelProviderForEngine(engine = {}) {
     return 'minimax';
   }
   return '';
+}
+
+function codexSupportsDeveloperInstructions(session) {
+  return codexModelProviderForEngine(session?.engine ?? {}) !== 'minimax';
 }
 
 function ensureCodexProviderConfig(env, engine) {

@@ -246,6 +246,48 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
 });
 
+test('CodexRuntime sends agent system via developerInstructions for native Codex providers', async () => {
+  const client = new FakeCodexClient();
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  let storedSession = codexSession({
+    agent: {
+      model: 'gpt-5.1-codex',
+      system: 'Reply with exactly one word.',
+      tools: [],
+    },
+  });
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
+
+  assert.equal(client.requests[0].params.developerInstructions, 'Reply with exactly one word.');
+  assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
+});
+
+test('CodexRuntime inlines agent system into turn input for MiniMax providers', async () => {
+  const client = new FakeCodexClient();
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  let storedSession = codexSession({
+    engine: {
+      openai_base_url: 'https://api.minimax.io/v1',
+    },
+    agent: {
+      model: 'gpt-5.1-codex',
+      system: 'Reply with exactly one word.',
+      tools: [],
+    },
+  });
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
+
+  assert.equal('developerInstructions' in client.requests[0].params, false);
+  assert.deepEqual(client.requests[1].params.input, [{
+    type: 'text',
+    text: 'System instructions:\nReply with exactly one word.\n\nUser input:\nhello',
+  }]);
+});
+
 test('CodexRuntime maps codex/event task completion notifications', async () => {
   const client = new FakeCodexClient({ eventProtocol: 'codex-event' });
   const runtime = new CodexRuntime({ clientFactory: () => client });
