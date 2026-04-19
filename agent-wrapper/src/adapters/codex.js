@@ -473,7 +473,7 @@ export function codexClientOptions(session) {
     command: firstNonEmptyString(engine.path_to_codex_executable, engine.codex_executable, process.env.CODEX_EXECUTABLE, 'codex'),
     args: Array.isArray(engine.app_server_args) && engine.app_server_args.length > 0
       ? engine.app_server_args.map((value) => String(value))
-      : ['app-server', '--listen', 'stdio://'],
+      : ['app-server'],
     cwd: session.working_directory,
     env,
     requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 300000),
@@ -494,7 +494,7 @@ function buildThreadParams(session, { includeDynamicTools, includeServiceName })
     cwd: session.working_directory,
     model: runtimeModelForSession(session),
     approvalPolicy: codexApprovalPolicy(engine),
-    sandbox: engine.sandbox ?? 'workspace-write',
+    sandbox: codexSandbox(engine),
     serviceName: includeServiceName ? 'sandbox0_managed_agents' : undefined,
     personality: engine.personality ?? 'none',
     config: codexConfigForSession(session),
@@ -517,7 +517,7 @@ function buildTurnStartParams(session, run) {
     model: runtimeModelForSession(session),
     cwd: session.working_directory,
     approvalPolicy: codexApprovalPolicy(engine),
-    sandboxPolicy: engine.sandbox_policy ?? workspaceSandboxPolicy(session.working_directory, engine),
+    sandboxPolicy: codexSandboxPolicy(session.working_directory, engine),
     effort: engine.reasoning_effort,
     summary: engine.reasoning_summary,
     serviceTier: engine.service_tier,
@@ -540,24 +540,127 @@ export function codexConfigForSession(session) {
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
-function codexApprovalPolicy(engine) {
-  if (engine.approval_policy) {
-    return engine.approval_policy;
+export function codexApprovalPolicy(engine) {
+  const requested = engine?.approval_policy;
+  if (typeof requested === 'string') {
+    switch (requested) {
+      case 'unlessTrusted':
+      case 'onFailure':
+      case 'onRequest':
+      case 'never':
+        return requested;
+      case 'untrusted':
+        return 'unlessTrusted';
+      case 'on-failure':
+        return 'onFailure';
+      case 'on-request':
+        return 'onRequest';
+      default:
+        break;
+    }
   }
-  return { granular: { sandbox_approval: true, rules: true, skill_approval: true, request_permissions: true, mcp_elicitations: true } };
+  if (requested && typeof requested === 'object') {
+    if (typeof requested.mode === 'string') {
+      return codexApprovalPolicy({ approval_policy: requested.mode });
+    }
+    if (requested.granular || requested.type === 'granular') {
+      return 'onRequest';
+    }
+  }
+  return 'onRequest';
 }
 
-function workspaceSandboxPolicy(workingDirectory, engine) {
-  const networkAccess = engine.network_access === false ? false : true;
-  const writableRoots = Array.isArray(engine.writable_roots) && engine.writable_roots.length > 0
-    ? engine.writable_roots.map((value) => String(value))
-    : [workingDirectory].filter(Boolean);
+export function codexSandbox(engine) {
+  const requested = engine?.sandbox;
+  if (typeof requested === 'string') {
+    switch (requested) {
+      case 'readOnly':
+      case 'workspaceWrite':
+      case 'dangerFullAccess':
+        return requested;
+      case 'read-only':
+      case 'read_only':
+        return 'readOnly';
+      case 'workspace-write':
+      case 'workspace_write':
+        return 'workspaceWrite';
+      case 'danger-full-access':
+      case 'danger_full_access':
+        return 'dangerFullAccess';
+      default:
+        break;
+    }
+  }
+  return 'workspaceWrite';
+}
+
+export function codexSandboxPolicy(workingDirectory, engine) {
+  const requested = engine?.sandbox_policy;
+  const networkAccess = sandboxPolicyNetworkAccess(requested, engine);
+  const writableRoots = sandboxPolicyWritableRoots(requested, workingDirectory, engine);
   return {
-    type: 'workspaceWrite',
+    mode: sandboxPolicyMode(requested),
     writableRoots,
     networkAccess,
-    readOnlyAccess: { type: 'fullAccess' },
+    readOnlyAccess: codexReadOnlyAccess(requested?.readOnlyAccess ?? requested?.read_only_access),
   };
+}
+
+function sandboxPolicyMode(requested) {
+  if (typeof requested === 'string') {
+    return codexSandbox({ sandbox: requested });
+  }
+  if (requested && typeof requested === 'object') {
+    if (typeof requested.mode === 'string') {
+      return codexSandbox({ sandbox: requested.mode });
+    }
+    if (typeof requested.type === 'string') {
+      return codexSandbox({ sandbox: requested.type });
+    }
+  }
+  return 'workspaceWrite';
+}
+
+function sandboxPolicyWritableRoots(requested, workingDirectory, engine) {
+  const explicitRoots = Array.isArray(requested?.writableRoots) && requested.writableRoots.length > 0
+    ? requested.writableRoots
+    : Array.isArray(requested?.writable_roots) && requested.writable_roots.length > 0
+      ? requested.writable_roots
+      : Array.isArray(engine?.writable_roots) && engine.writable_roots.length > 0
+        ? engine.writable_roots
+        : [workingDirectory].filter(Boolean);
+  return explicitRoots.map((value) => String(value));
+}
+
+function sandboxPolicyNetworkAccess(requested, engine) {
+  if (typeof requested?.networkAccess === 'boolean') {
+    return requested.networkAccess;
+  }
+  if (typeof requested?.network_access === 'boolean') {
+    return requested.network_access;
+  }
+  return engine.network_access === false ? false : true;
+}
+
+function codexReadOnlyAccess(requested) {
+  const mode = normalizeReadOnlyAccessMode(requested);
+  return { mode };
+}
+
+function normalizeReadOnlyAccessMode(requested) {
+  const value = typeof requested === 'string'
+    ? requested
+    : requested && typeof requested === 'object'
+      ? requested.mode ?? requested.type
+      : undefined;
+  switch (value) {
+    case 'fullAccess':
+    case 'full-access':
+    case 'full_access':
+      return 'fullAccess';
+    default:
+      return 'fullAccess';
+  }
 }
 
 function inputEventsToCodexInput(events, session) {

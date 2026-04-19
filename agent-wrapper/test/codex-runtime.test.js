@@ -4,7 +4,15 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CodexRuntime, codexClientOptions, codexConfigForSession, codexModelProviderForEngine } from '../src/adapters/codex.js';
+import {
+  CodexRuntime,
+  codexApprovalPolicy,
+  codexClientOptions,
+  codexConfigForSession,
+  codexModelProviderForEngine,
+  codexSandbox,
+  codexSandboxPolicy,
+} from '../src/adapters/codex.js';
 
 class FakeCodexClient extends EventEmitter {
   constructor({ approval = false, stderrLine = null, startError = null, completionStatus = 'completed', completionError = null } = {}) {
@@ -138,6 +146,12 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert.equal(client.requests[0].method, 'thread/start');
   assert.equal(client.requests[1].method, 'turn/start');
   assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
+  assert.deepEqual(client.requests[1].params.sandboxPolicy, {
+    mode: 'workspaceWrite',
+    writableRoots: ['/workspace'],
+    networkAccess: true,
+    readOnlyAccess: { mode: 'fullAccess' },
+  });
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.message'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
@@ -362,6 +376,48 @@ test('Codex runtime omits openai_base_url when targeting MiniMax', () => {
       openai_base_url: 'https://api.minimax.io/v1',
     },
   })), { model_provider: 'minimax' });
+});
+
+test('Codex runtime normalizes approval policies for old and new app-server variants', () => {
+  assert.equal(codexApprovalPolicy({}), 'onRequest');
+  assert.equal(codexApprovalPolicy({ approval_policy: 'onRequest' }), 'onRequest');
+  assert.equal(codexApprovalPolicy({ approval_policy: 'on-request' }), 'onRequest');
+  assert.equal(codexApprovalPolicy({ approval_policy: 'untrusted' }), 'unlessTrusted');
+  assert.equal(codexApprovalPolicy({ approval_policy: { granular: { sandbox_approval: true } } }), 'onRequest');
+  assert.equal(codexApprovalPolicy({ approval_policy: { type: 'granular' } }), 'onRequest');
+  assert.equal(codexApprovalPolicy({ approval_policy: { mode: 'on-failure' } }), 'onFailure');
+});
+
+test('Codex runtime normalizes sandbox modes for old and new app-server variants', () => {
+  assert.equal(codexSandbox({}), 'workspaceWrite');
+  assert.equal(codexSandbox({ sandbox: 'readOnly' }), 'readOnly');
+  assert.equal(codexSandbox({ sandbox: 'read-only' }), 'readOnly');
+  assert.equal(codexSandbox({ sandbox: 'workspaceWrite' }), 'workspaceWrite');
+  assert.equal(codexSandbox({ sandbox: 'workspace-write' }), 'workspaceWrite');
+  assert.equal(codexSandbox({ sandbox: 'dangerFullAccess' }), 'dangerFullAccess');
+  assert.equal(codexSandbox({ sandbox: 'danger-full-access' }), 'dangerFullAccess');
+});
+
+test('Codex runtime normalizes sandbox policies for old and new app-server variants', () => {
+  assert.deepEqual(codexSandboxPolicy('/workspace', {}), {
+    mode: 'workspaceWrite',
+    writableRoots: ['/workspace'],
+    networkAccess: true,
+    readOnlyAccess: { mode: 'fullAccess' },
+  });
+  assert.deepEqual(codexSandboxPolicy('/workspace', {
+    network_access: false,
+    sandbox_policy: {
+      type: 'workspace-write',
+      writable_roots: ['/tmp/worktree'],
+      read_only_access: { type: 'full-access' },
+    },
+  }), {
+    mode: 'workspaceWrite',
+    writableRoots: ['/tmp/worktree'],
+    networkAccess: false,
+    readOnlyAccess: { mode: 'fullAccess' },
+  });
 });
 
 function codexSession(overrides = {}) {

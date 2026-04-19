@@ -10,6 +10,7 @@ CHART_DIR ?= ./chart
 IMAGE_REPOSITORY ?= sandbox0ai/managed-agents
 GATEWAY_TAG ?= gateway-testenv
 WRAPPER_TAG ?= wrapper-testenv
+WRAPPER_BASE_TAG ?= wrapper-base-$(WRAPPER_TAG)
 FAKE_WRAPPER_IMAGE ?= managed-agents/fake-wrapper:e2e
 SDK_GO_DIR ?= ../sdk-go
 
@@ -34,7 +35,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
 	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
 verify: verify-format verify-tidy verify-generated test-unit test-wrapper helm-lint helm-template
 
@@ -95,9 +96,17 @@ docker-build-gateway:
 		--build-context sdk-go=$(SDK_GO_DIR) \
 		.
 
+docker-build-wrapper-base:
+	DOCKER_BUILDKIT=1 $(DOCKER) build \
+		-t $(IMAGE_REPOSITORY):$(WRAPPER_BASE_TAG) \
+		-f agent-wrapper/Dockerfile.base \
+		agent-wrapper
+
 docker-build-wrapper:
-	DOCKER_BUILDKIT=1 $(DOCKER) buildx build --load \
+	$(MAKE) docker-build-wrapper-base
+	DOCKER_BUILDKIT=1 $(DOCKER) build \
 		-t $(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
+		--build-arg WRAPPER_BASE_IMAGE=$(IMAGE_REPOSITORY):$(WRAPPER_BASE_TAG) \
 		-f agent-wrapper/Dockerfile.wrapper \
 		agent-wrapper
 
