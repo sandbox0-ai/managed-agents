@@ -599,6 +599,34 @@ test('Codex runtime writes a MiniMax provider config and clears OpenAI auth envs
   }
 });
 
+test('Codex runtime passes the sandbox0 MITM CA bundle to native TLS clients', async () => {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'codex-ca-'));
+  const systemCAPath = path.join(tempDir, 'system-ca.pem');
+  const mitmCAPath = path.join(tempDir, 'mitm-ca.pem');
+  await fs.promises.writeFile(systemCAPath, '-----BEGIN CERTIFICATE-----\nsystem\n-----END CERTIFICATE-----\n', 'utf8');
+  await fs.promises.writeFile(mitmCAPath, '-----BEGIN CERTIFICATE-----\nmitm\n-----END CERTIFICATE-----\n', 'utf8');
+  try {
+    const options = codexClientOptions(codexSession({
+      engine: {
+        env: {
+          CODEX_HOME: tempDir,
+          SANDBOX0_SYSTEM_CA_BUNDLE: systemCAPath,
+          SANDBOX0_NETD_MITM_CA_FILE: mitmCAPath,
+        },
+      },
+    }));
+    const bundlePath = path.join(tempDir, 'sandbox0-ca-bundle.pem');
+    assert.equal(options.env.SSL_CERT_FILE, bundlePath);
+    assert.equal(options.env.CURL_CA_BUNDLE, bundlePath);
+    assert.equal(options.env.REQUESTS_CA_BUNDLE, bundlePath);
+    const bundle = await fs.promises.readFile(bundlePath, 'utf8');
+    assert.match(bundle, /system/);
+    assert.match(bundle, /mitm/);
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('Codex runtime omits openai_base_url when targeting MiniMax', () => {
   assert.deepEqual(codexConfigForSession(codexSession({
     engine: {

@@ -509,6 +509,7 @@ export function codexClientOptions(session) {
     env.CODEX_HOME = path.join(agentWrapperStateDir(env), 'codex');
   }
   fs.mkdirSync(env.CODEX_HOME, { recursive: true });
+  ensureCodexCABundle(env);
   ensureCodexProviderConfig(env, engine);
   return {
     command: firstNonEmptyString(engine.path_to_codex_executable, engine.codex_executable, process.env.CODEX_EXECUTABLE, 'codex'),
@@ -519,6 +520,35 @@ export function codexClientOptions(session) {
     env,
     requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 300000),
   };
+}
+
+const defaultSystemCABundlePath = '/etc/ssl/certs/ca-certificates.crt';
+
+function ensureCodexCABundle(env) {
+  const mitmCAPath = firstNonEmptyString(env.SANDBOX0_NETD_MITM_CA_FILE, env.NODE_EXTRA_CA_CERTS);
+  if (!mitmCAPath || !fs.existsSync(mitmCAPath)) {
+    return;
+  }
+  const systemCAPath = firstNonEmptyString(env.SANDBOX0_SYSTEM_CA_BUNDLE, env.SSL_CERT_FILE, defaultSystemCABundlePath);
+  const parts = [];
+  if (systemCAPath && systemCAPath !== mitmCAPath && fs.existsSync(systemCAPath)) {
+    const systemCA = fs.readFileSync(systemCAPath, 'utf8').trim();
+    if (systemCA) {
+      parts.push(systemCA);
+    }
+  }
+  const mitmCA = fs.readFileSync(mitmCAPath, 'utf8').trim();
+  if (mitmCA) {
+    parts.push(mitmCA);
+  }
+  if (parts.length === 0) {
+    return;
+  }
+  const bundlePath = path.join(env.CODEX_HOME, 'sandbox0-ca-bundle.pem');
+  fs.writeFileSync(bundlePath, `${parts.join('\n')}\n`, 'utf8');
+  env.SSL_CERT_FILE = bundlePath;
+  env.CURL_CA_BUNDLE = bundlePath;
+  env.REQUESTS_CA_BUNDLE = bundlePath;
 }
 
 function buildThreadStartParams(session) {
