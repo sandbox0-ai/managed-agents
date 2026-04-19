@@ -19,9 +19,13 @@ var reservedSkillNames = map[string]struct{}{
 	"openai":    {},
 }
 
-func parseSkillUpload(files []uploadedSkillFile, _ string) (*parsedSkillUpload, error) {
+func parseSkillUpload(files []uploadedSkillFile, fallbackDirectory string) (*parsedSkillUpload, error) {
 	if len(files) == 0 {
 		return nil, errors.New("files are required")
+	}
+	fallbackDirectory = normalizeUploadedPath(fallbackDirectory)
+	if fallbackDirectory == "" || hasParentDirectorySegment(fallbackDirectory) {
+		fallbackDirectory = ""
 	}
 	topDirectory := ""
 	skillMarkdown := ""
@@ -38,6 +42,10 @@ func parseSkillUpload(files []uploadedSkillFile, _ string) (*parsedSkillUpload, 
 			return nil, errors.New("uploaded file path must not contain parent directory segments")
 		}
 		directory, relativePath := splitUploadedPath(normalizedPath)
+		if directory == "" && fallbackDirectory != "" {
+			directory = fallbackDirectory
+			normalizedPath = path.Join(fallbackDirectory, relativePath)
+		}
 		if directory != "" {
 			if topDirectory == "" {
 				topDirectory = directory

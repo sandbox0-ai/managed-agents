@@ -29,17 +29,21 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      MANAGED_AGENT_SPEC_TOKEN_PRESENT: ${{ secrets.MANAGED_AGENT_SPEC_TOKEN != '' }}
     steps:
       - name: Checkout managed-agents
         uses: actions/checkout@v4
         with:
           path: managed-agents
 
-      - name: Checkout managed-agents-spec sibling repo
+      - name: Checkout managed-agent-spec sibling repo
+        if: env.MANAGED_AGENT_SPEC_TOKEN_PRESENT == 'true'
         uses: actions/checkout@v4
         with:
-          repository: sandbox0-ai/managed-agents-spec
+          repository: laotoutou/managed-agent-spec
           path: managed-agents-spec
+          token: ${{ secrets.MANAGED_AGENT_SPEC_TOKEN }}
 
       - name: Checkout sdk-go sibling repo
         uses: actions/checkout@v4
@@ -65,6 +69,8 @@ jobs:
 
       - name: Run quick verification
         working-directory: managed-agents
+        env:
+          SKIP_GENERATED_WHEN_SPEC_MISSING: "1"
         run: make verify
 
       - name: Show git diff on failure
@@ -119,15 +125,12 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.run_kind_e2e) ||
-      vars.MANAGED_AGENTS_RUN_KIND_E2E == 'true'
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_kind_e2e == 'true'
     env:
       KIND_CLUSTER_NAME: managed-agents-e2e
       IMAGE_REPOSITORY: sandbox0ai/managed-agents
       GATEWAY_TAG: gateway-testenv
       FAKE_WRAPPER_IMAGE: managed-agents/fake-wrapper:e2e
-      E2E_ENV_FILE: ${{ runner.temp }}/managed-agents-e2e.env
     steps:
       - name: Checkout managed-agents
         uses: actions/checkout@v4
@@ -153,6 +156,13 @@ jobs:
           go-version-file: managed-agents/go.mod
           cache-dependency-path: managed-agents/go.sum
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: managed-agents/tests/sdk-compat/package-lock.json
+
       - name: Set up Helm
         uses: azure/setup-helm@v4
 
@@ -162,12 +172,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Set up Kind
-        uses: helm/kind-action@v1
-        with:
-          version: v0.30.0
-          config: managed-agents/tests/e2e/kind-config.yaml
-          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+      - name: Install Kind
+        shell: bash
+        run: |
+          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+
+      - name: Create Kind cluster
+        shell: bash
+        run: kind create cluster --name "${KIND_CLUSTER_NAME}" --config managed-agents/tests/e2e/kind-config.yaml
 
       - name: Build managed-agents test images
         working-directory: managed-agents

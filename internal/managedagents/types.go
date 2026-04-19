@@ -397,7 +397,7 @@ type SessionStopReason struct {
 type SessionErrorDetail struct {
 	Type          string `json:"type"`
 	Message       string `json:"message,omitempty"`
-	RetryStatus   string `json:"retry_status,omitempty"`
+	RetryStatus   any    `json:"retry_status,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
 }
 

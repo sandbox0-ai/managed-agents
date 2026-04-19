@@ -48,6 +48,7 @@ async function postWebhook(session, run) {
     return;
   }
   const text = inputText(run.input_events);
+  const events = eventsForInput(text);
   const payload = {
     session_id: session.session_id,
     run_id: run.run_id,
@@ -57,16 +58,7 @@ async function postWebhook(session, run) {
       output_tokens: 2,
       cache_read_input_tokens: 1,
     },
-    events: [
-      {
-        type: 'agent.message',
-        content: [{ type: 'text', text: `fake-wrapper response: ${text}` }],
-      },
-      {
-        type: 'session.status_idle',
-        stop_reason: { type: 'end_turn' },
-      },
-    ],
+    events,
   };
   const envelope = {
     event_id: `evt_${crypto.randomUUID().replaceAll('-', '')}`,
@@ -87,6 +79,79 @@ async function postWebhook(session, run) {
   if (!response.ok) {
     throw new Error(`callback failed with ${response.status}: ${await response.text()}`);
   }
+}
+
+function eventsForInput(text) {
+  if (text.includes('trigger-agent-tool-requires-action')) {
+    const toolUseID = `toolu_${crypto.randomUUID().replaceAll('-', '')}`;
+    return [
+      {
+        id: toolUseID,
+        type: 'agent.tool_use',
+        name: 'bash',
+        input: { command: 'echo requires action' },
+        evaluated_permission: 'ask',
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'requires_action', event_ids: [toolUseID] },
+      },
+    ];
+  }
+  if (text.includes('trigger-custom-tool-requires-action')) {
+    const customToolUseID = `ctu_${crypto.randomUUID().replaceAll('-', '')}`;
+    return [
+      {
+        id: customToolUseID,
+        type: 'agent.custom_tool_use',
+        name: 'lookup_customer',
+        input: { customer_id: 'cust_123' },
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'requires_action', event_ids: [customToolUseID] },
+      },
+    ];
+  }
+  if (text.includes('trigger-retries-exhausted')) {
+    return [
+      {
+        type: 'session.error',
+        error: {
+          type: 'unknown_error',
+          message: 'fake-wrapper exhausted retries',
+          retry_status: { type: 'exhausted' },
+        },
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'retries_exhausted' },
+      },
+    ];
+  }
+  if (text.includes('trigger-thread-context-compacted')) {
+    return [
+      { type: 'agent.thread_context_compacted' },
+      {
+        type: 'agent.message',
+        content: [{ type: 'text', text: `fake-wrapper response: ${text}` }],
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'end_turn' },
+      },
+    ];
+  }
+  return [
+    {
+      type: 'agent.message',
+      content: [{ type: 'text', text: `fake-wrapper response: ${text}` }],
+    },
+    {
+      type: 'session.status_idle',
+      stop_reason: { type: 'end_turn' },
+    },
+  ];
 }
 
 function inputText(events) {

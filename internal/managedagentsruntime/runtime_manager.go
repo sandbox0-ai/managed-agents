@@ -35,6 +35,7 @@ type Config struct {
 	SandboxTTLSeconds      int
 	SandboxRequestTimeout  time.Duration
 	SandboxBaseURL         string
+	SandboxExposureBaseURL string
 	SandboxAdminAPIKey     string
 	RuntimeCallbackBaseURL string
 	RuntimeAllowedDomains  []string
@@ -848,6 +849,25 @@ func (m *SDKRuntimeManager) wrapperRequestTarget(rawWrapperURL, path string) (st
 	wrapperURL, err := canonicalWrapperURL(rawWrapperURL)
 	if err != nil {
 		return "", "", err
+	}
+	exposureBaseURL := strings.TrimSpace(m.cfg.SandboxExposureBaseURL)
+	if exposureBaseURL != "" {
+		baseURL, err := canonicalManagedRuntimeURL(exposureBaseURL)
+		if err != nil {
+			return "", "", fmt.Errorf("canonicalize sandbox exposure base URL: %w", err)
+		}
+		parsedBaseURL, err := url.Parse(baseURL)
+		if err != nil {
+			return "", "", fmt.Errorf("parse sandbox exposure base URL: %w", err)
+		}
+		parsedWrapperURL, err := url.Parse(wrapperURL)
+		if err != nil {
+			return "", "", fmt.Errorf("parse wrapper URL: %w", err)
+		}
+		parsedBaseURL.Path = strings.TrimRight(parsedBaseURL.Path, "/") + path
+		parsedBaseURL.RawQuery = ""
+		parsedBaseURL.Fragment = ""
+		return parsedBaseURL.String(), parsedWrapperURL.Host, nil
 	}
 	return strings.TrimRight(wrapperURL, "/") + path, "", nil
 }
