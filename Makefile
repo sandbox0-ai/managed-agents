@@ -35,9 +35,9 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
 	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+.PHONY: verify verify-format verify-tidy generate verify-generated verify-sdk-compat-coverage test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
-verify: verify-format verify-tidy verify-generated test-unit test-wrapper helm-lint helm-template
+verify: verify-format verify-tidy verify-generated verify-sdk-compat-coverage test-unit test-wrapper helm-lint helm-template
 
 verify-format:
 	@files="$$(git ls-files '*.go')"; \
@@ -67,6 +67,9 @@ verify-generated:
 	fi; \
 	$(MAKE) generate; \
 	git diff --exit-code -- internal/apicontract/generated
+
+verify-sdk-compat-coverage:
+	cd tests/sdk-compat && $(NPM) ci && $(NPM) run coverage:check
 
 test-unit:
 	@packages="$$( $(GO) list ./... | grep -v '/tests/e2e$$' )"; \

@@ -1,0 +1,268 @@
+{
+  "minimum_coverage_percent": 95,
+  "tests": [
+    {
+      "file": "tests/sdk-compat/agents.test.mjs",
+      "name": "agents support setup, tools, MCP connectors, permission policies, versions, and archive",
+      "covers": [
+        "operation:BetaListAgents",
+        "operation:BetaCreateAgent",
+        "operation:BetaGetAgent",
+        "operation:BetaUpdateAgent",
+        "operation:BetaArchiveAgent",
+        "operation:BetaListAgentVersions",
+        "sdk:client:official-anthropic",
+        "agent:model:object",
+        "agent:toolset:agent",
+        "agent:toolset:mcp",
+        "agent:toolset:custom",
+        "agent:permission:always-allow",
+        "agent:permission:always-ask",
+        "agent:update:stale-version-conflict"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/agents.test.mjs",
+      "name": "agents support string models, version retrieval, and update clearing semantics",
+      "covers": [
+        "operation:BetaCreateAgent",
+        "operation:BetaGetAgent",
+        "operation:BetaUpdateAgent",
+        "agent:model:string",
+        "agent:update:clear-arrays",
+        "agent:update:metadata-null-delete"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/engines.test.mjs",
+      "name": "the official SDK protocol can create a session backed by a Codex LLM vault",
+      "covers": [
+        "operation:BetaCreateSession",
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "runtime:engine:codex-vault",
+        "event:user-message:text",
+        "event:agent-message"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/environments.test.mjs",
+      "name": "environments support cloud config, package updates, list, archive, and delete",
+      "covers": [
+        "operation:beta_list_environments_v1_environments_get",
+        "operation:beta_create_environment_v1_environments_post",
+        "operation:beta_delete_environment_v1_environments__environment_id__delete",
+        "operation:beta_get_environment_v1_environments__environment_id__get",
+        "operation:beta_update_environment_v1_environments__environment_id__post",
+        "operation:beta_archive_environment_v1_environments__environment_id__archive_post"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/environments.test.mjs",
+      "name": "environments preserve defaults and support partial clears through the SDK",
+      "covers": [
+        "operation:beta_create_environment_v1_environments_post",
+        "operation:beta_update_environment_v1_environments__environment_id__post",
+        "environment:defaults:cloud",
+        "environment:network:limited-default-flags",
+        "environment:update:metadata-null-delete"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/files.test.mjs",
+      "name": "Files API supports upload, metadata retrieval, download, list, and delete",
+      "covers": [
+        "operation:beta_list_files_v1_files_get",
+        "operation:beta_upload_file_v1_files_post",
+        "operation:beta_delete_file_v1_files__file_id__delete",
+        "operation:beta_get_file_metadata_v1_files__file_id__get",
+        "operation:beta_download_file_v1_files__file_id__content_get",
+        "file:content:text",
+        "file:delete:metadata-404"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/files.test.mjs",
+      "name": "Files API supports binary round-trips and pagination cursors",
+      "covers": [
+        "operation:beta_list_files_v1_files_get",
+        "operation:beta_upload_file_v1_files_post",
+        "operation:beta_download_file_v1_files__file_id__content_get",
+        "file:content:binary",
+        "file:list:cursor-pagination"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/memory.test.mjs",
+      "name": "memory helper remains available from the official SDK while Managed Agents has no memory-store resource",
+      "covers": [
+        "sdk:memory:helpers-absent"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/multi-agent.test.mjs",
+      "name": "multi-agent thread signals round-trip as session events where the SDK exposes them",
+      "covers": [
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "multi-agent:event-signals"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions stream events and report end_turn outcomes",
+      "covers": [
+        "operation:BetaCreateSession",
+        "operation:BetaGetSession",
+        "operation:BetaSendEvents",
+        "operation:BetaStreamSessionEvents",
+        "runtime:engine:claude-vault",
+        "session:agent-reference:string",
+        "event:stream:session-events",
+        "event:user-message:text",
+        "event:agent-message",
+        "event:session-status-idle"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions support update, list filters, archive, and delete",
+      "covers": [
+        "operation:BetaListSessions",
+        "operation:BetaDeleteSession",
+        "operation:BetaUpdateSession",
+        "operation:BetaArchiveSession",
+        "session:update:metadata",
+        "session:list:filters",
+        "session:list:include-archived"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions support pinned agent versions and event ordering through the SDK",
+      "covers": [
+        "operation:BetaCreateSession",
+        "operation:BetaGetSession",
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "session:agent-reference:pinned-version",
+        "event:list:order-asc",
+        "event:list:order-desc"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "session resources and file-backed input events use the official Files API",
+      "covers": [
+        "operation:BetaCreateSession",
+        "operation:BetaListResources",
+        "operation:BetaAddResource",
+        "operation:BetaDeleteResource",
+        "operation:BetaGetResource",
+        "operation:BetaUpdateResource",
+        "operation:BetaSendEvents",
+        "session:resource:file",
+        "session:resource:github-repository",
+        "session:resource:update-token",
+        "event:user-message:document-file"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions accept documented image and document input block variants",
+      "covers": [
+        "operation:BetaSendEvents",
+        "event:user-message:image-base64",
+        "event:user-message:image-url",
+        "event:user-message:image-file",
+        "event:user-message:document-text",
+        "event:user-message:document-base64",
+        "event:user-message:document-url"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions expose MCP tool, agent tool result, and model span event shapes",
+      "covers": [
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "agent:toolset:agent",
+        "agent:toolset:mcp",
+        "event:agent-tool-use",
+        "event:agent-tool-result",
+        "event:mcp-tool-use",
+        "event:mcp-tool-result",
+        "event:span:model-request-start",
+        "event:span:model-request-end"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions cover requires_action outcomes for permission policies and custom tools",
+      "covers": [
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "agent:permission:always-ask",
+        "agent:toolset:custom",
+        "event:requires-action:tool-confirmation",
+        "event:requires-action:custom-tool"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/sessions.test.mjs",
+      "name": "sessions expose retries_exhausted outcomes",
+      "covers": [
+        "operation:BetaSendEvents",
+        "operation:BetaListEvents",
+        "event:outcome:retries-exhausted"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/skills.test.mjs",
+      "name": "skills support custom upload, versions, listing, deletion, and agent attachment",
+      "covers": [
+        "operation:beta_list_skills_v1_skills_get",
+        "operation:beta_create_skill_v1_skills_post",
+        "operation:beta_delete_skill_v1_skills__skill_id__delete",
+        "operation:beta_get_skill_v1_skills__skill_id__get",
+        "operation:beta_list_skill_versions_v1_skills__skill_id__versions_get",
+        "operation:beta_create_skill_version_v1_skills__skill_id__versions_post",
+        "operation:beta_delete_skill_version_v1_skills__skill_id__versions__version__delete",
+        "operation:beta_get_skill_version_v1_skills__skill_id__versions__version__get",
+        "skill:custom:create-multipart",
+        "skill:custom:multi-file",
+        "skill:custom:version-create",
+        "skill:custom:agent-attach",
+        "skill:list:source-custom",
+        "skill:list:source-anthropic"
+      ]
+    },
+    {
+      "file": "tests/sdk-compat/vaults.test.mjs",
+      "name": "vaults and credentials cover static bearer and MCP OAuth credential lifecycles",
+      "covers": [
+        "operation:BetaListVaults",
+        "operation:BetaCreateVault",
+        "operation:BetaDeleteVault",
+        "operation:BetaGetVault",
+        "operation:BetaUpdateVault",
+        "operation:BetaArchiveVault",
+        "operation:BetaListCredentials",
+        "operation:BetaCreateCredential",
+        "operation:BetaDeleteCredential",
+        "operation:BetaGetCredential",
+        "operation:BetaUpdateCredential",
+        "operation:BetaArchiveCredential",
+        "vault:auth:static-bearer",
+        "vault:auth:mcp-oauth",
+        "vault:auth:token-endpoint-none",
+        "vault:auth:client-secret-post",
+        "vault:auth:client-secret-basic",
+        "vault:update:metadata-null-delete",
+        "vault:credential:update:metadata-null-delete",
+        "vault:list:include-archived",
+        "vault:credential:list:include-archived"
+      ]
+    }
+  ]
+}

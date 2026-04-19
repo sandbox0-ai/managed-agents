@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 *.test.mjs"
+    "test": "node --test --test-concurrency=1 *.test.mjs",
+    "coverage": "node scripts/sdk-compat-coverage.mjs --write",
+    "coverage:check": "node scripts/sdk-compat-coverage.mjs --check"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.86.1"

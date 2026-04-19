@@ -1,0 +1,340 @@
+{
+  "targets": [
+    {
+      "id": "sdk:client:official-anthropic",
+      "category": "sdk",
+      "description": "The suite uses the official @anthropic-ai/sdk client against the managed agents endpoint.",
+      "critical": true
+    },
+    {
+      "id": "sdk:memory:helpers-absent",
+      "category": "sdk",
+      "description": "The official SDK memory helper surface remains absent for managed agents."
+    },
+    {
+      "id": "runtime:engine:claude-vault",
+      "category": "runtime",
+      "description": "A session can use a Claude engine selected by LLM vault metadata."
+    },
+    {
+      "id": "runtime:engine:codex-vault",
+      "category": "runtime",
+      "description": "A session can use a Codex engine selected by LLM vault metadata."
+    },
+    {
+      "id": "agent:model:string",
+      "category": "schema",
+      "description": "Agent creation accepts the SDK string model shorthand."
+    },
+    {
+      "id": "agent:model:object",
+      "category": "schema",
+      "description": "Agent creation accepts object model configuration."
+    },
+    {
+      "id": "agent:toolset:agent",
+      "category": "schema",
+      "description": "Agent toolset configuration round-trips through the SDK."
+    },
+    {
+      "id": "agent:toolset:mcp",
+      "category": "schema",
+      "description": "MCP toolset configuration round-trips through the SDK."
+    },
+    {
+      "id": "agent:toolset:custom",
+      "category": "schema",
+      "description": "Custom tool configuration round-trips through the SDK."
+    },
+    {
+      "id": "agent:permission:always-allow",
+      "category": "schema",
+      "description": "always_allow permission policies are accepted."
+    },
+    {
+      "id": "agent:permission:always-ask",
+      "category": "schema",
+      "description": "always_ask permission policies are accepted."
+    },
+    {
+      "id": "agent:update:stale-version-conflict",
+      "category": "semantic",
+      "description": "Agent update rejects stale versions."
+    },
+    {
+      "id": "agent:update:clear-arrays",
+      "category": "semantic",
+      "description": "Agent update can clear array fields."
+    },
+    {
+      "id": "agent:update:metadata-null-delete",
+      "category": "semantic",
+      "description": "Agent metadata null values delete keys."
+    },
+    {
+      "id": "environment:defaults:cloud",
+      "category": "schema",
+      "description": "Cloud environment defaults are returned when config is omitted."
+    },
+    {
+      "id": "environment:network:limited-default-flags",
+      "category": "schema",
+      "description": "Limited networking returns explicit default boolean flags."
+    },
+    {
+      "id": "environment:update:metadata-null-delete",
+      "category": "semantic",
+      "description": "Environment metadata null values delete keys."
+    },
+    {
+      "id": "file:content:text",
+      "category": "schema",
+      "description": "Text files upload, download, list, and delete through the SDK."
+    },
+    {
+      "id": "file:content:binary",
+      "category": "schema",
+      "description": "Binary files round-trip through the SDK."
+    },
+    {
+      "id": "file:list:cursor-pagination",
+      "category": "semantic",
+      "description": "Files support cursor pagination."
+    },
+    {
+      "id": "file:delete:metadata-404",
+      "category": "semantic",
+      "description": "Deleted file metadata retrieval returns a not found error."
+    },
+    {
+      "id": "session:agent-reference:string",
+      "category": "schema",
+      "description": "Session creation accepts an agent ID string."
+    },
+    {
+      "id": "session:agent-reference:pinned-version",
+      "category": "schema",
+      "description": "Session creation accepts a pinned agent reference object."
+    },
+    {
+      "id": "session:update:metadata",
+      "category": "semantic",
+      "description": "Session metadata updates round-trip through the SDK."
+    },
+    {
+      "id": "session:list:filters",
+      "category": "semantic",
+      "description": "Session list filters round-trip through the SDK."
+    },
+    {
+      "id": "session:list:include-archived",
+      "category": "semantic",
+      "description": "Archived sessions can be listed."
+    },
+    {
+      "id": "session:resource:file",
+      "category": "schema",
+      "description": "File session resources can be added, listed, retrieved, and deleted."
+    },
+    {
+      "id": "session:resource:github-repository",
+      "category": "schema",
+      "description": "GitHub repository resources can be supplied at session creation."
+    },
+    {
+      "id": "session:resource:update-token",
+      "category": "semantic",
+      "description": "GitHub repository resource tokens can be rotated."
+    },
+    {
+      "id": "event:user-message:text",
+      "category": "event",
+      "description": "Text user.message blocks are accepted."
+    },
+    {
+      "id": "event:user-message:image-base64",
+      "category": "event",
+      "description": "Base64 image blocks are accepted."
+    },
+    {
+      "id": "event:user-message:image-url",
+      "category": "event",
+      "description": "URL image blocks are accepted."
+    },
+    {
+      "id": "event:user-message:image-file",
+      "category": "event",
+      "description": "File-backed image blocks are accepted."
+    },
+    {
+      "id": "event:user-message:document-text",
+      "category": "event",
+      "description": "Plain text document blocks are accepted."
+    },
+    {
+      "id": "event:user-message:document-base64",
+      "category": "event",
+      "description": "Base64 document blocks are accepted."
+    },
+    {
+      "id": "event:user-message:document-url",
+      "category": "event",
+      "description": "URL document blocks are accepted."
+    },
+    {
+      "id": "event:user-message:document-file",
+      "category": "event",
+      "description": "File-backed document blocks are accepted."
+    },
+    {
+      "id": "event:stream:session-events",
+      "category": "event",
+      "description": "Session events can be streamed through the SDK."
+    },
+    {
+      "id": "event:list:order-asc",
+      "category": "event",
+      "description": "Event list ascending order works."
+    },
+    {
+      "id": "event:list:order-desc",
+      "category": "event",
+      "description": "Event list descending order works."
+    },
+    {
+      "id": "event:agent-message",
+      "category": "event",
+      "description": "agent.message events round-trip through the SDK."
+    },
+    {
+      "id": "event:session-status-idle",
+      "category": "event",
+      "description": "session.status_idle events round-trip through the SDK."
+    },
+    {
+      "id": "event:requires-action:tool-confirmation",
+      "category": "event",
+      "description": "Tool confirmation requires_action outcomes round-trip."
+    },
+    {
+      "id": "event:requires-action:custom-tool",
+      "category": "event",
+      "description": "Custom tool requires_action outcomes round-trip."
+    },
+    {
+      "id": "event:agent-tool-use",
+      "category": "event",
+      "description": "agent.tool_use events round-trip through the SDK."
+    },
+    {
+      "id": "event:agent-tool-result",
+      "category": "event",
+      "description": "agent.tool_result events round-trip through the SDK."
+    },
+    {
+      "id": "event:mcp-tool-use",
+      "category": "event",
+      "description": "agent.mcp_tool_use events round-trip through the SDK."
+    },
+    {
+      "id": "event:mcp-tool-result",
+      "category": "event",
+      "description": "agent.mcp_tool_result events round-trip through the SDK."
+    },
+    {
+      "id": "event:span:model-request-start",
+      "category": "event",
+      "description": "span.model_request_start events round-trip through the SDK."
+    },
+    {
+      "id": "event:span:model-request-end",
+      "category": "event",
+      "description": "span.model_request_end events round-trip through the SDK."
+    },
+    {
+      "id": "event:outcome:retries-exhausted",
+      "category": "event",
+      "description": "retries_exhausted outcomes round-trip through the SDK."
+    },
+    {
+      "id": "multi-agent:event-signals",
+      "category": "semantic",
+      "description": "Multi-agent thread signals are represented as SDK session events."
+    },
+    {
+      "id": "skill:custom:create-multipart",
+      "category": "schema",
+      "description": "Custom skills can be created from multipart files."
+    },
+    {
+      "id": "skill:custom:multi-file",
+      "category": "schema",
+      "description": "Custom skills accept multiple uploaded files."
+    },
+    {
+      "id": "skill:custom:version-create",
+      "category": "semantic",
+      "description": "Custom skill versions can be created."
+    },
+    {
+      "id": "skill:custom:agent-attach",
+      "category": "semantic",
+      "description": "Custom skill versions can be attached to agents."
+    },
+    {
+      "id": "skill:list:source-custom",
+      "category": "semantic",
+      "description": "Custom skill listing source filters work."
+    },
+    {
+      "id": "skill:list:source-anthropic",
+      "category": "semantic",
+      "description": "Anthropic skill listing source filters work."
+    },
+    {
+      "id": "vault:auth:static-bearer",
+      "category": "schema",
+      "description": "Static bearer credentials can be created and updated."
+    },
+    {
+      "id": "vault:auth:mcp-oauth",
+      "category": "schema",
+      "description": "MCP OAuth credentials can be created and updated."
+    },
+    {
+      "id": "vault:auth:token-endpoint-none",
+      "category": "schema",
+      "description": "OAuth token_endpoint_auth none is accepted."
+    },
+    {
+      "id": "vault:auth:client-secret-post",
+      "category": "schema",
+      "description": "OAuth client_secret_post credentials are redacted in responses."
+    },
+    {
+      "id": "vault:auth:client-secret-basic",
+      "category": "schema",
+      "description": "OAuth client_secret_basic updates are redacted in responses."
+    },
+    {
+      "id": "vault:update:metadata-null-delete",
+      "category": "semantic",
+      "description": "Vault metadata null values delete keys."
+    },
+    {
+      "id": "vault:credential:update:metadata-null-delete",
+      "category": "semantic",
+      "description": "Credential metadata null values delete keys."
+    },
+    {
+      "id": "vault:list:include-archived",
+      "category": "semantic",
+      "description": "Archived vaults can be listed."
+    },
+    {
+      "id": "vault:credential:list:include-archived",
+      "category": "semantic",
+      "description": "Archived credentials can be listed."
+    }
+  ]
+}

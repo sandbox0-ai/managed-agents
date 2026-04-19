@@ -196,6 +196,37 @@ test('session resources and file-backed input events use the official Files API'
   const deletedResource = await client.beta.sessions.resources.delete(resource.id, { session_id: session.id });
   assert.equal(deletedResource.id, resource.id);
   assert.equal(deletedResource.type, 'session_resource_deleted');
+
+  const runID = suffix();
+  const cleanup = createCleanup();
+  t.after(() => cleanup.run());
+  const fixture = await createBasicFixture(client, runID, cleanup);
+  const repositorySession = await client.beta.sessions.create({
+    agent: fixture.agent.id,
+    environment_id: fixture.environment.id,
+    title: `sdk-compat-repository-resource-${runID}`,
+    vault_ids: [fixture.vault.id],
+    resources: [{
+      type: 'github_repository',
+      url: 'https://github.com/anthropics/anthropic-sdk-typescript',
+      authorization_token: 'ghp_fake_initial_token',
+      checkout: { type: 'branch', name: 'main' },
+    }],
+    metadata: { e2e: 'sdk-compat', run: runID },
+  });
+  cleanup.add(() => client.beta.sessions.delete(repositorySession.id));
+
+  const repositoryResource = repositorySession.resources.find((item) => item.type === 'github_repository');
+  assert(repositoryResource);
+  assert.equal(repositoryResource.authorization_token, undefined);
+  assert.equal(repositoryResource.checkout.type, 'branch');
+
+  const rotatedRepositoryResource = await client.beta.sessions.resources.update(repositoryResource.id, {
+    session_id: repositorySession.id,
+    authorization_token: 'ghp_fake_rotated_token',
+  });
+  assert.equal(rotatedRepositoryResource.id, repositoryResource.id);
+  assert.equal(rotatedRepositoryResource.authorization_token, undefined);
 });
 
 test('sessions accept documented image and document input block variants', { skip: skipReason }, async (t) => {
