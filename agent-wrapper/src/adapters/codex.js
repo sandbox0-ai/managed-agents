@@ -363,22 +363,16 @@ export class CodexRuntime extends AgentRuntime {
   }
 
   #mapCodexEvent(session, run, event) {
-    switch (event?.type) {
-      case 'agent_message': {
-        const text = codexEventText(event.message ?? event.content ?? event);
-        if (!text) {
-          return null;
-        }
-        return {
-          session_id: session.session_id,
-          run_id: run.run_id,
-          vendor_session_id: session.vendor_session_id,
-          events: [{ type: 'agent.message', content: [{ type: 'text', text }] }],
-        };
-      }
-      default:
-        return null;
+    const text = codexEventAgentText(event);
+    if (!text) {
+      return null;
     }
+    return {
+      session_id: session.session_id,
+      run_id: run.run_id,
+      vendor_session_id: session.vendor_session_id,
+      events: [{ type: 'agent.message', content: [{ type: 'text', text }] }],
+    };
   }
 
   async #handleServerRequest(session, run, callbackClient, sessionStore, message) {
@@ -985,7 +979,7 @@ function buildCodexEventTerminalPayload(session, run, event, modelRequestStartID
   switch (event?.type) {
     case 'task_complete': {
       const completedUsage = codexEventUsage(event) ?? usage;
-      const agentMessage = codexEventText(event.last_agent_message);
+      const agentMessage = codexEventAgentText(event);
       return {
         session_id: session.session_id,
         run_id: run.run_id,
@@ -1096,6 +1090,28 @@ function normalizeCodexTokenUsage(usage) {
   };
 }
 
+function codexEventAgentText(event) {
+  if (!event || typeof event !== 'object') {
+    return '';
+  }
+  switch (event.type) {
+    case 'agent_message':
+      return codexEventText(event.message ?? event.content ?? event);
+    case 'task_complete':
+      return codexEventText(
+        codexEventField(event, 'last_agent_message')
+        ?? codexEventField(event, 'agent_message')
+        ?? codexEventField(event, 'message')
+        ?? codexEventField(event, 'content'),
+      );
+    case 'item_completed':
+    case 'raw_response_item':
+      return codexEventText(codexAgentMessageValue(event.item ?? event.response_item ?? event.raw_response_item));
+    default:
+      return '';
+  }
+}
+
 function codexEventText(value) {
   if (typeof value === 'string') {
     return value;
@@ -1107,23 +1123,62 @@ function codexEventText(value) {
   if (!value || typeof value !== 'object') {
     return '';
   }
-  if (typeof value.text === 'string') {
-    return value.text;
-  }
-  if (typeof value.message === 'string') {
-    return value.message;
-  }
-  if (typeof value.content === 'string') {
-    return value.content;
-  }
-  if (Array.isArray(value.content)) {
-    return codexEventText(value.content);
+  for (const key of ['text', 'message', 'content', 'delta', 'last_agent_message', 'agent_message', 'assistant_message', 'output_text', 'input_text']) {
+    const field = codexEventField(value, key);
+    if (field !== undefined) {
+      const text = codexEventText(field);
+      if (text) {
+        return text;
+      }
+    }
   }
   const entries = Object.entries(value);
   if (entries.length === 1) {
     return codexEventText(entries[0][1]);
   }
   return '';
+}
+
+function codexAgentMessageValue(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const type = normalizeCodexEventKey(codexEventField(value, 'type'));
+  const role = normalizeCodexEventKey(codexEventField(value, 'role'));
+  if (type === 'agentmessage' || type === 'assistantmessage' || role === 'assistant') {
+    return value;
+  }
+  for (const key of ['agent_message', 'assistant_message']) {
+    const field = codexEventField(value, key);
+    if (field !== undefined) {
+      return field;
+    }
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    return entries[0][1];
+  }
+  return null;
+}
+
+function codexEventField(value, key) {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const target = normalizeCodexEventKey(key);
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (normalizeCodexEventKey(entryKey) === target) {
+      return entryValue;
+    }
+  }
+  return undefined;
+}
+
+function normalizeCodexEventKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
 }
 
 function toolResultContent(content) {

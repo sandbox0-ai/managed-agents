@@ -23,6 +23,8 @@ class FakeCodexClient extends EventEmitter {
     completionError = null,
     eventProtocol = 'legacy',
     codexEventError = null,
+    codexEventNotifications = null,
+    codexTaskCompleteMessage = 'done',
   } = {}) {
     super();
     this.approval = approval;
@@ -32,6 +34,8 @@ class FakeCodexClient extends EventEmitter {
     this.completionError = completionError;
     this.eventProtocol = eventProtocol;
     this.codexEventError = codexEventError;
+    this.codexEventNotifications = codexEventNotifications;
+    this.codexTaskCompleteMessage = codexTaskCompleteMessage;
     this.requests = [];
     this.responses = [];
     this.startCalls = 0;
@@ -122,14 +126,27 @@ class FakeCodexClient extends EventEmitter {
           msg: { type: 'task_started' },
         },
       });
-      this.emit('notification', {
-        method: 'codex/event/agent_message',
-        params: {
-          threadId: 'thr_codex',
-          turnId: 'turn_codex',
-          msg: { type: 'agent_message', message: 'done' },
-        },
-      });
+      if (Array.isArray(this.codexEventNotifications) && this.codexEventNotifications.length > 0) {
+        for (const notification of this.codexEventNotifications) {
+          this.emit('notification', {
+            method: notification.method,
+            params: {
+              threadId: 'thr_codex',
+              turnId: 'turn_codex',
+              msg: notification.msg,
+            },
+          });
+        }
+      } else {
+        this.emit('notification', {
+          method: 'codex/event/agent_message',
+          params: {
+            threadId: 'thr_codex',
+            turnId: 'turn_codex',
+            msg: { type: 'agent_message', message: 'done' },
+          },
+        });
+      }
       this.emit('notification', {
         method: 'codex/event/token_count',
         params: {
@@ -168,7 +185,7 @@ class FakeCodexClient extends EventEmitter {
           turnId: 'turn_codex',
           msg: {
             type: 'task_complete',
-            last_agent_message: 'done',
+            last_agent_message: this.codexTaskCompleteMessage,
             total_token_usage: { input_tokens: 3, output_tokens: 2, cached_input_tokens: 1 },
           },
         },
@@ -256,6 +273,57 @@ test('CodexRuntime prefers codex/event completion over a duplicate turn/complete
   const events = callbacks.flatMap((payload) => payload.events);
   assert.equal(events.filter((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn').length, 1);
   assert(events.some((event) => event.type === 'agent.message' && event.content?.[0]?.text === 'done'));
+});
+
+test('CodexRuntime maps codex/event item_completed assistant payloads when task_complete omits last_agent_message', async () => {
+  const client = new FakeCodexClient({
+    eventProtocol: 'codex-event',
+    codexTaskCompleteMessage: null,
+    codexEventNotifications: [{
+      method: 'codex/event/item_completed',
+      msg: {
+        type: 'item_completed',
+        item: {
+          AgentMessage: {
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'done' }],
+          },
+        },
+      },
+    }],
+  });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'agent.message' && event.content?.[0]?.text === 'done'));
+  assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
+});
+
+test('CodexRuntime extracts nested task_complete agent messages', async () => {
+  const client = new FakeCodexClient({
+    eventProtocol: 'codex-event',
+    codexTaskCompleteMessage: {
+      message: {
+        content: [{ Text: 'done' }],
+      },
+    },
+    codexEventNotifications: [],
+  });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'agent.message' && event.content?.[0]?.text === 'done'));
+  assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
 });
 
 test('CodexRuntime prestarts the app-server client before the first run', async () => {
