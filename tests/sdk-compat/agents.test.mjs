@@ -103,3 +103,76 @@ test('agents support setup, tools, MCP connectors, permission policies, versions
   assert.equal(archived.id, agent.id);
   assert(archived.archived_at);
 });
+
+test('agents support string models, version retrieval, and update clearing semantics', { skip: skipReason }, async (t) => {
+  const client = sdkClient();
+  const runID = suffix();
+  const cleanup = createCleanup();
+  t.after(() => cleanup.run());
+
+  const agent = await client.beta.agents.create({
+    name: `sdk-compat-string-model-agent-${runID}`,
+    description: 'Temporary description to be cleared.',
+    model: 'claude-sonnet-4-20250514',
+    system: 'Temporary system prompt to be cleared.',
+    mcp_servers: [{
+      type: 'url',
+      name: 'docs',
+      url: 'https://mcp.example.com/sse',
+    }],
+    tools: [{
+      type: 'agent_toolset_20260401',
+      default_config: {
+        enabled: true,
+        permission_policy: { type: 'always_allow' },
+      },
+    }, {
+      type: 'mcp_toolset',
+      mcp_server_name: 'docs',
+    }],
+    metadata: {
+      e2e: 'sdk-compat',
+      remove_me: 'delete',
+      keep_me: 'original',
+      run: runID,
+    },
+  });
+  cleanup.add(() => client.beta.agents.archive(agent.id));
+
+  assert.equal(agent.model.id, 'claude-sonnet-4-20250514');
+  assert.equal(agent.model.speed, 'standard');
+  assert.equal(agent.description, 'Temporary description to be cleared.');
+  assert.equal(agent.system, 'Temporary system prompt to be cleared.');
+  assert.equal(agent.mcp_servers.length, 1);
+  assert.equal(agent.tools.length, 2);
+
+  const cleared = await client.beta.agents.update(agent.id, {
+    version: agent.version,
+    description: null,
+    system: '',
+    mcp_servers: [],
+    tools: [],
+    skills: [],
+    metadata: {
+      remove_me: null,
+      keep_me: 'updated',
+    },
+  });
+  assert.equal(cleared.version, agent.version + 1);
+  assert.equal(cleared.description, null);
+  assert.equal(cleared.system, null);
+  assert.deepEqual(cleared.mcp_servers, []);
+  assert.deepEqual(cleared.tools, []);
+  assert.deepEqual(cleared.skills, []);
+  assert.equal(cleared.metadata.keep_me, 'updated');
+  assert.equal(cleared.metadata.remove_me, undefined);
+
+  const versionOne = await client.beta.agents.retrieve(agent.id, { version: agent.version });
+  assert.equal(versionOne.version, agent.version);
+  assert.equal(versionOne.description, 'Temporary description to be cleared.');
+  assert.equal(versionOne.mcp_servers.length, 1);
+
+  const latest = await client.beta.agents.retrieve(agent.id);
+  assert.equal(latest.version, cleared.version);
+  assert.deepEqual(latest.tools, []);
+});

@@ -113,6 +113,85 @@ function eventsForInput(text) {
       },
     ];
   }
+  if (text.includes('trigger-mcp-tool-success')) {
+    const mcpToolUseID = `mcptoolu_${crypto.randomUUID().replaceAll('-', '')}`;
+    return [
+      {
+        id: mcpToolUseID,
+        type: 'agent.mcp_tool_use',
+        mcp_server_name: 'docs',
+        name: 'search_docs',
+        input: { query: 'managed agents' },
+        evaluated_permission: 'allow',
+      },
+      {
+        type: 'agent.mcp_tool_result',
+        mcp_tool_use_id: mcpToolUseID,
+        content: [{ type: 'text', text: 'MCP result from fake wrapper' }],
+        is_error: false,
+      },
+      {
+        type: 'agent.message',
+        content: [{ type: 'text', text: 'fake-wrapper mcp result complete' }],
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'end_turn' },
+      },
+    ];
+  }
+  if (text.includes('trigger-agent-tool-success')) {
+    const toolUseID = `toolu_${crypto.randomUUID().replaceAll('-', '')}`;
+    return [
+      {
+        id: toolUseID,
+        type: 'agent.tool_use',
+        name: 'bash',
+        input: { command: 'echo ok' },
+        evaluated_permission: 'allow',
+      },
+      {
+        type: 'agent.tool_result',
+        tool_use_id: toolUseID,
+        content: [{ type: 'text', text: 'ok' }],
+        is_error: false,
+      },
+      {
+        type: 'agent.message',
+        content: [{ type: 'text', text: 'fake-wrapper tool result complete' }],
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'end_turn' },
+      },
+    ];
+  }
+  if (text.includes('trigger-model-span-events')) {
+    const spanID = `span_${crypto.randomUUID().replaceAll('-', '')}`;
+    return [
+      { id: spanID, type: 'span.model_request_start' },
+      {
+        type: 'span.model_request_end',
+        model_request_start_id: spanID,
+        is_error: false,
+        model_usage: {
+          input_tokens: 7,
+          output_tokens: 3,
+          cache_read_input_tokens: 1,
+          cache_creation_input_tokens: 0,
+          speed: 'standard',
+        },
+      },
+      {
+        type: 'agent.message',
+        content: [{ type: 'text', text: 'fake-wrapper span result complete' }],
+      },
+      {
+        type: 'session.status_idle',
+        stop_reason: { type: 'end_turn' },
+      },
+    ];
+  }
   if (text.includes('trigger-retries-exhausted')) {
     return [
       {

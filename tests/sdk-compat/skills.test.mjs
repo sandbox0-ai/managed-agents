@@ -33,6 +33,7 @@ test('skills support custom upload, versions, listing, deletion, and agent attac
         'Follow the SDK compatibility test instructions.',
         '',
       ].join('\n')),
+      await skillFile(`sdk-skill-${runID}/examples/example.md`, 'Example input for the SDK compatibility skill.\n'),
     ],
   });
   cleanup.add(() => client.beta.skills.delete(skill.id));
@@ -71,6 +72,9 @@ test('skills support custom upload, versions, listing, deletion, and agent attac
 
   const listed = await collectAsyncIterable(client.beta.skills.list({ limit: 10, source: 'custom' }), 20);
   assertFound(listed, (item) => item.id === skill.id, 'created skill');
+
+  const anthropicSkills = await collectAsyncIterable(client.beta.skills.list({ limit: 10, source: 'anthropic' }), 20);
+  assert(Array.isArray(anthropicSkills));
 
   const agent = await client.beta.agents.create(agentBody(runID, {
     skills: [{ type: 'custom', skill_id: skill.id, version: secondVersion.version }],
