@@ -113,7 +113,15 @@ class FakeCodexClient extends EventEmitter {
   close() {}
 
   emitAgentMessageAndComplete() {
-    if (this.eventProtocol === 'codex-event') {
+    if (this.eventProtocol === 'codex-event' || this.eventProtocol === 'hybrid') {
+      this.emit('notification', {
+        method: 'codex/event/task_started',
+        params: {
+          threadId: 'thr_codex',
+          turnId: 'turn_codex',
+          msg: { type: 'task_started' },
+        },
+      });
       this.emit('notification', {
         method: 'codex/event/agent_message',
         params: {
@@ -143,6 +151,15 @@ class FakeCodexClient extends EventEmitter {
           },
         });
         return;
+      }
+      if (this.eventProtocol === 'hybrid') {
+        this.emit('notification', {
+          method: 'turn/completed',
+          params: {
+            threadId: 'thr_codex',
+            turn: { id: 'turn_codex', status: 'completed', items: [] },
+          },
+        });
       }
       this.emit('notification', {
         method: 'codex/event/task_complete',
@@ -225,6 +242,20 @@ test('CodexRuntime maps codex/event task completion notifications', async () => 
   assert(events.some((event) => event.type === 'agent.message'));
   assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
+});
+
+test('CodexRuntime prefers codex/event completion over a duplicate turn/completed notification', async () => {
+  const client = new FakeCodexClient({ eventProtocol: 'hybrid' });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert.equal(events.filter((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn').length, 1);
+  assert(events.some((event) => event.type === 'agent.message' && event.content?.[0]?.text === 'done'));
 });
 
 test('CodexRuntime prestarts the app-server client before the first run', async () => {

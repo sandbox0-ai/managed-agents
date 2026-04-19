@@ -256,6 +256,7 @@ export class CodexRuntime extends AgentRuntime {
 
   #watchTurn(client, session, run, callbackClient, sessionStore, modelRequestStartID, turnRef) {
     let usage = null;
+    let sawCodexEvent = false;
     let cleanup = () => {};
     const promise = new Promise((resolve, reject) => {
       cleanup = () => {
@@ -286,6 +287,7 @@ export class CodexRuntime extends AgentRuntime {
             return;
           }
           if (isCodexEventNotification(message)) {
+            sawCodexEvent = true;
             const event = codexEventFromNotification(message);
             usage = codexEventUsage(event) ?? usage;
             const payload = this.#mapCodexEvent(sessionStore.getSession?.() ?? session, run, event);
@@ -311,6 +313,9 @@ export class CodexRuntime extends AgentRuntime {
             await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
           }
           if (message.method === 'turn/completed') {
+            if (sawCodexEvent) {
+              return;
+            }
             const latestSession = sessionStore.getSession?.() ?? session;
             await callbackClient.send(latestSession, buildTurnCompletedPayload(latestSession, run, message.params?.turn, modelRequestStartID, usage));
             cleanup();
