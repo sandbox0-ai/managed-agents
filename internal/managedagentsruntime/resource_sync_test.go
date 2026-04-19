@@ -435,6 +435,9 @@ func TestApplyManagedLLMEnvInjectsCodexCredential(t *testing.T) {
 	if got := stringValue(env["OPENAI_API_KEY"]); got != managedCodexFakeAPIKey {
 		t.Fatalf("OPENAI_API_KEY = %q, want fake key", got)
 	}
+	if got := stringValue(engine["model_provider"]); got != "" {
+		t.Fatalf("model_provider = %q, want empty", got)
+	}
 	if got := stringValue(engine["openai_base_url"]); got != "https://api.openai.com/v1" {
 		t.Fatalf("openai_base_url = %q, want OpenAI base URL", got)
 	}
@@ -455,6 +458,37 @@ func TestApplyManagedLLMEnvDefaultsCodexBaseURL(t *testing.T) {
 	}
 	if got := stringValue(engine["openai_base_url"]); got != managedOpenAIDefaultBaseURL {
 		t.Fatalf("openai_base_url = %q, want default OpenAI URL", got)
+	}
+}
+
+func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.minimax.io/v1",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	if credential == nil {
+		t.Fatal("expected managed llm credential")
+	}
+	env := mapValue(engine["env"])
+	if got := stringValue(env["MINIMAX_API_KEY"]); got != managedMinimaxFakeAPIKey {
+		t.Fatalf("MINIMAX_API_KEY = %q, want fake key", got)
+	}
+	if got := stringValue(env["CODEX_API_KEY"]); got != "" {
+		t.Fatalf("CODEX_API_KEY = %q, want empty for MiniMax provider", got)
+	}
+	if got := stringValue(env["OPENAI_API_KEY"]); got != "" {
+		t.Fatalf("OPENAI_API_KEY = %q, want empty for MiniMax provider", got)
+	}
+	if got := stringValue(engine["model_provider"]); got != "minimax" {
+		t.Fatalf("model_provider = %q, want minimax", got)
+	}
+	if got := stringValue(engine["openai_base_url"]); got != "https://api.minimax.io/v1" {
+		t.Fatalf("openai_base_url = %q, want MiniMax base URL", got)
+	}
+	if credential.BaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("credential base URL = %q, want MiniMax base URL", credential.BaseURL)
 	}
 }
 

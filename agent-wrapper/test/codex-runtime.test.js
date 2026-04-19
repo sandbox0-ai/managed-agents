@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { CodexRuntime } from '../src/adapters/codex.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { CodexRuntime, codexClientOptions, codexConfigForSession, codexModelProviderForEngine } from '../src/adapters/codex.js';
 
 class FakeCodexClient extends EventEmitter {
   constructor({ approval = false, stderrLine = null, startError = null, completionStatus = 'completed', completionError = null } = {}) {
@@ -13,9 +16,11 @@ class FakeCodexClient extends EventEmitter {
     this.completionError = completionError;
     this.requests = [];
     this.responses = [];
+    this.startCalls = 0;
   }
 
   async start() {
+    this.startCalls += 1;
     if (this.stderrLine) {
       this.emit('stderr', this.stderrLine);
     }
@@ -136,6 +141,18 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.message'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
+});
+
+test('CodexRuntime prestarts the app-server client before the first run', async () => {
+  const client = new FakeCodexClient();
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.prestartSession(storedSession, sessionStore);
+  await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
+
+  assert.equal(client.startCalls, 1);
 });
 
 test('CodexRuntime passes preloaded skills as app-server skill input items', async () => {
@@ -291,6 +308,60 @@ test('CodexRuntime forwards app-server stderr to redacted wrapper logs', async (
   assert.equal(stderrLog.data.includes('sk-secret123'), false);
   assert(stderrLog.data.includes('Bearer [redacted]'));
   assert(stderrLog.data.includes('api_key=[redacted]'));
+});
+
+test('Codex runtime infers the MiniMax provider from the vault base URL', () => {
+  assert.equal(codexModelProviderForEngine({ openai_base_url: 'https://api.minimax.io/v1' }), 'minimax');
+  assert.equal(codexModelProviderForEngine({ openai_base_url: 'https://api.minimaxi.com/v1' }), 'minimax');
+  assert.equal(codexModelProviderForEngine({ openai_base_url: 'https://api.openai.com/v1' }), '');
+  assert.equal(codexModelProviderForEngine({ model_provider: 'minimax' }), 'minimax');
+});
+
+test('Codex runtime writes a MiniMax provider config and clears OpenAI auth envs', async () => {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'codex-provider-'));
+  const originalOpenAIKey = process.env.OPENAI_API_KEY;
+  const originalCodexKey = process.env.CODEX_API_KEY;
+  try {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.CODEX_API_KEY = 'ck-test';
+    const options = codexClientOptions(codexSession({
+      engine: {
+        openai_base_url: 'https://api.minimax.io/v1',
+        env: {
+          CODEX_HOME: tempDir,
+          MINIMAX_TOKEN: 'mini-token',
+        },
+      },
+    }));
+    const configPath = path.join(tempDir, 'config.toml');
+    const config = await fs.promises.readFile(configPath, 'utf8');
+    assert.match(config, /\[model_providers\.minimax\]/);
+    assert.match(config, /base_url = "https:\/\/api\.minimax\.io\/v1"/);
+    assert.match(config, /env_key = "MINIMAX_API_KEY"/);
+    assert.equal(options.env.MINIMAX_API_KEY, 'mini-token');
+    assert.equal('OPENAI_API_KEY' in options.env, false);
+    assert.equal('CODEX_API_KEY' in options.env, false);
+  } finally {
+    if (originalOpenAIKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAIKey;
+    }
+    if (originalCodexKey === undefined) {
+      delete process.env.CODEX_API_KEY;
+    } else {
+      process.env.CODEX_API_KEY = originalCodexKey;
+    }
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('Codex runtime omits openai_base_url when targeting MiniMax', () => {
+  assert.deepEqual(codexConfigForSession(codexSession({
+    engine: {
+      openai_base_url: 'https://api.minimax.io/v1',
+    },
+  })), { model_provider: 'minimax' });
 });
 
 function codexSession(overrides = {}) {

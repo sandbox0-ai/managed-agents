@@ -21,6 +21,7 @@ const (
 	managedAnthropicFakeAPIKey     = "managed-agent-sandbox0-fake-key"
 	managedAnthropicFakeAuthToken  = "managed-agent-sandbox0-fake-token"
 	managedCodexFakeAPIKey         = "managed-agent-sandbox0-fake-key"
+	managedMinimaxFakeAPIKey       = "managed-agent-sandbox0-fake-key"
 )
 
 func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVaultCredentials) (map[string]any, *managedLLMCredential, error) {
@@ -41,9 +42,18 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 				return nil, nil, err
 			}
 		}
+		resolvedProvider := managedCodexProviderForBaseURL(resolvedBaseURL)
+		if existingProvider := normalizeManagedRuntimeMetadataValue(stringValue(out["model_provider"])); existingProvider != "" && existingProvider != resolvedProvider {
+			return nil, nil, fmt.Errorf("managed-agent llm credential %s provider %q conflicts with engine model_provider %q", credential.CredentialID, resolvedProvider, existingProvider)
+		}
 		out["openai_base_url"] = resolvedBaseURL
-		env["CODEX_API_KEY"] = managedCodexFakeAPIKey
-		env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
+		if resolvedProvider == "minimax" {
+			out["model_provider"] = resolvedProvider
+			env["MINIMAX_API_KEY"] = managedMinimaxFakeAPIKey
+		} else {
+			env["CODEX_API_KEY"] = managedCodexFakeAPIKey
+			env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
+		}
 		out["env"] = env
 		credentialCopy := *credential
 		credentialCopy.BaseURL = resolvedBaseURL
@@ -182,4 +192,24 @@ func canonicalManagedRuntimeURL(raw string) (string, error) {
 		parsedURL.Path = ""
 	}
 	return strings.TrimRight(parsedURL.String(), "/"), nil
+}
+
+func managedCodexProviderForBaseURL(baseURL string) string {
+	if isManagedMinimaxBaseURL(baseURL) {
+		return "minimax"
+	}
+	return "openai"
+}
+
+func isManagedMinimaxBaseURL(baseURL string) bool {
+	parsedURL, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parsedURL.Hostname())) {
+	case "api.minimax.io", "api.minimaxi.com":
+		return true
+	default:
+		return false
+	}
 }

@@ -1,0 +1,12 @@
+{
+  "name": "managed-agents-live-engines-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.86.1"
+  }
+}

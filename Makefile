@@ -34,7 +34,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
 	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
 verify: verify-format verify-tidy verify-generated test-unit test-wrapper helm-lint helm-template
 
@@ -83,6 +83,9 @@ test-e2e:
 
 test-sdk-compat:
 	cd tests/sdk-compat && $(NPM) ci && $(NPM) test
+
+test-live-engines:
+	cd tests/live-engines && $(NPM) ci && $(NPM) test
 
 docker-build-gateway:
 	@test -f "$(SDK_GO_DIR)/go.mod" || { echo "SDK_GO_DIR must point to sdk-go checkout"; exit 1; }

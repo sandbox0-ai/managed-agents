@@ -25,6 +25,10 @@ export class CodexRuntime extends AgentRuntime {
     this.emittedToolUses = new Map();
   }
 
+  async prestartSession(session) {
+    await this.#clientForSession(session);
+  }
+
   async startRun(session, run, callbackClient, sessionStore) {
     let currentSession = session;
     const bootstrapEvents = Array.isArray(session.bootstrap_events)
@@ -457,13 +461,14 @@ export class CodexRuntime extends AgentRuntime {
   }
 }
 
-function codexClientOptions(session) {
+export function codexClientOptions(session) {
   const engine = session.engine ?? {};
   const env = runtimeEnvForEngine(engine);
   if (!env.CODEX_HOME) {
     env.CODEX_HOME = path.join(agentWrapperStateDir(env), 'codex');
   }
   fs.mkdirSync(env.CODEX_HOME, { recursive: true });
+  ensureCodexProviderConfig(env, engine);
   return {
     command: firstNonEmptyString(engine.path_to_codex_executable, engine.codex_executable, process.env.CODEX_EXECUTABLE, 'codex'),
     args: Array.isArray(engine.app_server_args) && engine.app_server_args.length > 0
@@ -471,7 +476,7 @@ function codexClientOptions(session) {
       : ['app-server', '--listen', 'stdio://'],
     cwd: session.working_directory,
     env,
-    requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 120000),
+    requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 300000),
   };
 }
 
@@ -520,16 +525,17 @@ function buildTurnStartParams(session, run) {
   });
 }
 
-function codexConfigForSession(session) {
+export function codexConfigForSession(session) {
   const engine = session.engine ?? {};
   const config = engine.config && typeof engine.config === 'object' && !Array.isArray(engine.config)
     ? { ...engine.config }
     : {};
-  if (engine.openai_base_url && !config.openai_base_url) {
+  const provider = codexModelProviderForEngine(engine);
+  if (engine.openai_base_url && !config.openai_base_url && (!provider || provider === 'openai')) {
     config.openai_base_url = engine.openai_base_url;
   }
-  if (engine.model_provider && !config.model_provider) {
-    config.model_provider = engine.model_provider;
+  if (provider && !config.model_provider) {
+    config.model_provider = provider;
   }
   return Object.keys(config).length > 0 ? config : undefined;
 }
@@ -943,6 +949,81 @@ function rememberToolUse(runtime, sessionID, itemID, actionID) {
 
 function toolUseIDForItem(runtime, sessionID, itemID) {
   return runtime.emittedToolUses.get(`${sessionID}:items`)?.get(String(itemID ?? '')) ?? String(itemID ?? newEventID('toolu'));
+}
+
+export function codexModelProviderForEngine(engine = {}) {
+  const explicitProvider = firstNonEmptyString(engine.model_provider);
+  if (explicitProvider) {
+    return explicitProvider;
+  }
+  const openAIBaseURL = firstNonEmptyString(engine.openai_base_url);
+  if (isMiniMaxBaseURL(openAIBaseURL)) {
+    return 'minimax';
+  }
+  return '';
+}
+
+function ensureCodexProviderConfig(env, engine) {
+  const provider = codexModelProviderForEngine(engine);
+  if (!provider || provider === 'openai') {
+    return;
+  }
+  if (provider === 'minimax') {
+    if (!env.MINIMAX_API_KEY && env.MINIMAX_TOKEN) {
+      env.MINIMAX_API_KEY = env.MINIMAX_TOKEN;
+    }
+    delete env.OPENAI_API_KEY;
+    delete env.OPENAI_BASE_URL;
+    delete env.CODEX_API_KEY;
+  }
+  const configPath = path.join(env.CODEX_HOME, 'config.toml');
+  fs.writeFileSync(configPath, codexProviderConfigToml(provider, engine, env), 'utf8');
+}
+
+function codexProviderConfigToml(provider, engine, env) {
+  switch (provider) {
+    case 'minimax':
+      return [
+        `[model_providers.${provider}]`,
+        `name = ${tomlString('MiniMax Chat Completions API')}`,
+        `base_url = ${tomlString(firstNonEmptyString(engine.openai_base_url, env.CODEX_PROVIDER_BASE_URL, 'https://api.minimax.io/v1'))}`,
+        `env_key = ${tomlString(firstNonEmptyString(env.CODEX_PROVIDER_ENV_KEY, 'MINIMAX_API_KEY'))}`,
+        `wire_api = ${tomlString(firstNonEmptyString(env.CODEX_PROVIDER_WIRE_API, 'chat'))}`,
+        `requires_openai_auth = ${tomlBoolean(firstNonEmptyString(env.CODEX_PROVIDER_REQUIRES_OPENAI_AUTH, 'false'))}`,
+        `request_max_retries = ${tomlInteger(env.CODEX_PROVIDER_REQUEST_MAX_RETRIES, 4)}`,
+        `stream_max_retries = ${tomlInteger(env.CODEX_PROVIDER_STREAM_MAX_RETRIES, 10)}`,
+        `stream_idle_timeout_ms = ${tomlInteger(env.CODEX_PROVIDER_STREAM_IDLE_TIMEOUT_MS, 300000)}`,
+        '',
+      ].join('\n');
+    default:
+      return '';
+  }
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function tomlBoolean(value) {
+  return /^true$/i.test(String(value ?? '').trim()) ? 'true' : 'false';
+}
+
+function tomlInteger(value, fallback) {
+  const numeric = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(numeric) ? String(numeric) : String(fallback);
+}
+
+function isMiniMaxBaseURL(value) {
+  const baseURL = String(value ?? '').trim();
+  if (!baseURL) {
+    return false;
+  }
+  try {
+    const parsedURL = new URL(baseURL);
+    return parsedURL.hostname === 'api.minimax.io' || parsedURL.hostname === 'api.minimaxi.com';
+  } catch {
+    return false;
+  }
 }
 
 function asStruct(value) {

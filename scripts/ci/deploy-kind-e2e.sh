@@ -13,6 +13,7 @@ MANAGED_AGENTS_NAMESPACE="${MANAGED_AGENTS_NAMESPACE:-sandbox0-cloud}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-sandbox0ai/managed-agents}"
 GATEWAY_TAG="${GATEWAY_TAG:-gateway-testenv}"
 FAKE_WRAPPER_IMAGE="${FAKE_WRAPPER_IMAGE:-managed-agents/fake-wrapper:e2e}"
+WRAPPER_IMAGE="${WRAPPER_IMAGE:-${FAKE_WRAPPER_IMAGE}}"
 E2E_ENV_FILE="${E2E_ENV_FILE:-${RUNNER_TEMP:-/tmp}/managed-agents-e2e.env}"
 PRELOAD_PUBLIC_IMAGES="${PRELOAD_PUBLIC_IMAGES:-false}"
 
@@ -46,7 +47,7 @@ if [[ "${PRELOAD_PUBLIC_IMAGES}" == "true" ]]; then
 fi
 
 kind load docker-image "${IMAGE_REPOSITORY}:${GATEWAY_TAG}" --name "${KIND_CLUSTER_NAME}"
-kind load docker-image "${FAKE_WRAPPER_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+kind load docker-image "${WRAPPER_IMAGE}" --name "${KIND_CLUSTER_NAME}"
 
 helm --kube-context "${KUBE_CONTEXT}" upgrade --install infra-operator "${SANDBOX0_DIR}/infra-operator/chart" \
   -n infra-operator \
@@ -191,10 +192,10 @@ make -C "${ROOT_DIR}" helm-upgrade \
   KUBE_NAMESPACE="${MANAGED_AGENTS_NAMESPACE}" \
   IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" \
   GATEWAY_TAG="${GATEWAY_TAG}" \
-  WRAPPER_TAG="${FAKE_WRAPPER_IMAGE#*:}" \
+  WRAPPER_TAG="${WRAPPER_IMAGE#*:}" \
   SANDBOX0_BASE_URL="http://${SANDBOX0_INFRA_NAME}-cluster-gateway.${SANDBOX0_NAMESPACE}.svc.cluster.local:30080" \
   RUNTIME_CALLBACK_BASE_URL="http://managed-agents-agent-gateway.${MANAGED_AGENTS_NAMESPACE}.svc.cluster.local" \
-  HELM_EXTRA_ARGS="--set-string agentGateway.env.sandbox0ExposureBaseURL=http://${SANDBOX0_INFRA_NAME}-cluster-gateway.${SANDBOX0_NAMESPACE}.svc.cluster.local:30080 --set-string agentGateway.env.templateID=managed-agents-ci --set-string agentGateway.env.templateMainImage=${FAKE_WRAPPER_IMAGE} --set-string agentGateway.env.sandboxTTLSeconds=120 --set-string agentGateway.secretKeys.sandbox0AdminAPIKey.secretName=managed-agents-runtime --set-string agentGateway.secretKeys.sandbox0AdminAPIKey.key=MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY"
+  HELM_EXTRA_ARGS="--set-string agentGateway.env.sandbox0ExposureBaseURL=http://${SANDBOX0_INFRA_NAME}-cluster-gateway.${SANDBOX0_NAMESPACE}.svc.cluster.local:30080 --set-string agentGateway.env.templateID=managed-agents-ci --set-string agentGateway.env.templateMainImage=${WRAPPER_IMAGE} --set-string agentGateway.env.sandboxTTLSeconds=120 --set-string agentGateway.secretKeys.sandbox0AdminAPIKey.secretName=managed-agents-runtime --set-string agentGateway.secretKeys.sandbox0AdminAPIKey.key=MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY"
 
 kubectl --context "${KUBE_CONTEXT}" -n "${MANAGED_AGENTS_NAMESPACE}" rollout status deploy/managed-agents-agent-gateway --timeout=5m
 
