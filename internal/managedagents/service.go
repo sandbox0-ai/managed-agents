@@ -347,9 +347,6 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 		record.Resources = resources
 		record.VaultIDs = append([]string(nil), vaultIDs...)
 		if runtime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
-			if runtime.ActiveRunID != nil {
-				return nil, errors.New("vault_ids cannot be updated while a run is active")
-			}
 			if strings.TrimSpace(runtime.SandboxID) != "" {
 				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 					return nil, err

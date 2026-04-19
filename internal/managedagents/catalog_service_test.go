@@ -1444,7 +1444,7 @@ func TestUpdateSessionSupportsVaultIDsAndRebootstrapsIdleRuntime(t *testing.T) {
 	}
 }
 
-func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
+func TestUpdateSessionAllowsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 	repo := newTestRepository(t)
 	runtime := &updateSessionRuntimeManager{}
 	service := NewService(repo, runtime, nil)
@@ -1494,14 +1494,27 @@ func TestUpdateSessionRejectsVaultIDsChangeWhileRunIsActive(t *testing.T) {
 		t.Fatalf("UpsertRuntime: %v", err)
 	}
 
-	_, err = service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
+	updated, err := service.UpdateSession(ctx, principal, credential, session.ID, UpdateSessionParams{
 		VaultIDs: StringSliceField{Set: true, Values: []string{"vlt_b"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "vault_ids cannot be updated while a run is active") {
-		t.Fatalf("UpdateSession error = %v, want active-run rejection", err)
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
 	}
-	if len(runtime.bootstrapReqs) != 0 {
-		t.Fatalf("bootstrap calls = %d, want 0", len(runtime.bootstrapReqs))
+	if len(updated.VaultIDs) != 1 || updated.VaultIDs[0] != "vlt_b" {
+		t.Fatalf("updated vault_ids = %#v, want [vlt_b]", updated.VaultIDs)
+	}
+	stored, _, err := repo.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if len(stored.VaultIDs) != 1 || stored.VaultIDs[0] != "vlt_b" {
+		t.Fatalf("stored vault_ids = %#v, want [vlt_b]", stored.VaultIDs)
+	}
+	if len(runtime.bootstrapReqs) != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", len(runtime.bootstrapReqs))
+	}
+	if len(runtime.bootstrapReqs[0].VaultIDs) != 1 || runtime.bootstrapReqs[0].VaultIDs[0] != "vlt_b" {
+		t.Fatalf("bootstrap vault_ids = %#v, want [vlt_b]", runtime.bootstrapReqs[0].VaultIDs)
 	}
 }
 
