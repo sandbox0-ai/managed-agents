@@ -13,6 +13,8 @@ type managedLLMCredential struct {
 	CredentialID string
 	Token        string
 	BaseURL      string
+	Provider     string
+	DirectEnv    bool
 }
 
 const (
@@ -21,7 +23,6 @@ const (
 	managedAnthropicFakeAPIKey     = "managed-agent-sandbox0-fake-key"
 	managedAnthropicFakeAuthToken  = "managed-agent-sandbox0-fake-token"
 	managedCodexFakeAPIKey         = "managed-agent-sandbox0-fake-key"
-	managedMinimaxFakeAPIKey       = "managed-agent-sandbox0-fake-key"
 )
 
 func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVaultCredentials) (map[string]any, *managedLLMCredential, error) {
@@ -47,16 +48,19 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 			return nil, nil, fmt.Errorf("managed-agent llm credential %s provider %q conflicts with engine model_provider %q", credential.CredentialID, resolvedProvider, existingProvider)
 		}
 		out["openai_base_url"] = resolvedBaseURL
+		credentialCopy := *credential
+		credentialCopy.BaseURL = resolvedBaseURL
+		credentialCopy.Provider = resolvedProvider
 		if resolvedProvider == "minimax" {
 			out["model_provider"] = resolvedProvider
-			env["MINIMAX_API_KEY"] = managedMinimaxFakeAPIKey
+			env["MINIMAX_API_KEY"] = credential.Token
+			env["MINIMAX_TOKEN"] = credential.Token
+			credentialCopy.DirectEnv = true
 		} else {
 			env["CODEX_API_KEY"] = managedCodexFakeAPIKey
 			env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
 		}
 		out["env"] = env
-		credentialCopy := *credential
-		credentialCopy.BaseURL = resolvedBaseURL
 		return out, &credentialCopy, nil
 	}
 	if existingBaseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"])); existingBaseURL != "" {

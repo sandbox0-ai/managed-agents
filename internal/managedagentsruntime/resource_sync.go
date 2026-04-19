@@ -143,13 +143,14 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		zap.Bool("has_llm_credential", llmCredential != nil),
 	)
 	phaseStarted = time.Now()
-	llmBindings, err := m.syncManagedLLMCredentialSource(ctx, client, req.SessionID, req.Vendor, llmCredential)
+	llmBindings, llmAllowedDomains, err := m.syncManagedLLMCredentialSource(ctx, client, req.SessionID, req.Vendor, llmCredential)
 	if err != nil {
 		op.ObservePhase("sync_llm_credential_source", time.Since(phaseStarted), err)
 		return err
 	}
 	op.ObservePhase("sync_llm_credential_source", time.Since(phaseStarted), nil,
 		zap.Int("binding_count", len(llmBindings)),
+		zap.Int("allowed_domain_count", len(llmAllowedDomains)),
 	)
 	phaseStarted = time.Now()
 	vaultBindings, vaultEvents, err := m.syncVaultCredentialSources(ctx, client, req.SessionID, mcpTargets, flattenVaultCredentials(vaultCredentials))
@@ -166,9 +167,11 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
 	phaseStarted = time.Now()
-	err = m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
+	policy := allowManagedCredentialDomains(m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), llmAllowedDomains)
+	err = m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, policy, bindings)
 	op.ObservePhase("sync_sandbox_network_policy", time.Since(phaseStarted), err,
 		zap.Int("binding_count", len(bindings)),
+		zap.Int("allowed_domain_count", len(llmAllowedDomains)),
 	)
 	return err
 }
@@ -374,18 +377,21 @@ func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, cli
 	return bindings, nil
 }
 
-func (m *SDKRuntimeManager) syncManagedLLMCredentialSource(ctx context.Context, client *sandbox0sdk.Client, sessionID, vendor string, credential *managedLLMCredential) ([]managedCredentialBinding, error) {
+func (m *SDKRuntimeManager) syncManagedLLMCredentialSource(ctx context.Context, client *sandbox0sdk.Client, sessionID, vendor string, credential *managedLLMCredential) ([]managedCredentialBinding, []string, error) {
+	if credential != nil && credential.DirectEnv {
+		return nil, managedLLMAllowedDomains(vendor, credential), nil
+	}
 	binding, err := managedLLMCredentialBinding(sessionID, vendor, credential)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if binding == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return []managedCredentialBinding{*binding}, nil
+	return []managedCredentialBinding{*binding}, nil, nil
 }
 
 func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, mcpTargets map[string]mcpServerTarget, credentials []gatewaymanagedagents.StoredCredential) ([]managedCredentialBinding, []map[string]any, error) {
@@ -588,6 +594,16 @@ func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID s
 	}
 	egress.CredentialRules = filteredRules
 	base.CredentialBindings = filteredBindings
+	base.Egress = apispec.NewOptNetworkEgressPolicy(egress)
+	return base
+}
+
+func allowManagedCredentialDomains(base apispec.SandboxNetworkPolicy, domains []string) apispec.SandboxNetworkPolicy {
+	if len(domains) == 0 || base.Mode != apispec.SandboxNetworkPolicyModeBlockAll {
+		return base
+	}
+	egress, _ := base.Egress.Get()
+	egress.AllowedDomains = appendUniqueStrings(egress.AllowedDomains, domains...)
 	base.Egress = apispec.NewOptNetworkEgressPolicy(egress)
 	return base
 }
@@ -822,6 +838,21 @@ func managedLLMCredentialBinding(sessionID, vendor string, credential *managedLL
 			"authorization": "Bearer " + credential.Token,
 		},
 	}, nil
+}
+
+func managedLLMAllowedDomains(vendor string, credential *managedLLMCredential) []string {
+	if credential == nil {
+		return nil
+	}
+	baseURL, err := canonicalManagedRuntimeURL(resolvedManagedLLMBaseURL(vendor, credential))
+	if err != nil {
+		return nil
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil || strings.TrimSpace(parsedURL.Hostname()) == "" {
+		return nil
+	}
+	return []string{strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))}
 }
 
 func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, workspaceMountPath, workingDirectory, directory string, files []gatewaymanagedagents.StoredSkillFile) error {

@@ -472,8 +472,11 @@ func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
 		t.Fatal("expected managed llm credential")
 	}
 	env := mapValue(engine["env"])
-	if got := stringValue(env["MINIMAX_API_KEY"]); got != managedMinimaxFakeAPIKey {
-		t.Fatalf("MINIMAX_API_KEY = %q, want fake key", got)
+	if got := stringValue(env["MINIMAX_API_KEY"]); got != "secret-token" {
+		t.Fatalf("MINIMAX_API_KEY = %q, want credential token", got)
+	}
+	if got := stringValue(env["MINIMAX_TOKEN"]); got != "secret-token" {
+		t.Fatalf("MINIMAX_TOKEN = %q, want credential token", got)
 	}
 	if got := stringValue(env["CODEX_API_KEY"]); got != "" {
 		t.Fatalf("CODEX_API_KEY = %q, want empty for MiniMax provider", got)
@@ -489,6 +492,9 @@ func TestApplyManagedLLMEnvInjectsMiniMaxCodexCredential(t *testing.T) {
 	}
 	if credential.BaseURL != "https://api.minimax.io/v1" {
 		t.Fatalf("credential base URL = %q, want MiniMax base URL", credential.BaseURL)
+	}
+	if !credential.DirectEnv {
+		t.Fatal("expected MiniMax credential to inject token directly")
 	}
 }
 
@@ -551,6 +557,25 @@ func TestManagedLLMCredentialBindingAllowsVaultBaseURLDomain(t *testing.T) {
 	egress, ok := merged.Egress.Get()
 	if !ok || !containsString(egress.AllowedDomains, "llm.proxy.example.com") {
 		t.Fatalf("allowed domains = %#v, want vault LLM host", egress.AllowedDomains)
+	}
+}
+
+func TestAllowManagedCredentialDomainsAddsDirectEnvHostForBlockAll(t *testing.T) {
+	policy := allowManagedCredentialDomains(apispec.SandboxNetworkPolicy{
+		Mode: apispec.SandboxNetworkPolicyModeBlockAll,
+	}, []string{"api.minimax.io"})
+	egress, ok := policy.Egress.Get()
+	if !ok || !containsString(egress.AllowedDomains, "api.minimax.io") {
+		t.Fatalf("allowed domains = %#v, want api.minimax.io", egress.AllowedDomains)
+	}
+}
+
+func TestManagedLLMAllowedDomainsUsesCredentialBaseURLHost(t *testing.T) {
+	domains := managedLLMAllowedDomains("codex", &managedLLMCredential{
+		BaseURL: "https://API.MINIMAX.IO/v1",
+	})
+	if len(domains) != 1 || domains[0] != "api.minimax.io" {
+		t.Fatalf("domains = %#v, want api.minimax.io", domains)
 	}
 }
 
