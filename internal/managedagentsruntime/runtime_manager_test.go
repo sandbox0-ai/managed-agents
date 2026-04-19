@@ -227,7 +227,7 @@ func TestTemplateClientUsesAdminKeyWithoutTeamHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("templateClient returned error: %v", err)
 	}
-	_, _ = client.GetTemplate(context.Background(), "managed-agents")
+	_, _ = client.GetTemplateSpec(context.Background(), "managed-agents")
 	if !seen {
 		t.Fatal("expected template client to issue a request")
 	}

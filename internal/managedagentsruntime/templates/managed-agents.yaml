@@ -17,6 +17,21 @@ spec:
       envVars:
         PORT: "${MANAGED_AGENT_TEMPLATE_WRAPPER_PORT}"
         AGENT_WRAPPER_STATE_DIR: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_STATE_PATH}
+  volumeMounts:
+    - name: workspace
+      mountPath: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH}
+    - name: managed-env-apt
+      mountPath: /opt/managed-env/apt
+    - name: managed-env-cargo
+      mountPath: /opt/managed-env/cargo
+    - name: managed-env-gem
+      mountPath: /opt/managed-env/gem
+    - name: managed-env-go
+      mountPath: /opt/managed-env/go
+    - name: managed-env-npm
+      mountPath: /opt/managed-env/npm
+    - name: managed-env-pip
+      mountPath: /opt/managed-env/pip
   network:
     mode: block-all
   pool:

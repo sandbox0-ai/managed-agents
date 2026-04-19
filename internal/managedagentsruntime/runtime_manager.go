@@ -77,7 +77,7 @@ type SDKRuntimeManager struct {
 	cfg             Config
 	logger          *zap.Logger
 	httpClient      *http.Client
-	templateRequest *apispec.TemplateCreateRequest
+	templateRequest *managedTemplateRequest
 	observability   *gatewaymanagedagents.Observability
 }
 
@@ -661,11 +661,19 @@ func (m *SDKRuntimeManager) sandboxClientForRuntime(ctx context.Context, runtime
 	return m.runtimeSandboxClient()
 }
 
-func (m *SDKRuntimeManager) templateClient(ctx context.Context, credential gatewaymanagedagents.RequestCredential, fallbackTeamID string) (*sandbox0sdk.Client, error) {
+func (m *SDKRuntimeManager) templateClient(ctx context.Context, credential gatewaymanagedagents.RequestCredential, fallbackTeamID string) (templateClient, error) {
 	_ = ctx
 	_ = credential
 	_ = fallbackTeamID
-	return m.runtimeSandboxClient()
+	token, err := m.runtimeSandboxToken()
+	if err != nil {
+		return nil, err
+	}
+	return &sandboxTemplateHTTPClient{
+		baseURL:    strings.TrimRight(m.cfg.SandboxBaseURL, "/"),
+		token:      token,
+		httpClient: m.httpClient,
+	}, nil
 }
 
 func (m *SDKRuntimeManager) runtimeSandboxClient() (*sandbox0sdk.Client, error) {
@@ -709,7 +717,7 @@ func (m *SDKRuntimeManager) templateForVendor(vendor string) string {
 	return m.cfg.TemplateID
 }
 
-func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *apispec.TemplateCreateRequest) string {
+func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *managedTemplateRequest) string {
 	if request != nil && strings.TrimSpace(request.TemplateID) != "" {
 		return request.TemplateID
 	}
