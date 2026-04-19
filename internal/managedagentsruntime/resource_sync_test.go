@@ -210,6 +210,74 @@ func TestManagedBindingFromVaultCredentialMatchesCanonicalMCPURL(t *testing.T) {
 	}
 }
 
+func TestManagedBindingFromVaultCredentialUsesHTTPHeaderProjectionMetadata(t *testing.T) {
+	vault := gatewaymanagedagents.Vault{
+		ID: "vlt_headers",
+		Metadata: map[string]string{
+			gatewaymanagedagents.ManagedAgentsVaultRoleKey:          gatewaymanagedagents.ManagedAgentsVaultRoleCredential,
+			gatewaymanagedagents.ManagedAgentsVaultKindKey:          gatewaymanagedagents.ManagedAgentsVaultKindHTTPHeaders,
+			gatewaymanagedagents.ManagedAgentsVaultTargetDomainsKey: "https://API.Example.com/v1",
+			gatewaymanagedagents.ManagedAgentsVaultProtocolKey:      "https",
+			gatewaymanagedagents.ManagedAgentsVaultFailurePolicyKey: "fail-closed",
+			gatewaymanagedagents.ManagedAgentsVaultHeadersJSONKey:   `{"x-api-key":"{{ .token }}","authorization":"{{ .authorization }}"}`,
+		},
+	}
+	binding, err := managedBindingFromVaultCredential("sesn_123", gatewaymanagedagents.StoredCredential{
+		Snapshot: gatewaymanagedagents.Credential{
+			ID:   "vcrd_123",
+			Auth: gatewaymanagedagents.CredentialAuth{Type: "static_bearer"},
+		},
+		Secret: map[string]any{
+			"type":  "static_bearer",
+			"token": "secret-token",
+		},
+		Vault: &vault,
+	}, nil)
+	if err != nil {
+		t.Fatalf("managedBindingFromVaultCredential: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected binding")
+	}
+	if len(binding.domains) != 1 || binding.domains[0] != "api.example.com" {
+		t.Fatalf("binding domains = %#v, want normalized target domain", binding.domains)
+	}
+	if binding.protocol != apispec.EgressAuthProtocolHTTPS {
+		t.Fatalf("binding protocol = %q, want https", binding.protocol)
+	}
+	if binding.tlsMode != apispec.EgressTLSModeTerminateReoriginate {
+		t.Fatalf("binding tls mode = %q, want terminate-reoriginate", binding.tlsMode)
+	}
+	if binding.failurePolicy != apispec.EgressAuthFailurePolicyFailClosed {
+		t.Fatalf("binding failure policy = %q, want fail-closed", binding.failurePolicy)
+	}
+	if binding.secretValues["token"] != "secret-token" || binding.secretValues["authorization"] != "Bearer secret-token" {
+		t.Fatalf("binding secret values = %#v", binding.secretValues)
+	}
+	if len(binding.projectionHeaders) != 2 {
+		t.Fatalf("projection headers = %#v, want 2", binding.projectionHeaders)
+	}
+
+	policy := mergeManagedCredentialPolicy(apispec.SandboxNetworkPolicy{Mode: apispec.SandboxNetworkPolicyModeBlockAll}, "sesn_123", []managedCredentialBinding{*binding})
+	if len(policy.CredentialBindings) != 1 {
+		t.Fatalf("credential bindings = %#v, want one binding", policy.CredentialBindings)
+	}
+	egress, ok := policy.Egress.Get()
+	if !ok {
+		t.Fatal("egress not set")
+	}
+	if len(egress.AllowedDomains) != 1 || egress.AllowedDomains[0] != "api.example.com" {
+		t.Fatalf("allowed domains = %#v, want credential target domain", egress.AllowedDomains)
+	}
+	if len(egress.CredentialRules) != 1 {
+		t.Fatalf("credential rules = %#v, want one rule", egress.CredentialRules)
+	}
+	failurePolicy, ok := egress.CredentialRules[0].FailurePolicy.Get()
+	if !ok || failurePolicy != apispec.EgressAuthFailurePolicyFailClosed {
+		t.Fatalf("failure policy = %q, want fail-closed", failurePolicy)
+	}
+}
+
 func testLLMStaticBearerCredential(id, token string) gatewaymanagedagents.StoredCredential {
 	return gatewaymanagedagents.StoredCredential{
 		Snapshot: gatewaymanagedagents.Credential{

@@ -25,6 +25,7 @@ type managedCredentialBinding struct {
 	targetCanonicalURL string
 	protocol           apispec.EgressAuthProtocol
 	tlsMode            apispec.EgressTLSMode
+	failurePolicy      apispec.EgressAuthFailurePolicy
 	projectionHeaders  []managedProjectedHeader
 	secretValues       map[string]string
 }
@@ -191,6 +192,10 @@ func (m *SDKRuntimeManager) loadActiveVaultCredentials(ctx context.Context, team
 			return nil, nil, err
 		}
 		group := managedVaultCredentials{vault: vaultCopy, credentials: make([]gatewaymanagedagents.StoredCredential, 0, len(items))}
+		config := gatewaymanagedagents.ManagedVaultConfigFromMetadata(vaultCopy.Metadata)
+		if config.Role == gatewaymanagedagents.ManagedAgentsVaultRoleCredential && len(items) != 1 {
+			return nil, nil, fmt.Errorf("credential vault %s must contain exactly one active credential", vaultID)
+		}
 		for _, credential := range items {
 			credential.Vault = &vaultCopy
 			credential, err = m.maybeRefreshVaultCredential(ctx, teamID, vaultID, credential, time.Now().UTC())
@@ -395,7 +400,7 @@ func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, clie
 	}
 	bindings := make([]managedCredentialBinding, 0)
 	bootstrapEvents := make([]map[string]any, 0)
-	seenCanonicalTargets := make(map[string]struct{})
+	seenCanonicalTargets := make(map[string]managedCredentialBinding)
 	seenHostTargets := make(map[string]managedCredentialBinding)
 	for _, credential := range credentials {
 		binding, err := managedBindingFromVaultCredential(sessionID, credential, mcpTargets)
@@ -409,14 +414,21 @@ func (m *SDKRuntimeManager) syncVaultCredentialSources(ctx context.Context, clie
 		if binding == nil {
 			continue
 		}
-		if _, ok := seenCanonicalTargets[binding.targetCanonicalURL]; ok {
-			continue
+		if existing, ok := seenCanonicalTargets[binding.targetCanonicalURL]; ok {
+			if binding.mcpServerName != "" {
+				continue
+			}
+			return nil, nil, fmt.Errorf("multiple credentials target %s; credential %s conflicts with credential %s", strings.Join(binding.domains, ","), binding.key, existing.key)
 		}
-		seenCanonicalTargets[binding.targetCanonicalURL] = struct{}{}
+		seenCanonicalTargets[binding.targetCanonicalURL] = *binding
 		targetKey := string(binding.protocol) + ":" + strings.Join(binding.domains, ",")
 		if existing, ok := seenHostTargets[targetKey]; ok {
-			bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(binding.mcpServerName, fmt.Errorf("multiple MCP credentials target %s; sandbox0 egress credential injection is currently scoped to host and protocol, so %s is using credential %s and %s cannot install a second credential for the same host", strings.Join(binding.domains, ","), existing.mcpServerName, existing.key, binding.mcpServerName)))
-			continue
+			err := fmt.Errorf("multiple credentials target %s; sandbox0 egress credential injection is currently scoped to host and protocol, so credential %s conflicts with credential %s", strings.Join(binding.domains, ","), binding.key, existing.key)
+			if binding.mcpServerName != "" {
+				bootstrapEvents = append(bootstrapEvents, mcpAuthenticationFailedEvent(binding.mcpServerName, err))
+				continue
+			}
+			return nil, nil, err
 		}
 		seenHostTargets[targetKey] = *binding
 		if err := m.upsertCredentialSource(ctx, client, *binding); err != nil {
@@ -458,6 +470,9 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 	}
 	if isManagedLLMCredential(credential) {
 		return nil, nil
+	}
+	if isManagedGenericCredential(credential) {
+		return managedHTTPHeadersBindingFromVaultCredential(sessionID, credential)
 	}
 	serverURL := credentialMCPServerURL(credential)
 	if serverURL == "" {
@@ -507,6 +522,87 @@ func managedBindingFromVaultCredential(sessionID string, credential gatewaymanag
 		return nil, fmt.Errorf("vault credential %s has unsupported auth type %q", credentialID, stringValue(auth["type"]))
 	}
 	return binding, nil
+}
+
+func managedHTTPHeadersBindingFromVaultCredential(sessionID string, credential gatewaymanagedagents.StoredCredential) (*managedCredentialBinding, error) {
+	if credential.Vault == nil {
+		return nil, errors.New("generic credential vault metadata is missing")
+	}
+	config := gatewaymanagedagents.ManagedVaultConfigFromMetadata(credential.Vault.Metadata)
+	snapshot := credential.Snapshot
+	credentialID := strings.TrimSpace(snapshot.ID)
+	if credentialID == "" {
+		return nil, errors.New("vault credential is missing id")
+	}
+	if config.Kind != gatewaymanagedagents.ManagedAgentsVaultKindHTTPHeaders {
+		return nil, fmt.Errorf("credential vault %s has unsupported kind %q", credential.Vault.ID, config.Kind)
+	}
+	if len(config.TargetDomains) == 0 {
+		return nil, fmt.Errorf("credential vault %s is missing target domains", credential.Vault.ID)
+	}
+	if len(config.Headers) == 0 {
+		return nil, fmt.Errorf("credential vault %s is missing header projection metadata", credential.Vault.ID)
+	}
+	secretValues, err := managedCredentialSecretValues(credential)
+	if err != nil {
+		return nil, err
+	}
+	headers := make([]managedProjectedHeader, 0, len(config.Headers))
+	for name, valueTemplate := range config.Headers {
+		headers = append(headers, managedProjectedHeader{
+			name:          strings.TrimSpace(name),
+			valueTemplate: strings.TrimSpace(valueTemplate),
+		})
+	}
+	sort.Slice(headers, func(i, j int) bool {
+		return strings.ToLower(headers[i].name) < strings.ToLower(headers[j].name)
+	})
+	protocol := apispec.EgressAuthProtocolHTTPS
+	if config.Protocol == "http" {
+		protocol = apispec.EgressAuthProtocolHTTP
+	}
+	tlsMode := tlsModeForProtocol(protocol)
+	if config.TLSMode != "" {
+		tlsMode = apispec.EgressTLSMode(config.TLSMode)
+	}
+	return &managedCredentialBinding{
+		key:                credentialID,
+		sourceName:         managedCredentialSourceName(sessionID, credentialID),
+		domains:            append([]string(nil), config.TargetDomains...),
+		targetCanonicalURL: "generic:" + string(protocol) + ":" + strings.Join(config.TargetDomains, ","),
+		protocol:           protocol,
+		tlsMode:            tlsMode,
+		failurePolicy:      apispec.EgressAuthFailurePolicy(config.FailurePolicy),
+		projectionHeaders:  headers,
+		secretValues:       secretValues,
+	}, nil
+}
+
+func managedCredentialSecretValues(credential gatewaymanagedagents.StoredCredential) (map[string]string, error) {
+	snapshot := credential.Snapshot
+	secret := credential.Secret
+	credentialID := strings.TrimSpace(snapshot.ID)
+	auth := gatewaymanagedagents.CredentialAuthToMapForRuntime(snapshot.Auth)
+	values := make(map[string]string)
+	switch strings.TrimSpace(stringValue(auth["type"])) {
+	case "static_bearer":
+		token := strings.TrimSpace(stringValue(secret["token"]))
+		if token == "" {
+			return nil, fmt.Errorf("vault credential %s is missing token", credentialID)
+		}
+		values["token"] = token
+		values["authorization"] = "Bearer " + token
+	case "mcp_oauth":
+		accessToken := strings.TrimSpace(stringValue(secret["access_token"]))
+		if accessToken == "" {
+			return nil, fmt.Errorf("vault credential %s is missing access_token", credentialID)
+		}
+		values["access_token"] = accessToken
+		values["authorization"] = "Bearer " + accessToken
+	default:
+		return nil, fmt.Errorf("vault credential %s has unsupported auth type %q", credentialID, stringValue(auth["type"]))
+	}
+	return values, nil
 }
 
 func (m *SDKRuntimeManager) syncSandboxNetworkPolicy(ctx context.Context, sandbox *sandbox0sdk.Sandbox, sessionID string, policy apispec.SandboxNetworkPolicy, bindings []managedCredentialBinding) error {
@@ -584,6 +680,9 @@ func mergeManagedCredentialPolicy(base apispec.SandboxNetworkPolicy, sessionID s
 		}
 		if binding.tlsMode != "" {
 			rule.TlsMode = apispec.NewOptEgressTLSMode(binding.tlsMode)
+		}
+		if binding.failurePolicy != "" {
+			rule.FailurePolicy = apispec.NewOptEgressAuthFailurePolicy(binding.failurePolicy)
 		}
 		filteredRules = append(filteredRules, rule)
 	}
@@ -762,6 +861,13 @@ func isManagedLLMCredential(credential gatewaymanagedagents.StoredCredential) bo
 		return false
 	}
 	return gatewaymanagedagents.ManagedVaultConfigFromMetadata(credential.Vault.Metadata).Role == gatewaymanagedagents.ManagedAgentsVaultRoleLLM
+}
+
+func isManagedGenericCredential(credential gatewaymanagedagents.StoredCredential) bool {
+	if credential.Vault == nil {
+		return false
+	}
+	return gatewaymanagedagents.ManagedVaultConfigFromMetadata(credential.Vault.Metadata).Role == gatewaymanagedagents.ManagedAgentsVaultRoleCredential
 }
 
 func mcpAuthenticationFailedEvent(serverName string, err error) map[string]any {
