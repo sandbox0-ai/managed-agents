@@ -109,8 +109,6 @@ spec:
     storageProxy:
       enabled: true
       replicas: 1
-      config:
-        juicefsEncryptionEnabled: false
   initUser:
     email: "admin@example.com"
 YAML
