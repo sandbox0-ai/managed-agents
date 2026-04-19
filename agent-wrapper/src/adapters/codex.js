@@ -10,9 +10,11 @@ import {
   AgentRuntime,
   agentWrapperStateDir,
   finalStatusEventForSessionError,
+  providerErrorEventForText,
   runtimeEnvForEngine,
   runtimeModelForSession,
   sessionErrorEventForError,
+  sessionErrorEventForMessage,
 } from './runtime.js';
 
 export class CodexRuntime extends AgentRuntime {
@@ -280,7 +282,28 @@ export class CodexRuntime extends AgentRuntime {
             return;
           }
           if (message.method === 'thread/tokenUsage/updated') {
-            usage = message.params?.tokenUsage?.last ?? usage;
+            usage = normalizeCodexTokenUsage(message.params?.tokenUsage?.last) ?? usage;
+            return;
+          }
+          if (isCodexEventNotification(message)) {
+            const event = codexEventFromNotification(message);
+            usage = codexEventUsage(event) ?? usage;
+            const payload = this.#mapCodexEvent(sessionStore.getSession?.() ?? session, run, event);
+            if (payload) {
+              await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
+            }
+            const terminalPayload = buildCodexEventTerminalPayload(
+              sessionStore.getSession?.() ?? session,
+              run,
+              event,
+              modelRequestStartID,
+              usage,
+            );
+            if (terminalPayload) {
+              await callbackClient.send(sessionStore.getSession?.() ?? session, terminalPayload);
+              cleanup();
+              resolve();
+            }
             return;
           }
           const payload = this.#mapNotification(sessionStore.getSession?.() ?? session, run, message);
@@ -332,6 +355,25 @@ export class CodexRuntime extends AgentRuntime {
       vendor_session_id: session.vendor_session_id,
       events,
     };
+  }
+
+  #mapCodexEvent(session, run, event) {
+    switch (event?.type) {
+      case 'agent_message': {
+        const text = codexEventText(event.message ?? event.content ?? event);
+        if (!text) {
+          return null;
+        }
+        return {
+          session_id: session.session_id,
+          run_id: run.run_id,
+          vendor_session_id: session.vendor_session_id,
+          events: [{ type: 'agent.message', content: [{ type: 'text', text }] }],
+        };
+      }
+      default:
+        return null;
+    }
   }
 
   async #handleServerRequest(session, run, callbackClient, sessionStore, message) {
@@ -934,30 +976,149 @@ function buildTurnCompletedPayload(session, run, turn, modelRequestStartID, usag
   };
 }
 
+function buildCodexEventTerminalPayload(session, run, event, modelRequestStartID, usage) {
+  switch (event?.type) {
+    case 'task_complete': {
+      const completedUsage = codexEventUsage(event) ?? usage;
+      const agentMessage = codexEventText(event.last_agent_message);
+      return {
+        session_id: session.session_id,
+        run_id: run.run_id,
+        vendor_session_id: session.vendor_session_id,
+        usage_delta: buildUsageDelta(completedUsage),
+        events: [
+          ...(agentMessage ? [{ type: 'agent.message', content: [{ type: 'text', text: agentMessage }] }] : []),
+          buildModelRequestEndEvent(modelRequestStartID, completedUsage, false),
+          { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
+        ],
+      };
+    }
+    case 'error':
+    case 'turn_aborted': {
+      const message = codexEventErrorText(event) || `Codex ${String(event.type).replace(/_/g, ' ')}`;
+      const errorEvent = providerErrorEventForText(message) ?? sessionErrorEventForMessage(message, 'Codex run failed');
+      return {
+        session_id: session.session_id,
+        run_id: run.run_id,
+        vendor_session_id: session.vendor_session_id,
+        usage_delta: buildUsageDelta(codexEventUsage(event) ?? usage),
+        events: [
+          buildModelRequestEndEvent(modelRequestStartID, codexEventUsage(event) ?? usage, true),
+          errorEvent,
+          finalStatusEventForSessionError(errorEvent),
+        ],
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 function buildUsageDelta(usage) {
-  if (!usage || typeof usage !== 'object') {
+  const normalized = normalizeCodexTokenUsage(usage);
+  if (!normalized) {
     return undefined;
   }
   return {
-    input_tokens: numberValue(usage.inputTokens),
-    output_tokens: numberValue(usage.outputTokens),
-    cache_read_input_tokens: numberValue(usage.cachedInputTokens),
+    input_tokens: numberValue(normalized.inputTokens),
+    output_tokens: numberValue(normalized.outputTokens),
+    cache_read_input_tokens: numberValue(normalized.cachedInputTokens),
   };
 }
 
 function buildModelRequestEndEvent(modelRequestStartID, usage, isError) {
+  const normalized = normalizeCodexTokenUsage(usage);
   return {
     type: 'span.model_request_end',
     id: newEventID('span'),
     is_error: isError,
     model_request_start_id: modelRequestStartID,
     model_usage: {
-      input_tokens: numberValue(usage?.inputTokens),
-      output_tokens: numberValue(usage?.outputTokens),
+      input_tokens: numberValue(normalized?.inputTokens),
+      output_tokens: numberValue(normalized?.outputTokens),
       cache_creation_input_tokens: 0,
-      cache_read_input_tokens: numberValue(usage?.cachedInputTokens),
+      cache_read_input_tokens: numberValue(normalized?.cachedInputTokens),
     },
   };
+}
+
+function isCodexEventNotification(message) {
+  return typeof message?.method === 'string' && message.method.startsWith('codex/event/');
+}
+
+function codexEventFromNotification(message) {
+  const typeFromMethod = String(message?.method ?? '').replace(/^codex\/event\//, '');
+  const msg = message?.params?.msg;
+  if (msg && typeof msg === 'object') {
+    return { ...msg, type: String(msg.type ?? typeFromMethod) };
+  }
+  return { type: typeFromMethod };
+}
+
+function codexEventUsage(event) {
+  return normalizeCodexTokenUsage(
+    event?.total_token_usage
+    ?? event?.totalTokenUsage
+    ?? event?.token_usage
+    ?? event?.tokenUsage
+    ?? event?.usage,
+  );
+}
+
+function codexEventErrorText(event) {
+  const message = firstNonEmptyString(
+    event?.message,
+    event?.error?.message,
+    event?.cause?.message,
+  );
+  if (message) {
+    return message;
+  }
+  if (event?.error && typeof event.error === 'object') {
+    return JSON.stringify(event.error);
+  }
+  return '';
+}
+
+function normalizeCodexTokenUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return null;
+  }
+  return {
+    inputTokens: numberValue(usage.inputTokens ?? usage.input_tokens),
+    outputTokens: numberValue(usage.outputTokens ?? usage.output_tokens),
+    cachedInputTokens: numberValue(usage.cachedInputTokens ?? usage.cached_input_tokens),
+  };
+}
+
+function codexEventText(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const lines = value.map((item) => codexEventText(item)).filter(Boolean);
+    return lines.join('\n');
+  }
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+  if (typeof value.text === 'string') {
+    return value.text;
+  }
+  if (typeof value.message === 'string') {
+    return value.message;
+  }
+  if (typeof value.content === 'string') {
+    return value.content;
+  }
+  if (Array.isArray(value.content)) {
+    return codexEventText(value.content);
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    return codexEventText(entries[0][1]);
+  }
+  return '';
 }
 
 function toolResultContent(content) {

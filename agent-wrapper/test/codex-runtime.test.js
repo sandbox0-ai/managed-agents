@@ -15,13 +15,23 @@ import {
 } from '../src/adapters/codex.js';
 
 class FakeCodexClient extends EventEmitter {
-  constructor({ approval = false, stderrLine = null, startError = null, completionStatus = 'completed', completionError = null } = {}) {
+  constructor({
+    approval = false,
+    stderrLine = null,
+    startError = null,
+    completionStatus = 'completed',
+    completionError = null,
+    eventProtocol = 'legacy',
+    codexEventError = null,
+  } = {}) {
     super();
     this.approval = approval;
     this.stderrLine = stderrLine;
     this.startError = startError;
     this.completionStatus = completionStatus;
     this.completionError = completionError;
+    this.eventProtocol = eventProtocol;
+    this.codexEventError = codexEventError;
     this.requests = [];
     this.responses = [];
     this.startCalls = 0;
@@ -103,6 +113,51 @@ class FakeCodexClient extends EventEmitter {
   close() {}
 
   emitAgentMessageAndComplete() {
+    if (this.eventProtocol === 'codex-event') {
+      this.emit('notification', {
+        method: 'codex/event/agent_message',
+        params: {
+          threadId: 'thr_codex',
+          turnId: 'turn_codex',
+          msg: { type: 'agent_message', message: 'done' },
+        },
+      });
+      this.emit('notification', {
+        method: 'codex/event/token_count',
+        params: {
+          threadId: 'thr_codex',
+          turnId: 'turn_codex',
+          msg: {
+            type: 'token_count',
+            total_token_usage: { input_tokens: 3, output_tokens: 2, cached_input_tokens: 1 },
+          },
+        },
+      });
+      if (this.codexEventError) {
+        this.emit('notification', {
+          method: 'codex/event/error',
+          params: {
+            threadId: 'thr_codex',
+            turnId: 'turn_codex',
+            msg: { type: 'error', message: this.codexEventError },
+          },
+        });
+        return;
+      }
+      this.emit('notification', {
+        method: 'codex/event/task_complete',
+        params: {
+          threadId: 'thr_codex',
+          turnId: 'turn_codex',
+          msg: {
+            type: 'task_complete',
+            last_agent_message: 'done',
+            total_token_usage: { input_tokens: 3, output_tokens: 2, cached_input_tokens: 1 },
+          },
+        },
+      });
+      return;
+    }
     this.emit('notification', {
       method: 'item/completed',
       params: {
@@ -154,6 +209,21 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   });
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.message'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
+  assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
+});
+
+test('CodexRuntime maps codex/event task completion notifications', async () => {
+  const client = new FakeCodexClient({ eventProtocol: 'codex-event' });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'agent.message'));
+  assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
 });
 
@@ -303,6 +373,24 @@ test('CodexRuntime maps failed turns through the shared final status helper', as
   const events = callbacks.flatMap((payload) => payload.events);
   assert(events.some((event) => event.type === 'session.error' && event.error.type === 'model_rate_limited_error'));
   assert(events.some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'retries_exhausted'));
+});
+
+test('CodexRuntime maps codex/event errors through the shared provider classifier', async () => {
+  const client = new FakeCodexClient({
+    eventProtocol: 'codex-event',
+    codexEventError: 'API Error: 401 {"error":{"type":"authorized_error","message":"invalid api key (2049)","http_code":"401"}}',
+  });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  const callbacks = [];
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  await runtime.startRun(storedSession, runRequest(), { send: async (_session, payload) => callbacks.push(payload) }, sessionStore);
+
+  const events = callbacks.flatMap((payload) => payload.events);
+  assert(events.some((event) => event.type === 'span.model_request_end' && event.is_error === true));
+  assert(events.some((event) => event.type === 'session.error' && event.error.type === 'model_request_failed_error'));
+  assert(events.some((event) => event.type === 'session.status_terminated'));
 });
 
 test('CodexRuntime forwards app-server stderr to redacted wrapper logs', async () => {
