@@ -347,9 +347,8 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 		record.Resources = resources
 		record.VaultIDs = append([]string(nil), vaultIDs...)
 		if runtime, runtimeErr := s.repo.GetRuntime(ctx, sessionID); runtimeErr == nil {
-			if runtime.ActiveRunID != nil {
-				return nil, errors.New("vault_ids cannot be updated while a run is active")
-			}
+			// Sandbox0 treats vault updates as runtime state refreshes, not run configuration changes.
+			// Refresh bootstrap state even while a run is active so the next credential use sees the latest vault set.
 			if strings.TrimSpace(runtime.SandboxID) != "" {
 				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
 					return nil, err
