@@ -233,6 +233,27 @@ type EnvironmentNetworking struct {
 	AllowMCPServers      bool     `json:"allow_mcp_servers,omitempty"`
 }
 
+func (n EnvironmentNetworking) MarshalJSON() ([]byte, error) {
+	if strings.TrimSpace(n.Type) != "limited" {
+		return json.Marshal(struct {
+			Type string `json:"type"`
+		}{
+			Type: strings.TrimSpace(n.Type),
+		})
+	}
+	return json.Marshal(struct {
+		Type                 string   `json:"type"`
+		AllowedHosts         []string `json:"allowed_hosts"`
+		AllowPackageManagers bool     `json:"allow_package_managers"`
+		AllowMCPServers      bool     `json:"allow_mcp_servers"`
+	}{
+		Type:                 "limited",
+		AllowedHosts:         append([]string(nil), n.AllowedHosts...),
+		AllowPackageManagers: n.AllowPackageManagers,
+		AllowMCPServers:      n.AllowMCPServers,
+	})
+}
+
 type EnvironmentPackages struct {
 	Type  string   `json:"type"`
 	Apt   []string `json:"apt"`

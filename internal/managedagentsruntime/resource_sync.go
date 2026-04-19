@@ -166,7 +166,8 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 	bindings := append(githubBindings, llmBindings...)
 	bindings = append(bindings, vaultBindings...)
 	phaseStarted = time.Now()
-	err = m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, m.runtimeNetworkPolicy(environment, req.Engine, req.Agent), bindings)
+	policy := m.runtimeNetworkPolicy(environment, req.Engine, req.Agent)
+	err = m.syncSandboxNetworkPolicy(ctx, client.Sandbox(runtime.SandboxID), req.SessionID, policy, bindings)
 	op.ObservePhase("sync_sandbox_network_policy", time.Since(phaseStarted), err,
 		zap.Int("binding_count", len(bindings)),
 	)

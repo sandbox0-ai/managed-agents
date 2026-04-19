@@ -10,9 +10,11 @@ import {
   AgentRuntime,
   agentWrapperStateDir,
   finalStatusEventForSessionError,
+  providerErrorEventForText,
   runtimeEnvForEngine,
   runtimeModelForSession,
   sessionErrorEventForError,
+  sessionErrorEventForMessage,
 } from './runtime.js';
 
 export class CodexRuntime extends AgentRuntime {
@@ -23,6 +25,10 @@ export class CodexRuntime extends AgentRuntime {
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
+  }
+
+  async prestartSession(session) {
+    await this.#clientForSession(session);
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
@@ -250,6 +256,7 @@ export class CodexRuntime extends AgentRuntime {
 
   #watchTurn(client, session, run, callbackClient, sessionStore, modelRequestStartID, turnRef) {
     let usage = null;
+    let sawCodexEvent = false;
     let cleanup = () => {};
     const promise = new Promise((resolve, reject) => {
       cleanup = () => {
@@ -276,7 +283,29 @@ export class CodexRuntime extends AgentRuntime {
             return;
           }
           if (message.method === 'thread/tokenUsage/updated') {
-            usage = message.params?.tokenUsage?.last ?? usage;
+            usage = normalizeCodexTokenUsage(message.params?.tokenUsage?.last) ?? usage;
+            return;
+          }
+          if (isCodexEventNotification(message)) {
+            sawCodexEvent = true;
+            const event = codexEventFromNotification(message);
+            usage = codexEventUsage(event) ?? usage;
+            const payload = this.#mapCodexEvent(sessionStore.getSession?.() ?? session, run, event);
+            if (payload) {
+              await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
+            }
+            const terminalPayload = buildCodexEventTerminalPayload(
+              sessionStore.getSession?.() ?? session,
+              run,
+              event,
+              modelRequestStartID,
+              usage,
+            );
+            if (terminalPayload) {
+              await callbackClient.send(sessionStore.getSession?.() ?? session, terminalPayload);
+              cleanup();
+              resolve();
+            }
             return;
           }
           const payload = this.#mapNotification(sessionStore.getSession?.() ?? session, run, message);
@@ -284,6 +313,9 @@ export class CodexRuntime extends AgentRuntime {
             await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
           }
           if (message.method === 'turn/completed') {
+            if (sawCodexEvent) {
+              return;
+            }
             const latestSession = sessionStore.getSession?.() ?? session;
             await callbackClient.send(latestSession, buildTurnCompletedPayload(latestSession, run, message.params?.turn, modelRequestStartID, usage));
             cleanup();
@@ -327,6 +359,19 @@ export class CodexRuntime extends AgentRuntime {
       run_id: run.run_id,
       vendor_session_id: session.vendor_session_id,
       events,
+    };
+  }
+
+  #mapCodexEvent(session, run, event) {
+    const text = codexEventAgentText(event);
+    if (!text) {
+      return null;
+    }
+    return {
+      session_id: session.session_id,
+      run_id: run.run_id,
+      vendor_session_id: session.vendor_session_id,
+      events: [{ type: 'agent.message', content: [{ type: 'text', text }] }],
     };
   }
 
@@ -457,22 +502,53 @@ export class CodexRuntime extends AgentRuntime {
   }
 }
 
-function codexClientOptions(session) {
+export function codexClientOptions(session) {
   const engine = session.engine ?? {};
   const env = runtimeEnvForEngine(engine);
   if (!env.CODEX_HOME) {
     env.CODEX_HOME = path.join(agentWrapperStateDir(env), 'codex');
   }
   fs.mkdirSync(env.CODEX_HOME, { recursive: true });
+  ensureCodexCABundle(env);
+  ensureCodexProviderConfig(env, engine);
   return {
     command: firstNonEmptyString(engine.path_to_codex_executable, engine.codex_executable, process.env.CODEX_EXECUTABLE, 'codex'),
     args: Array.isArray(engine.app_server_args) && engine.app_server_args.length > 0
       ? engine.app_server_args.map((value) => String(value))
-      : ['app-server', '--listen', 'stdio://'],
+      : ['app-server'],
     cwd: session.working_directory,
     env,
-    requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 120000),
+    requestTimeoutMs: finiteNumber(engine.app_server_request_timeout_ms, 300000),
   };
+}
+
+const defaultSystemCABundlePath = '/etc/ssl/certs/ca-certificates.crt';
+
+function ensureCodexCABundle(env) {
+  const mitmCAPath = firstNonEmptyString(env.SANDBOX0_NETD_MITM_CA_FILE, env.NODE_EXTRA_CA_CERTS);
+  if (!mitmCAPath || !fs.existsSync(mitmCAPath)) {
+    return;
+  }
+  const systemCAPath = firstNonEmptyString(env.SANDBOX0_SYSTEM_CA_BUNDLE, env.SSL_CERT_FILE, defaultSystemCABundlePath);
+  const parts = [];
+  if (systemCAPath && systemCAPath !== mitmCAPath && fs.existsSync(systemCAPath)) {
+    const systemCA = fs.readFileSync(systemCAPath, 'utf8').trim();
+    if (systemCA) {
+      parts.push(systemCA);
+    }
+  }
+  const mitmCA = fs.readFileSync(mitmCAPath, 'utf8').trim();
+  if (mitmCA) {
+    parts.push(mitmCA);
+  }
+  if (parts.length === 0) {
+    return;
+  }
+  const bundlePath = path.join(env.CODEX_HOME, 'sandbox0-ca-bundle.pem');
+  fs.writeFileSync(bundlePath, `${parts.join('\n')}\n`, 'utf8');
+  env.SSL_CERT_FILE = bundlePath;
+  env.CURL_CA_BUNDLE = bundlePath;
+  env.REQUESTS_CA_BUNDLE = bundlePath;
 }
 
 function buildThreadStartParams(session) {
@@ -489,12 +565,12 @@ function buildThreadParams(session, { includeDynamicTools, includeServiceName })
     cwd: session.working_directory,
     model: runtimeModelForSession(session),
     approvalPolicy: codexApprovalPolicy(engine),
-    sandbox: engine.sandbox ?? 'workspace-write',
+    sandbox: codexSandbox(engine),
     serviceName: includeServiceName ? 'sandbox0_managed_agents' : undefined,
     personality: engine.personality ?? 'none',
     config: codexConfigForSession(session),
   };
-  if (typeof session.agent?.system === 'string' && session.agent.system.trim() !== '') {
+  if (codexSupportsDeveloperInstructions(session) && typeof session.agent?.system === 'string' && session.agent.system.trim() !== '') {
     params.developerInstructions = session.agent.system;
   }
   const dynamicTools = includeDynamicTools ? dynamicToolsForAgent(session.agent?.tools) : [];
@@ -512,7 +588,7 @@ function buildTurnStartParams(session, run) {
     model: runtimeModelForSession(session),
     cwd: session.working_directory,
     approvalPolicy: codexApprovalPolicy(engine),
-    sandboxPolicy: engine.sandbox_policy ?? workspaceSandboxPolicy(session.working_directory, engine),
+    sandboxPolicy: codexSandboxPolicy(session.working_directory, engine),
     effort: engine.reasoning_effort,
     summary: engine.reasoning_summary,
     serviceTier: engine.service_tier,
@@ -520,38 +596,142 @@ function buildTurnStartParams(session, run) {
   });
 }
 
-function codexConfigForSession(session) {
+export function codexConfigForSession(session) {
   const engine = session.engine ?? {};
   const config = engine.config && typeof engine.config === 'object' && !Array.isArray(engine.config)
     ? { ...engine.config }
     : {};
-  if (engine.openai_base_url && !config.openai_base_url) {
+  const provider = codexModelProviderForEngine(engine);
+  if (engine.openai_base_url && !config.openai_base_url && (!provider || provider === 'openai')) {
     config.openai_base_url = engine.openai_base_url;
   }
-  if (engine.model_provider && !config.model_provider) {
-    config.model_provider = engine.model_provider;
+  if (provider && !config.model_provider) {
+    config.model_provider = provider;
   }
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
-function codexApprovalPolicy(engine) {
-  if (engine.approval_policy) {
-    return engine.approval_policy;
+export function codexApprovalPolicy(engine) {
+  const requested = engine?.approval_policy;
+  if (typeof requested === 'string') {
+    switch (requested) {
+      case 'unlessTrusted':
+      case 'onFailure':
+      case 'onRequest':
+      case 'never':
+        return requested;
+      case 'untrusted':
+        return 'unlessTrusted';
+      case 'on-failure':
+        return 'onFailure';
+      case 'on-request':
+        return 'onRequest';
+      default:
+        break;
+    }
   }
-  return { granular: { sandbox_approval: true, rules: true, skill_approval: true, request_permissions: true, mcp_elicitations: true } };
+  if (requested && typeof requested === 'object') {
+    if (typeof requested.mode === 'string') {
+      return codexApprovalPolicy({ approval_policy: requested.mode });
+    }
+    if (requested.granular || requested.type === 'granular') {
+      return 'onRequest';
+    }
+  }
+  return 'onRequest';
 }
 
-function workspaceSandboxPolicy(workingDirectory, engine) {
-  const networkAccess = engine.network_access === false ? false : true;
-  const writableRoots = Array.isArray(engine.writable_roots) && engine.writable_roots.length > 0
-    ? engine.writable_roots.map((value) => String(value))
-    : [workingDirectory].filter(Boolean);
+export function codexSandbox(engine) {
+  const requested = engine?.sandbox;
+  if (typeof requested === 'string') {
+    switch (requested) {
+      case 'readOnly':
+      case 'workspaceWrite':
+      case 'dangerFullAccess':
+        return requested;
+      case 'read-only':
+      case 'read_only':
+        return 'readOnly';
+      case 'workspace-write':
+      case 'workspace_write':
+        return 'workspaceWrite';
+      case 'danger-full-access':
+      case 'danger_full_access':
+        return 'dangerFullAccess';
+      default:
+        break;
+    }
+  }
+  return 'workspaceWrite';
+}
+
+export function codexSandboxPolicy(workingDirectory, engine) {
+  const requested = engine?.sandbox_policy;
+  const networkAccess = sandboxPolicyNetworkAccess(requested, engine);
+  const writableRoots = sandboxPolicyWritableRoots(requested, workingDirectory, engine);
   return {
-    type: 'workspaceWrite',
+    mode: sandboxPolicyMode(requested),
     writableRoots,
     networkAccess,
-    readOnlyAccess: { type: 'fullAccess' },
+    readOnlyAccess: codexReadOnlyAccess(requested?.readOnlyAccess ?? requested?.read_only_access),
   };
+}
+
+function sandboxPolicyMode(requested) {
+  if (typeof requested === 'string') {
+    return codexSandbox({ sandbox: requested });
+  }
+  if (requested && typeof requested === 'object') {
+    if (typeof requested.mode === 'string') {
+      return codexSandbox({ sandbox: requested.mode });
+    }
+    if (typeof requested.type === 'string') {
+      return codexSandbox({ sandbox: requested.type });
+    }
+  }
+  return 'workspaceWrite';
+}
+
+function sandboxPolicyWritableRoots(requested, workingDirectory, engine) {
+  const explicitRoots = Array.isArray(requested?.writableRoots) && requested.writableRoots.length > 0
+    ? requested.writableRoots
+    : Array.isArray(requested?.writable_roots) && requested.writable_roots.length > 0
+      ? requested.writable_roots
+      : Array.isArray(engine?.writable_roots) && engine.writable_roots.length > 0
+        ? engine.writable_roots
+        : [workingDirectory].filter(Boolean);
+  return explicitRoots.map((value) => String(value));
+}
+
+function sandboxPolicyNetworkAccess(requested, engine) {
+  if (typeof requested?.networkAccess === 'boolean') {
+    return requested.networkAccess;
+  }
+  if (typeof requested?.network_access === 'boolean') {
+    return requested.network_access;
+  }
+  return engine.network_access === false ? false : true;
+}
+
+function codexReadOnlyAccess(requested) {
+  const mode = normalizeReadOnlyAccessMode(requested);
+  return { mode };
+}
+
+function normalizeReadOnlyAccessMode(requested) {
+  const value = typeof requested === 'string'
+    ? requested
+    : requested && typeof requested === 'object'
+      ? requested.mode ?? requested.type
+      : undefined;
+  switch (value) {
+    case 'fullAccess':
+    case 'full-access':
+    case 'full_access':
+      return 'fullAccess';
+    default:
+      return 'fullAccess';
+  }
 }
 
 function inputEventsToCodexInput(events, session) {
@@ -575,7 +755,40 @@ function inputEventsToCodexInput(events, session) {
   if (items.length === 0) {
     items.push({ type: 'text', text: '' });
   }
-  return [...items, ...skillInputItemsForSession(session)];
+  return [...applyInlineSystemInstructions(items, session), ...skillInputItemsForSession(session)];
+}
+
+function applyInlineSystemInstructions(items, session) {
+  const systemInstructions = inlineSystemInstructions(session);
+  if (!systemInstructions) {
+    return items;
+  }
+  const nextItems = items.map((item) => ({ ...item }));
+  const firstTextIndex = nextItems.findIndex((item) => item?.type === 'text');
+  if (firstTextIndex === -1) {
+    nextItems.unshift({ type: 'text', text: formatInlineSystemInstructions(systemInstructions) });
+    return nextItems;
+  }
+  nextItems[firstTextIndex] = {
+    ...nextItems[firstTextIndex],
+    text: formatInlineSystemInstructions(systemInstructions, nextItems[firstTextIndex].text),
+  };
+  return nextItems;
+}
+
+function inlineSystemInstructions(session) {
+  if (codexSupportsDeveloperInstructions(session)) {
+    return '';
+  }
+  return typeof session?.agent?.system === 'string' ? session.agent.system.trim() : '';
+}
+
+function formatInlineSystemInstructions(systemInstructions, userInput = '') {
+  const normalizedInput = String(userInput ?? '').trim();
+  if (!normalizedInput) {
+    return `System instructions:\n${systemInstructions}`;
+  }
+  return `System instructions:\n${systemInstructions}\n\nUser input:\n${normalizedInput}`;
 }
 
 function userMessageText(content) {
@@ -825,30 +1038,210 @@ function buildTurnCompletedPayload(session, run, turn, modelRequestStartID, usag
   };
 }
 
+function buildCodexEventTerminalPayload(session, run, event, modelRequestStartID, usage) {
+  switch (event?.type) {
+    case 'task_complete': {
+      const completedUsage = codexEventUsage(event) ?? usage;
+      const agentMessage = codexEventAgentText(event);
+      return {
+        session_id: session.session_id,
+        run_id: run.run_id,
+        vendor_session_id: session.vendor_session_id,
+        usage_delta: buildUsageDelta(completedUsage),
+        events: [
+          ...(agentMessage ? [{ type: 'agent.message', content: [{ type: 'text', text: agentMessage }] }] : []),
+          buildModelRequestEndEvent(modelRequestStartID, completedUsage, false),
+          { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
+        ],
+      };
+    }
+    case 'error':
+    case 'turn_aborted': {
+      const message = codexEventErrorText(event) || `Codex ${String(event.type).replace(/_/g, ' ')}`;
+      const errorEvent = providerErrorEventForText(message) ?? sessionErrorEventForMessage(message, 'Codex run failed');
+      return {
+        session_id: session.session_id,
+        run_id: run.run_id,
+        vendor_session_id: session.vendor_session_id,
+        usage_delta: buildUsageDelta(codexEventUsage(event) ?? usage),
+        events: [
+          buildModelRequestEndEvent(modelRequestStartID, codexEventUsage(event) ?? usage, true),
+          errorEvent,
+          finalStatusEventForSessionError(errorEvent),
+        ],
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 function buildUsageDelta(usage) {
-  if (!usage || typeof usage !== 'object') {
+  const normalized = normalizeCodexTokenUsage(usage);
+  if (!normalized) {
     return undefined;
   }
   return {
-    input_tokens: numberValue(usage.inputTokens),
-    output_tokens: numberValue(usage.outputTokens),
-    cache_read_input_tokens: numberValue(usage.cachedInputTokens),
+    input_tokens: numberValue(normalized.inputTokens),
+    output_tokens: numberValue(normalized.outputTokens),
+    cache_read_input_tokens: numberValue(normalized.cachedInputTokens),
   };
 }
 
 function buildModelRequestEndEvent(modelRequestStartID, usage, isError) {
+  const normalized = normalizeCodexTokenUsage(usage);
   return {
     type: 'span.model_request_end',
     id: newEventID('span'),
     is_error: isError,
     model_request_start_id: modelRequestStartID,
     model_usage: {
-      input_tokens: numberValue(usage?.inputTokens),
-      output_tokens: numberValue(usage?.outputTokens),
+      input_tokens: numberValue(normalized?.inputTokens),
+      output_tokens: numberValue(normalized?.outputTokens),
       cache_creation_input_tokens: 0,
-      cache_read_input_tokens: numberValue(usage?.cachedInputTokens),
+      cache_read_input_tokens: numberValue(normalized?.cachedInputTokens),
     },
   };
+}
+
+function isCodexEventNotification(message) {
+  return typeof message?.method === 'string' && message.method.startsWith('codex/event/');
+}
+
+function codexEventFromNotification(message) {
+  const typeFromMethod = String(message?.method ?? '').replace(/^codex\/event\//, '');
+  const msg = message?.params?.msg;
+  if (msg && typeof msg === 'object') {
+    return { ...msg, type: String(msg.type ?? typeFromMethod) };
+  }
+  return { type: typeFromMethod };
+}
+
+function codexEventUsage(event) {
+  return normalizeCodexTokenUsage(
+    event?.total_token_usage
+    ?? event?.totalTokenUsage
+    ?? event?.token_usage
+    ?? event?.tokenUsage
+    ?? event?.usage,
+  );
+}
+
+function codexEventErrorText(event) {
+  const message = firstNonEmptyString(
+    event?.message,
+    event?.error?.message,
+    event?.cause?.message,
+  );
+  if (message) {
+    return message;
+  }
+  if (event?.error && typeof event.error === 'object') {
+    return JSON.stringify(event.error);
+  }
+  return '';
+}
+
+function normalizeCodexTokenUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return null;
+  }
+  return {
+    inputTokens: numberValue(usage.inputTokens ?? usage.input_tokens),
+    outputTokens: numberValue(usage.outputTokens ?? usage.output_tokens),
+    cachedInputTokens: numberValue(usage.cachedInputTokens ?? usage.cached_input_tokens),
+  };
+}
+
+function codexEventAgentText(event) {
+  if (!event || typeof event !== 'object') {
+    return '';
+  }
+  switch (event.type) {
+    case 'agent_message':
+      return codexEventText(event.message ?? event.content ?? event);
+    case 'task_complete':
+      return codexEventText(
+        codexEventField(event, 'last_agent_message')
+        ?? codexEventField(event, 'agent_message')
+        ?? codexEventField(event, 'message')
+        ?? codexEventField(event, 'content'),
+      );
+    case 'item_completed':
+    case 'raw_response_item':
+      return codexEventText(codexAgentMessageValue(event.item ?? event.response_item ?? event.raw_response_item));
+    default:
+      return '';
+  }
+}
+
+function codexEventText(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const lines = value.map((item) => codexEventText(item)).filter(Boolean);
+    return lines.join('\n');
+  }
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+  for (const key of ['text', 'message', 'content', 'delta', 'last_agent_message', 'agent_message', 'assistant_message', 'output_text', 'input_text']) {
+    const field = codexEventField(value, key);
+    if (field !== undefined) {
+      const text = codexEventText(field);
+      if (text) {
+        return text;
+      }
+    }
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    return codexEventText(entries[0][1]);
+  }
+  return '';
+}
+
+function codexAgentMessageValue(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const type = normalizeCodexEventKey(codexEventField(value, 'type'));
+  const role = normalizeCodexEventKey(codexEventField(value, 'role'));
+  if (type === 'agentmessage' || type === 'assistantmessage' || role === 'assistant') {
+    return value;
+  }
+  for (const key of ['agent_message', 'assistant_message']) {
+    const field = codexEventField(value, key);
+    if (field !== undefined) {
+      return field;
+    }
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 1) {
+    return entries[0][1];
+  }
+  return null;
+}
+
+function codexEventField(value, key) {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const target = normalizeCodexEventKey(key);
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (normalizeCodexEventKey(entryKey) === target) {
+      return entryValue;
+    }
+  }
+  return undefined;
+}
+
+function normalizeCodexEventKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
 }
 
 function toolResultContent(content) {
@@ -943,6 +1336,85 @@ function rememberToolUse(runtime, sessionID, itemID, actionID) {
 
 function toolUseIDForItem(runtime, sessionID, itemID) {
   return runtime.emittedToolUses.get(`${sessionID}:items`)?.get(String(itemID ?? '')) ?? String(itemID ?? newEventID('toolu'));
+}
+
+export function codexModelProviderForEngine(engine = {}) {
+  const explicitProvider = firstNonEmptyString(engine.model_provider);
+  if (explicitProvider) {
+    return explicitProvider;
+  }
+  const openAIBaseURL = firstNonEmptyString(engine.openai_base_url);
+  if (isMiniMaxBaseURL(openAIBaseURL)) {
+    return 'minimax';
+  }
+  return '';
+}
+
+function codexSupportsDeveloperInstructions(session) {
+  return codexModelProviderForEngine(session?.engine ?? {}) !== 'minimax';
+}
+
+function ensureCodexProviderConfig(env, engine) {
+  const provider = codexModelProviderForEngine(engine);
+  if (!provider || provider === 'openai') {
+    return;
+  }
+  if (provider === 'minimax') {
+    if (!env.MINIMAX_API_KEY && env.MINIMAX_TOKEN) {
+      env.MINIMAX_API_KEY = env.MINIMAX_TOKEN;
+    }
+    delete env.OPENAI_API_KEY;
+    delete env.OPENAI_BASE_URL;
+    delete env.CODEX_API_KEY;
+  }
+  const configPath = path.join(env.CODEX_HOME, 'config.toml');
+  fs.writeFileSync(configPath, codexProviderConfigToml(provider, engine, env), 'utf8');
+}
+
+function codexProviderConfigToml(provider, engine, env) {
+  switch (provider) {
+    case 'minimax':
+      return [
+        `[model_providers.${provider}]`,
+        `name = ${tomlString('MiniMax Chat Completions API')}`,
+        `base_url = ${tomlString(firstNonEmptyString(engine.openai_base_url, env.CODEX_PROVIDER_BASE_URL, 'https://api.minimax.io/v1'))}`,
+        `env_key = ${tomlString(firstNonEmptyString(env.CODEX_PROVIDER_ENV_KEY, 'MINIMAX_API_KEY'))}`,
+        `wire_api = ${tomlString(firstNonEmptyString(env.CODEX_PROVIDER_WIRE_API, 'chat'))}`,
+        `requires_openai_auth = ${tomlBoolean(firstNonEmptyString(env.CODEX_PROVIDER_REQUIRES_OPENAI_AUTH, 'false'))}`,
+        `request_max_retries = ${tomlInteger(env.CODEX_PROVIDER_REQUEST_MAX_RETRIES, 4)}`,
+        `stream_max_retries = ${tomlInteger(env.CODEX_PROVIDER_STREAM_MAX_RETRIES, 10)}`,
+        `stream_idle_timeout_ms = ${tomlInteger(env.CODEX_PROVIDER_STREAM_IDLE_TIMEOUT_MS, 300000)}`,
+        '',
+      ].join('\n');
+    default:
+      return '';
+  }
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function tomlBoolean(value) {
+  return /^true$/i.test(String(value ?? '').trim()) ? 'true' : 'false';
+}
+
+function tomlInteger(value, fallback) {
+  const numeric = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(numeric) ? String(numeric) : String(fallback);
+}
+
+function isMiniMaxBaseURL(value) {
+  const baseURL = String(value ?? '').trim();
+  if (!baseURL) {
+    return false;
+  }
+  try {
+    const parsedURL = new URL(baseURL);
+    return parsedURL.hostname === 'api.minimax.io' || parsedURL.hostname === 'api.minimaxi.com';
+  } catch {
+    return false;
+  }
 }
 
 function asStruct(value) {

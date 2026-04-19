@@ -76,3 +76,68 @@ test('environments support cloud config, package updates, list, archive, and del
   assert.equal(deleted.id, deletable.id);
   assert.equal(deleted.type, 'environment_deleted');
 });
+
+test('environments preserve defaults and support partial clears through the SDK', { skip: skipReason }, async (t) => {
+  const client = sdkClient();
+  const runID = suffix();
+  const cleanup = createCleanup();
+  t.after(() => cleanup.run());
+
+  const environment = await client.beta.environments.create({
+    name: `sdk-compat-env-defaults-${runID}`,
+    description: 'Temporary description',
+    metadata: {
+      e2e: 'sdk-compat',
+      remove_me: 'delete',
+      keep_me: 'original',
+      run: runID,
+    },
+  });
+  cleanup.add(() => client.beta.environments.delete(environment.id));
+
+  assert.equal(environment.config.type, 'cloud');
+  assert.equal(environment.config.networking.type, 'unrestricted');
+  assert.deepEqual(environment.config.packages.pip, []);
+  assert.deepEqual(environment.config.packages.npm, []);
+
+  const limited = await client.beta.environments.update(environment.id, {
+    config: {
+      type: 'cloud',
+      networking: {
+        type: 'limited',
+        allowed_hosts: ['api.example.com'],
+      },
+      packages: {
+        pip: ['pytest==8.3.4'],
+        npm: ['tsx@latest'],
+      },
+    },
+  });
+  assert.equal(limited.config.networking.type, 'limited');
+  assert.deepEqual(limited.config.networking.allowed_hosts, ['api.example.com']);
+  assert.equal(limited.config.networking.allow_mcp_servers, false);
+  assert.equal(limited.config.networking.allow_package_managers, false);
+  assert.deepEqual(limited.config.packages.pip, ['pytest==8.3.4']);
+
+  const cleared = await client.beta.environments.update(environment.id, {
+    description: '',
+    metadata: {
+      remove_me: null,
+      keep_me: 'updated',
+    },
+    config: {
+      type: 'cloud',
+      networking: { type: 'unrestricted' },
+      packages: {
+        pip: [],
+        npm: [],
+      },
+    },
+  });
+  assert.equal(cleared.description, '');
+  assert.equal(cleared.metadata.keep_me, 'updated');
+  assert.equal(cleared.metadata.remove_me, undefined);
+  assert.equal(cleared.config.networking.type, 'unrestricted');
+  assert.deepEqual(cleared.config.packages.pip, []);
+  assert.deepEqual(cleared.config.packages.npm, []);
+});

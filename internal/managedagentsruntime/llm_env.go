@@ -13,6 +13,7 @@ type managedLLMCredential struct {
 	CredentialID string
 	Token        string
 	BaseURL      string
+	Provider     string
 }
 
 const (
@@ -41,12 +42,25 @@ func applyManagedLLMEnv(vendor string, engine map[string]any, vaults []managedVa
 				return nil, nil, err
 			}
 		}
+		resolvedProvider := managedCodexProviderForBaseURL(resolvedBaseURL)
+		if existingProvider := normalizeManagedRuntimeMetadataValue(stringValue(out["model_provider"])); existingProvider != "" && existingProvider != resolvedProvider {
+			return nil, nil, fmt.Errorf("managed-agent llm credential %s provider %q conflicts with engine model_provider %q", credential.CredentialID, resolvedProvider, existingProvider)
+		}
 		out["openai_base_url"] = resolvedBaseURL
-		env["CODEX_API_KEY"] = managedCodexFakeAPIKey
-		env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
-		out["env"] = env
 		credentialCopy := *credential
 		credentialCopy.BaseURL = resolvedBaseURL
+		credentialCopy.Provider = resolvedProvider
+		if resolvedProvider == "minimax" {
+			out["model_provider"] = resolvedProvider
+			env["MINIMAX_API_KEY"] = managedCodexFakeAPIKey
+			delete(env, "MINIMAX_TOKEN")
+			delete(env, "CODEX_API_KEY")
+			delete(env, "OPENAI_API_KEY")
+		} else {
+			env["CODEX_API_KEY"] = managedCodexFakeAPIKey
+			env["OPENAI_API_KEY"] = managedCodexFakeAPIKey
+		}
+		out["env"] = env
 		return out, &credentialCopy, nil
 	}
 	if existingBaseURL := strings.TrimSpace(stringValue(env["ANTHROPIC_BASE_URL"])); existingBaseURL != "" {
@@ -182,4 +196,24 @@ func canonicalManagedRuntimeURL(raw string) (string, error) {
 		parsedURL.Path = ""
 	}
 	return strings.TrimRight(parsedURL.String(), "/"), nil
+}
+
+func managedCodexProviderForBaseURL(baseURL string) string {
+	if isManagedMinimaxBaseURL(baseURL) {
+		return "minimax"
+	}
+	return "openai"
+}
+
+func isManagedMinimaxBaseURL(baseURL string) bool {
+	parsedURL, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parsedURL.Hostname())) {
+	case "api.minimax.io", "api.minimaxi.com":
+		return true
+	default:
+		return false
+	}
 }

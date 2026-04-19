@@ -10,6 +10,7 @@ CHART_DIR ?= ./chart
 IMAGE_REPOSITORY ?= sandbox0ai/managed-agents
 GATEWAY_TAG ?= gateway-testenv
 WRAPPER_TAG ?= wrapper-testenv
+WRAPPER_BASE_TAG ?= wrapper-base-$(WRAPPER_TAG)
 FAKE_WRAPPER_IMAGE ?= managed-agents/fake-wrapper:e2e
 SDK_GO_DIR ?= ../sdk-go
 
@@ -34,9 +35,9 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
 	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated test-unit test-integration test-wrapper test-e2e test-sdk-compat docker-build-gateway docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+.PHONY: verify verify-format verify-tidy generate verify-generated verify-sdk-compat-coverage test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
-verify: verify-format verify-tidy verify-generated test-unit test-wrapper helm-lint helm-template
+verify: verify-format verify-tidy verify-generated verify-sdk-compat-coverage test-unit test-wrapper helm-lint helm-template
 
 verify-format:
 	@files="$$(git ls-files '*.go')"; \
@@ -67,6 +68,9 @@ verify-generated:
 	$(MAKE) generate; \
 	git diff --exit-code -- internal/apicontract/generated
 
+verify-sdk-compat-coverage:
+	cd tests/sdk-compat && $(NPM) ci && $(NPM) run coverage:check
+
 test-unit:
 	@packages="$$( $(GO) list ./... | grep -v '/tests/e2e$$' )"; \
 	GOTOOLCHAIN=go1.25.0+auto $(GO) test -race -count=1 $$packages
@@ -84,6 +88,9 @@ test-e2e:
 test-sdk-compat:
 	cd tests/sdk-compat && $(NPM) ci && $(NPM) test
 
+test-live-engines:
+	cd tests/live-engines && $(NPM) ci && $(NPM) test
+
 docker-build-gateway:
 	@test -f "$(SDK_GO_DIR)/go.mod" || { echo "SDK_GO_DIR must point to sdk-go checkout"; exit 1; }
 	DOCKER_BUILDKIT=1 $(DOCKER) buildx build --load \
@@ -92,9 +99,17 @@ docker-build-gateway:
 		--build-context sdk-go=$(SDK_GO_DIR) \
 		.
 
+docker-build-wrapper-base:
+	DOCKER_BUILDKIT=1 $(DOCKER) build \
+		-t $(IMAGE_REPOSITORY):$(WRAPPER_BASE_TAG) \
+		-f agent-wrapper/Dockerfile.base \
+		agent-wrapper
+
 docker-build-wrapper:
-	DOCKER_BUILDKIT=1 $(DOCKER) buildx build --load \
+	$(MAKE) docker-build-wrapper-base
+	DOCKER_BUILDKIT=1 $(DOCKER) build \
 		-t $(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
+		--build-arg WRAPPER_BASE_IMAGE=$(IMAGE_REPOSITORY):$(WRAPPER_BASE_TAG) \
 		-f agent-wrapper/Dockerfile.wrapper \
 		agent-wrapper
 

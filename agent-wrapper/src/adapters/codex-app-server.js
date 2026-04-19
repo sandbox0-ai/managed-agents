@@ -5,7 +5,7 @@ import readline from 'node:readline';
 export class CodexAppServerClient extends EventEmitter {
   constructor({
     command = process.env.CODEX_EXECUTABLE ?? 'codex',
-    args = ['app-server', '--listen', 'stdio://'],
+    args = ['app-server'],
     cwd = process.cwd(),
     env = process.env,
     requestTimeoutMs = 120000,

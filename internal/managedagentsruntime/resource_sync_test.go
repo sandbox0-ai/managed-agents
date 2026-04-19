@@ -435,6 +435,9 @@ func TestApplyManagedLLMEnvInjectsCodexCredential(t *testing.T) {
 	if got := stringValue(env["OPENAI_API_KEY"]); got != managedCodexFakeAPIKey {
 		t.Fatalf("OPENAI_API_KEY = %q, want fake key", got)
 	}
+	if got := stringValue(engine["model_provider"]); got != "" {
+		t.Fatalf("model_provider = %q, want empty", got)
+	}
 	if got := stringValue(engine["openai_base_url"]); got != "https://api.openai.com/v1" {
 		t.Fatalf("openai_base_url = %q, want OpenAI base URL", got)
 	}
@@ -455,6 +458,53 @@ func TestApplyManagedLLMEnvDefaultsCodexBaseURL(t *testing.T) {
 	}
 	if got := stringValue(engine["openai_base_url"]); got != managedOpenAIDefaultBaseURL {
 		t.Fatalf("openai_base_url = %q, want default OpenAI URL", got)
+	}
+}
+
+func TestApplyManagedLLMEnvUsesVaultBackedMiniMaxCodexCredential(t *testing.T) {
+	engine, credential, err := applyManagedLLMEnv("codex", map[string]any{
+		"env": map[string]any{
+			"MINIMAX_API_KEY": "direct-minimax-key",
+			"MINIMAX_TOKEN":   "direct-minimax-token",
+			"CODEX_API_KEY":   "direct-codex-key",
+			"OPENAI_API_KEY":  "direct-openai-key",
+		},
+	}, testLLMVaultCredentialsForEngineWithBaseURL(gatewaymanagedagents.ManagedAgentsEngineCodex, "https://api.minimax.io/v1",
+		testLLMStaticBearerCredential("vcrd_123", "secret-token"),
+	))
+	if err != nil {
+		t.Fatalf("applyManagedLLMEnv: %v", err)
+	}
+	if credential == nil {
+		t.Fatal("expected managed llm credential")
+	}
+	env := mapValue(engine["env"])
+	if got := stringValue(env["MINIMAX_API_KEY"]); got != managedCodexFakeAPIKey {
+		t.Fatalf("MINIMAX_API_KEY = %q, want fake sandbox key", got)
+	}
+	if got := stringValue(env["MINIMAX_TOKEN"]); got != "" {
+		t.Fatalf("MINIMAX_TOKEN = %q, want empty", got)
+	}
+	if got := stringValue(env["CODEX_API_KEY"]); got != "" {
+		t.Fatalf("CODEX_API_KEY = %q, want empty for MiniMax provider", got)
+	}
+	if got := stringValue(env["OPENAI_API_KEY"]); got != "" {
+		t.Fatalf("OPENAI_API_KEY = %q, want empty for MiniMax provider", got)
+	}
+	if got := stringValue(engine["model_provider"]); got != "minimax" {
+		t.Fatalf("model_provider = %q, want minimax", got)
+	}
+	if got := stringValue(engine["openai_base_url"]); got != "https://api.minimax.io/v1" {
+		t.Fatalf("openai_base_url = %q, want MiniMax base URL", got)
+	}
+	if credential.BaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("credential base URL = %q, want MiniMax base URL", credential.BaseURL)
+	}
+	if credential.Provider != "minimax" {
+		t.Fatalf("credential provider = %q, want minimax", credential.Provider)
+	}
+	if credential.Token != "secret-token" {
+		t.Fatalf("credential token = %q, want original vault token", credential.Token)
 	}
 }
 
@@ -517,6 +567,26 @@ func TestManagedLLMCredentialBindingAllowsVaultBaseURLDomain(t *testing.T) {
 	egress, ok := merged.Egress.Get()
 	if !ok || !containsString(egress.AllowedDomains, "llm.proxy.example.com") {
 		t.Fatalf("allowed domains = %#v, want vault LLM host", egress.AllowedDomains)
+	}
+}
+
+func TestManagedLLMCredentialBindingUsesMiniMaxVaultToken(t *testing.T) {
+	binding, err := managedLLMCredentialBinding("sesn_123", "codex", &managedLLMCredential{
+		CredentialID: "vcrd_123",
+		Token:        "secret-token",
+		BaseURL:      "https://API.MINIMAX.IO/v1",
+	})
+	if err != nil {
+		t.Fatalf("managedLLMCredentialBinding: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected binding")
+	}
+	if len(binding.domains) != 1 || binding.domains[0] != "api.minimax.io" {
+		t.Fatalf("binding domains = %#v, want api.minimax.io", binding.domains)
+	}
+	if binding.secretValues["x_api_key"] != "secret-token" || binding.secretValues["authorization"] != "Bearer secret-token" {
+		t.Fatalf("binding secrets = %#v", binding.secretValues)
 	}
 }
 
