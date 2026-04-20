@@ -13,6 +13,7 @@ import {
   claudeToolsForSession,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
+  promptWithAttachedSkillInventory,
   providerErrorEventForText,
   querySkillNames,
   resolveToolPolicy,
@@ -225,6 +226,7 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
 
   assert.equal(typeof sdkCall.prompt?.[Symbol.asyncIterator], 'function');
   assert.equal(sdkCall.options.agent, 'managed-agent');
+  assert.match(sdkCall.options.agents['managed-agent'].prompt, /Managed Agents attached skills/);
   assert.deepEqual(sdkCall.options.agents['managed-agent'].skills, ['workspace-map', 'regression-check']);
   assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
   assert.deepEqual(sdkCall.options.settingSources, ['local', 'project']);
@@ -902,11 +904,30 @@ test('claudeAgentContextOptions preloads skills through the main agent definitio
     agents: {
       'managed-agent': {
         description: 'Primary Sandbox0 Managed Agents coding session.',
-        prompt: 'Use attached skills.',
+        prompt: [
+          'Use attached skills.',
+          '',
+          'Managed Agents attached skills for this session:',
+          '- workspace-map',
+          '- regression-check',
+          'When the user asks what skills are available in this Managed Agents session, count and name only the attached skills above unless they explicitly ask for built-in runtime skills.',
+        ].join('\n'),
         skills: ['workspace-map', 'regression-check'],
       },
     },
   });
+});
+
+test('promptWithAttachedSkillInventory makes attached skills visible without tool calls', () => {
+  assert.equal(promptWithAttachedSkillInventory('Base prompt.', ['alpha', ' beta\nname ', '']), [
+    'Base prompt.',
+    '',
+    'Managed Agents attached skills for this session:',
+    '- alpha',
+    '- beta name',
+    'When the user asks what skills are available in this Managed Agents session, count and name only the attached skills above unless they explicitly ask for built-in runtime skills.',
+  ].join('\n'));
+  assert.equal(promptWithAttachedSkillInventory('Base prompt.', []), 'Base prompt.');
 });
 
 test('claudeAgentContextOptions keeps systemPrompt when no skills are attached', () => {

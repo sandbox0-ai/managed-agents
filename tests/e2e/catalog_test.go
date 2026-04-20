@@ -92,6 +92,30 @@ func createAgent(t *testing.T, client *apiClient, suffix string) map[string]any 
 	return resp
 }
 
+func createAgentWithSkills(t *testing.T, client *apiClient, suffix string, skills []map[string]any) map[string]any {
+	t.Helper()
+	body := map[string]any{
+		"name":   fmt.Sprintf("e2e-agent-%s", suffix),
+		"model":  map[string]any{"id": "claude-sonnet-4-20250514"},
+		"system": "Use attached skills when they match the request.",
+		"tools": []map[string]any{{
+			"type": "agent_toolset_20260401",
+			"default_config": map[string]any{
+				"enabled":           true,
+				"permission_policy": map[string]any{"type": "always_allow"},
+			},
+		}},
+		"skills":   skills,
+		"metadata": map[string]string{"e2e": "managed-agents"},
+	}
+	resp, status, err := client.post(t.Context(), "/v1/agents", body)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("create agent with skills status=%d err=%v", status, err)
+	}
+	requireString(t, resp, "id")
+	return resp
+}
+
 func createLLMVault(t *testing.T, client *apiClient, suffix string) map[string]any {
 	t.Helper()
 	body := map[string]any{
