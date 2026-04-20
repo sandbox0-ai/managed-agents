@@ -1,12 +1,9 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
 import { logInfo, logWarn, summarizePendingActions } from '../lib/log.js';
-import { startOperation } from '../lib/observability.js';
-import { ClaudeStateMirror, claudeMirrorDir } from './claude-state-mirror.js';
 import {
   AgentRuntime,
   agentWrapperStateDir,
@@ -20,7 +17,6 @@ import {
 const MAIN_AGENT_NAME = 'managed-agent';
 const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
 const DEFAULT_MAIN_AGENT_PROMPT = 'You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.';
-const DEFAULT_LOCAL_CLAUDE_STATE_ROOT = path.join(os.tmpdir(), 'sandbox0', 'agent-wrapper');
 
 export {
   finalStatusEventForSessionError,
@@ -33,19 +29,10 @@ export {
 export function runtimeEnvForClaudeEngine(engine) {
   const env = runtimeEnvForEngine(engine);
   if (!env.CLAUDE_CONFIG_DIR) {
-    const localStateRoot = env.AGENT_WRAPPER_LOCAL_STATE_DIR || DEFAULT_LOCAL_CLAUDE_STATE_ROOT;
-    env.CLAUDE_CONFIG_DIR = path.join(localStateRoot, 'claude');
+    env.CLAUDE_CONFIG_DIR = path.join(agentWrapperStateDir(env), 'claude');
   }
   fs.mkdirSync(env.CLAUDE_CONFIG_DIR, { recursive: true });
   return env;
-}
-
-export function claudeStatePathsForSession(session) {
-  const env = runtimeEnvForClaudeEngine(session?.engine ?? {});
-  return {
-    localDir: env.CLAUDE_CONFIG_DIR,
-    mirrorDir: claudeMirrorDir(env, agentWrapperStateDir(env)),
-  };
 }
 
 export function querySkillNames(session) {
@@ -164,23 +151,17 @@ export function allowToolUseDecision(input, toolUseID) {
 }
 
 export class ClaudeRuntime extends AgentRuntime {
-  constructor({ queryFn = query, stateMirror = new ClaudeStateMirror() } = {}) {
+  constructor({ queryFn = query } = {}) {
     super('claude');
     this.queryFn = queryFn;
-    this.stateMirror = stateMirror;
     this.sessions = new Map();
     this.activeRuns = new Map();
     this.pendingActions = new Map();
     this.emittedToolUses = new Map();
     this.deferredRunErrors = new Map();
-    this.hydratedMirrorKeys = new Set();
-    this.dirtyMirrorPaths = new Map();
-    this.flushPromise = null;
   }
 
   async prestartSession(session, sessionStore) {
-    await this.#hydrateClaudeState(session);
-    await this.#waitForPendingClaudeStateFlush({ source: 'prestart', session });
     let sessionRuntime;
     try {
       sessionRuntime = this.#runtimeForSession(session);
@@ -194,10 +175,7 @@ export class ClaudeRuntime extends AgentRuntime {
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
-    await this.#hydrateClaudeState(session);
-    await this.#waitForPendingClaudeStateFlush({ source: 'run', session, run });
     const sessionRuntime = this.#runtimeForSession(session);
-    this.#markClaudeStateDirty(session);
     return this.#startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore);
   }
 
@@ -214,10 +192,6 @@ export class ClaudeRuntime extends AgentRuntime {
     this.#closeSessionRuntime(sessionID);
     this.pendingActions.delete(sessionID);
     this.emittedToolUses.delete(sessionID);
-    if (session) {
-      this.#markClaudeStateDirty(session);
-      await this.#flushDirtyClaudeStateIfIdle({ reason: 'delete_session', session });
-    }
   }
 
   async #startResidentRun(sessionRuntime, session, run, callbackClient, sessionStore) {
@@ -431,13 +405,7 @@ export class ClaudeRuntime extends AgentRuntime {
     this.activeRuns.delete(activeRun.run.run_id);
     rememberCompletedRunID(sessionRuntime, activeRun.run.run_id);
     sessionRuntime.activeRun = null;
-    this.#markClaudeStateDirty(activeRun.session);
     activeRun.resolve();
-    this.#scheduleDirtyClaudeStateFlush({
-      reason: 'run_complete',
-      session: activeRun.session,
-      run: activeRun.run,
-    });
   }
 
   #runtimeForSession(session) {
@@ -481,144 +449,6 @@ export class ClaudeRuntime extends AgentRuntime {
       sessionRuntime.activeRun.resolve();
     }
     this.sessions.delete(sessionID);
-  }
-
-  async #hydrateClaudeState(session) {
-    const paths = claudeStatePathsForSession(session);
-    const mirrorKey = mirrorKeyForPaths(paths);
-    if (!mirrorKey || this.hydratedMirrorKeys.has(mirrorKey) || this.activeRuns.size > 0) {
-      return;
-    }
-    try {
-      await this.stateMirror.hydrate(paths);
-    } catch (error) {
-      logWarn('claude state hydrate failed', {
-        session_id: session?.session_id ?? null,
-        local_dir: paths.localDir,
-        mirror_dir: paths.mirrorDir,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      this.hydratedMirrorKeys.add(mirrorKey);
-    }
-  }
-
-  #markClaudeStateDirty(session) {
-    const paths = claudeStatePathsForSession(session);
-    const mirrorKey = mirrorKeyForPaths(paths);
-    if (!mirrorKey) {
-      return;
-    }
-    this.dirtyMirrorPaths.set(mirrorKey, paths);
-  }
-
-  async #waitForPendingClaudeStateFlush({ source, session, run } = {}) {
-    let waited = false;
-    const waitStartedAtMs = Date.now();
-    while (this.flushPromise) {
-      waited = true;
-      try {
-        await this.flushPromise;
-      } catch {
-        // Preserve existing retry-on-next-idle behavior without failing the caller here.
-      }
-    }
-    if (waited) {
-      logInfo('claude state flush wait completed', {
-        session_id: session?.session_id ?? null,
-        run_id: run?.run_id ?? null,
-        source: source ?? null,
-        elapsed_ms: elapsedMsSince(waitStartedAtMs),
-      });
-    }
-  }
-
-  #scheduleDirtyClaudeStateFlush(fields = {}) {
-    const flushPromise = this.#startDirtyClaudeStateFlush(fields);
-    if (!flushPromise) {
-      return;
-    }
-    flushPromise.catch((error) => {
-      logWarn('claude state flush worker failed', {
-        session_id: fields.session?.session_id ?? null,
-        run_id: fields.run?.run_id ?? null,
-        reason: fields.reason ?? null,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }
-
-  async #flushDirtyClaudeStateIfIdle(fields = {}) {
-    const flushPromise = this.#startDirtyClaudeStateFlush(fields);
-    if (flushPromise) {
-      await flushPromise;
-    }
-  }
-
-  #startDirtyClaudeStateFlush(fields = {}) {
-    if (this.flushPromise) {
-      return this.flushPromise;
-    }
-    if (this.activeRuns.size > 0 || this.dirtyMirrorPaths.size === 0) {
-      return null;
-    }
-    const pending = [...this.dirtyMirrorPaths.entries()];
-    this.dirtyMirrorPaths.clear();
-    const flushPromise = this.#flushDirtyMirrorPaths(pending, fields).finally(() => {
-      if (this.flushPromise === flushPromise) {
-        this.flushPromise = null;
-      }
-      if (this.activeRuns.size === 0 && this.dirtyMirrorPaths.size > 0) {
-        this.#scheduleDirtyClaudeStateFlush(fields);
-      }
-    });
-    this.flushPromise = flushPromise;
-    return flushPromise;
-  }
-
-  async #flushDirtyMirrorPaths(pending, fields = {}) {
-    const flushOp = startOperation('wrapper_claude_state_flush', {
-      session_id: fields.session?.session_id ?? null,
-      run_id: fields.run?.run_id ?? null,
-      reason: fields.reason ?? null,
-      mirror_count: pending.length,
-    });
-    try {
-      for (const [mirrorKey, paths] of pending) {
-        const flushStartedAtMs = Date.now();
-        const phaseFields = {
-          mirror_key: mirrorKey,
-          local_dir: paths.localDir,
-          mirror_dir: paths.mirrorDir,
-        };
-        try {
-          const result = await this.stateMirror.flush(paths);
-          flushOp.addFields({ generation: result?.generation ?? null });
-          logInfo('claude state flush completed', {
-            ...phaseFields,
-            session_id: fields.session?.session_id ?? null,
-            run_id: fields.run?.run_id ?? null,
-            reason: fields.reason ?? null,
-            duration_ms: elapsedMsSince(flushStartedAtMs),
-            generation: result?.generation ?? null,
-          });
-        } catch (error) {
-          this.dirtyMirrorPaths.set(mirrorKey, paths);
-          logWarn('claude state flush failed', {
-            ...phaseFields,
-            session_id: fields.session?.session_id ?? null,
-            run_id: fields.run?.run_id ?? null,
-            reason: fields.reason ?? null,
-            duration_ms: elapsedMsSince(flushStartedAtMs),
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      flushOp.end();
-    } catch (error) {
-      flushOp.end(error);
-      throw error;
-    }
   }
 
   resolveActions(sessionID, events, sessionStore) {
@@ -1205,12 +1035,6 @@ function residentSessionSignature(session) {
     skill_names: session?.skill_names,
     engine: session?.engine,
   });
-}
-
-function mirrorKeyForPaths(paths) {
-  const localDir = String(paths?.localDir ?? '').trim();
-  const mirrorDir = String(paths?.mirrorDir ?? '').trim();
-  return localDir && mirrorDir ? `${localDir}\u0000${mirrorDir}` : null;
 }
 
 function isConfigChangeDuringActiveRunError(error) {
