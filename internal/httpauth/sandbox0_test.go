@@ -86,7 +86,7 @@ func TestSandbox0AuthenticatorAPIKeyUsesSDKIntrospection(t *testing.T) {
 		switch r.URL.Path {
 		case "/api-keys/current":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","created_by":"","type":"secret","roles":["sandbox:create"],"permissions":["sandbox:create"],"is_active":true,"expires_at":"2026-01-01T00:00:00Z"}}}`))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","created_by":"","scope":"team","roles":["sandbox:create"],"permissions":["sandbox:create"],"is_active":true,"expires_at":"2027-01-01T00:00:00Z"}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -212,7 +212,7 @@ func TestSandbox0AuthenticatorMiddlewareRejectsAPIKeyTeamMismatch(t *testing.T) 
 		switch r.URL.Path {
 		case "/api-keys/current":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","created_by":"","type":"secret","roles":["sandbox:create"],"permissions":["sandbox:create"],"is_active":true,"expires_at":"2026-01-01T00:00:00Z"}}}`))
+			_, _ = w.Write([]byte(`{"success":true,"data":{"api_key":{"id":"key_123","team_id":"team_123","created_by":"","scope":"team","roles":["sandbox:create"],"permissions":["sandbox:create"],"is_active":true,"expires_at":"2027-01-01T00:00:00Z"}}}`))
 		default:
 			http.NotFound(w, r)
 		}
