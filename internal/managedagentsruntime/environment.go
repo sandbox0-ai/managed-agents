@@ -1,8 +1,6 @@
 package managedagentsruntime
 
 import (
-	"encoding/json"
-	"fmt"
 	"net"
 	"net/url"
 	"sort"
@@ -21,7 +19,7 @@ var packageManagerDomains = map[string][]string{
 	"pip":   {"pypi.org", "files.pythonhosted.org"},
 }
 
-func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewaymanagedagents.Environment) (*apispec.TemplateCreateRequest, error) {
+func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewaymanagedagents.Environment) (*managedTemplateRequest, error) {
 	if m.templateRequest == nil {
 		return nil, nil
 	}
@@ -30,21 +28,6 @@ func (m *SDKRuntimeManager) templateRequestForEnvironment(environment *gatewayma
 		return nil, err
 	}
 	return request, nil
-}
-
-func cloneTemplateRequest(request *apispec.TemplateCreateRequest) (*apispec.TemplateCreateRequest, error) {
-	if request == nil {
-		return nil, nil
-	}
-	encoded, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("marshal template request: %w", err)
-	}
-	var cloned apispec.TemplateCreateRequest
-	if err := json.Unmarshal(encoded, &cloned); err != nil {
-		return nil, fmt.Errorf("clone template request: %w", err)
-	}
-	return &cloned, nil
 }
 
 func runtimeNetworkPolicy(environment *gatewaymanagedagents.Environment, engine map[string]any, agent map[string]any) apispec.SandboxNetworkPolicy {

@@ -20,7 +20,7 @@ type environmentBuildResources struct {
 
 const environmentBuildCleanupTimeout = 2 * time.Minute
 
-func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
 	if err != nil {
 		return nil, err
@@ -169,7 +169,7 @@ func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context,
 	return artifact, nil
 }
 
-func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
+func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
 	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_ready", "",
 		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
 		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
@@ -232,7 +232,7 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 	}
 }
 
-func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (built *gatewaymanagedagents.EnvironmentArtifact, err error) {
+func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (built *gatewaymanagedagents.EnvironmentArtifact, err error) {
 	_ = credential
 	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_build", "",
 		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
@@ -315,7 +315,7 @@ func environmentArtifactIDForLog(artifact *gatewaymanagedagents.EnvironmentArtif
 	return artifact.ID
 }
 
-func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *apispec.TemplateCreateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
+func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
 	steps := environmentBuildSteps(environment)
 	if len(steps) == 0 {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "no environment packages requested; no package volumes created\n", nil

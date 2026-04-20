@@ -65,6 +65,20 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if request.Spec.ClusterId.IsSet() {
 		t.Fatalf("ClusterId should be unset, got %#v", request.Spec.ClusterId)
 	}
+	volumeMounts, ok := request.specBody()["volumeMounts"].([]any)
+	if !ok {
+		t.Fatal("volumeMounts missing from raw template spec")
+	}
+	if len(volumeMounts) != 7 {
+		t.Fatalf("volumeMounts length = %d, want 7", len(volumeMounts))
+	}
+	firstMount, ok := volumeMounts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("volumeMounts[0] = %#v, want object", volumeMounts[0])
+	}
+	if firstMount["name"] != "workspace" || firstMount["mountPath"] != "/workspace" {
+		t.Fatalf("volumeMounts[0] = %#v, want workspace mount", firstMount)
+	}
 }
 
 func TestEnsureManagedTemplateCreatesWhenMissing(t *testing.T) {
@@ -99,17 +113,17 @@ func TestEnsureManagedTemplateUpdatesOnDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSDKRuntimeManager returned error: %v", err)
 	}
-	request := *mgr.templateRequest
-	existing := &apispec.Template{TemplateID: request.TemplateID, Spec: request.Spec}
-	existing.Spec.DisplayName = apispec.NewOptString("stale")
-	client := &fakeTemplateClient{getTemplate: existing}
+	request := mgr.templateRequest
+	existingSpec := request.specBody()
+	existingSpec["displayName"] = "stale"
+	client := &fakeTemplateClient{getSpec: existingSpec}
 	if err := mgr.ensureManagedTemplate(context.Background(), client, mgr.templateRequest); err != nil {
 		t.Fatalf("ensureManagedTemplate returned error: %v", err)
 	}
 	if client.updated == nil {
 		t.Fatal("expected UpdateTemplate to be called")
 	}
-	if !reflect.DeepEqual(client.updated.Spec, request.Spec) {
+	if !specsEqual(client.updated.specBody(), request.specBody()) {
 		t.Fatal("updated spec does not match manifest spec")
 	}
 }
@@ -155,25 +169,25 @@ func TestEnsureConfiguredManagedTemplateUsesManifestRequest(t *testing.T) {
 }
 
 type fakeTemplateClient struct {
-	getTemplate *apispec.Template
-	getErr      error
-	created     *apispec.TemplateCreateRequest
-	updated     *apispec.TemplateUpdateRequest
+	getSpec map[string]any
+	getErr  error
+	created *managedTemplateRequest
+	updated *managedTemplateRequest
 }
 
-func (f *fakeTemplateClient) GetTemplate(_ context.Context, _ string) (*apispec.Template, error) {
+func (f *fakeTemplateClient) GetTemplateSpec(_ context.Context, _ string) (map[string]any, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	return f.getTemplate, nil
+	return cloneMap(f.getSpec), nil
 }
 
-func (f *fakeTemplateClient) CreateTemplate(_ context.Context, request apispec.TemplateCreateRequest) (*apispec.Template, error) {
-	f.created = &request
-	return &apispec.Template{TemplateID: request.TemplateID, Spec: request.Spec}, nil
+func (f *fakeTemplateClient) CreateTemplate(_ context.Context, request *managedTemplateRequest) error {
+	f.created, _ = cloneTemplateRequest(request)
+	return nil
 }
 
-func (f *fakeTemplateClient) UpdateTemplate(_ context.Context, _ string, request apispec.TemplateUpdateRequest) (*apispec.Template, error) {
-	f.updated = &request
-	return &apispec.Template{Spec: request.Spec}, nil
+func (f *fakeTemplateClient) UpdateTemplate(_ context.Context, _ string, request *managedTemplateRequest) error {
+	f.updated, _ = cloneTemplateRequest(request)
+	return nil
 }
