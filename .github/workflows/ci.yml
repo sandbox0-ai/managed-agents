@@ -131,7 +131,6 @@ jobs:
       IMAGE_REPOSITORY: sandbox0ai/managed-agents
       GATEWAY_TAG: gateway-testenv
       FAKE_WRAPPER_IMAGE: managed-agents/fake-wrapper:e2e
-      SANDBOX0_INFRA_IMAGE_TAG: main-4c4161b
     steps:
       - name: Checkout managed-agents
         uses: actions/checkout@v4
@@ -232,7 +231,6 @@ jobs:
       IMAGE_REPOSITORY: sandbox0ai/managed-agents
       GATEWAY_TAG: gateway-live-testenv
       WRAPPER_TAG: wrapper-live-testenv
-      SANDBOX0_INFRA_IMAGE_TAG: main-4c4161b
       MANAGED_AGENT_LIVE_CLAUDE_BASE_URL: ${{ vars.MANAGED_AGENT_LLM_BASE_URL }}
       MANAGED_AGENT_LIVE_CLAUDE_MODEL: ${{ vars.MANAGED_AGENT_LLM_MODEL }}
       MANAGED_AGENT_LIVE_CLAUDE_TOKEN: ${{ secrets.MANAGED_AGENT_LLM_TOKEN }}

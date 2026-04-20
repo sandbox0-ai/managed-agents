@@ -10,8 +10,6 @@ SANDBOX0_INFRA_NAME="${SANDBOX0_INFRA_NAME:-managed-agents-e2e}"
 SANDBOX0_INFRA_SAMPLE="${SANDBOX0_INFRA_SAMPLE:-}"
 SANDBOX0_INFRA_READY_TIMEOUT="${SANDBOX0_INFRA_READY_TIMEOUT:-15m}"
 MANAGED_AGENTS_NAMESPACE="${MANAGED_AGENTS_NAMESPACE:-sandbox0-cloud}"
-SANDBOX0_INFRA_IMAGE_REPOSITORY="${SANDBOX0_INFRA_IMAGE_REPOSITORY:-sandbox0ai/infra}"
-SANDBOX0_INFRA_IMAGE_TAG="${SANDBOX0_INFRA_IMAGE_TAG:-latest}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-sandbox0ai/managed-agents}"
 GATEWAY_TAG="${GATEWAY_TAG:-gateway-testenv}"
 FAKE_WRAPPER_IMAGE="${FAKE_WRAPPER_IMAGE:-managed-agents/fake-wrapper:e2e}"
@@ -37,12 +35,12 @@ fi
 kubectl config use-context "${KUBE_CONTEXT}" >/dev/null
 
 if [[ "${PRELOAD_PUBLIC_IMAGES}" == "true" ]]; then
-  docker pull "${SANDBOX0_INFRA_IMAGE_REPOSITORY}:${SANDBOX0_INFRA_IMAGE_TAG}"
+  docker pull sandbox0ai/infra:latest
   docker pull postgres:16-alpine
   docker pull rustfs/rustfs:1.0.0-alpha.79
   docker pull registry:2.8.3
 
-  kind load docker-image "${SANDBOX0_INFRA_IMAGE_REPOSITORY}:${SANDBOX0_INFRA_IMAGE_TAG}" --name "${KIND_CLUSTER_NAME}"
+  kind load docker-image sandbox0ai/infra:latest --name "${KIND_CLUSTER_NAME}"
   kind load docker-image postgres:16-alpine --name "${KIND_CLUSTER_NAME}"
   kind load docker-image rustfs/rustfs:1.0.0-alpha.79 --name "${KIND_CLUSTER_NAME}"
   kind load docker-image registry:2.8.3 --name "${KIND_CLUSTER_NAME}"
@@ -54,8 +52,8 @@ kind load docker-image "${WRAPPER_IMAGE}" --name "${KIND_CLUSTER_NAME}"
 helm --kube-context "${KUBE_CONTEXT}" upgrade --install infra-operator "${SANDBOX0_DIR}/infra-operator/chart" \
   -n infra-operator \
   --create-namespace \
-  --set-string image.repository="${SANDBOX0_INFRA_IMAGE_REPOSITORY}" \
-  --set-string image.tag="${SANDBOX0_INFRA_IMAGE_TAG}" \
+  --set-string image.repository=sandbox0ai/infra \
+  --set-string image.tag=latest \
   --set image.pullPolicy=IfNotPresent \
   --wait \
   --timeout=5m
