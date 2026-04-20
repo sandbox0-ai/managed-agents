@@ -20,9 +20,16 @@ const (
 )
 
 var managedMetadataScopes = map[string]map[ManagedMetadataScope]struct{}{
-	ManagedAgentsVaultRoleKey:       {ManagedMetadataScopeVault: {}},
-	ManagedAgentsVaultEngineKey:     {ManagedMetadataScopeVault: {}},
-	ManagedAgentsVaultLLMBaseURLKey: {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultRoleKey:          {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultEngineKey:        {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultLLMBaseURLKey:    {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultKindKey:          {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultVersionKey:       {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultTargetDomainsKey: {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultProtocolKey:      {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultTLSModeKey:       {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultFailurePolicyKey: {ManagedMetadataScopeVault: {}},
+	ManagedAgentsVaultHeadersJSONKey:   {ManagedMetadataScopeVault: {}},
 }
 
 func ValidateManagedAgentMetadata(metadata map[string]string) error {
