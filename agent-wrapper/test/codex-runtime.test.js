@@ -246,7 +246,7 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
 });
 
-test('CodexRuntime sends agent system via developerInstructions for native Codex providers', async () => {
+test('CodexRuntime sends agent system via developerInstructions', async () => {
   const client = new FakeCodexClient();
   const runtime = new CodexRuntime({ clientFactory: () => client });
   let storedSession = codexSession({
@@ -264,7 +264,7 @@ test('CodexRuntime sends agent system via developerInstructions for native Codex
   assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
 });
 
-test('CodexRuntime inlines agent system into turn input for MiniMax providers', async () => {
+test('CodexRuntime sends MiniMax agent system via developerInstructions without rewriting turn input', async () => {
   const client = new FakeCodexClient();
   const runtime = new CodexRuntime({ clientFactory: () => client });
   let storedSession = codexSession({
@@ -281,11 +281,8 @@ test('CodexRuntime inlines agent system into turn input for MiniMax providers', 
 
   await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
 
-  assert.equal('developerInstructions' in client.requests[0].params, false);
-  assert.deepEqual(client.requests[1].params.input, [{
-    type: 'text',
-    text: 'System instructions:\nReply with exactly one word.\n\nUser input:\nhello',
-  }]);
+  assert.equal(client.requests[0].params.developerInstructions, 'Reply with exactly one word.');
+  assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
 });
 
 test('CodexRuntime maps codex/event task completion notifications', async () => {

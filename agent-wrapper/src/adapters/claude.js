@@ -53,36 +53,16 @@ export function claudeAgentContextOptions(session) {
   if (!skillNames) {
     return systemPrompt ? { systemPrompt } : {};
   }
-  const prompt = promptWithAttachedSkillInventory(systemPrompt ?? DEFAULT_MAIN_AGENT_PROMPT, skillNames);
   return {
     agent: MAIN_AGENT_NAME,
     agents: {
       [MAIN_AGENT_NAME]: {
         description: MAIN_AGENT_DESCRIPTION,
-        prompt,
+        prompt: systemPrompt ?? DEFAULT_MAIN_AGENT_PROMPT,
         skills: skillNames,
       },
     },
   };
-}
-
-export function promptWithAttachedSkillInventory(prompt, skillNames) {
-  const names = Array.isArray(skillNames)
-    ? skillNames.map(skillNameForPrompt).filter((value) => value.length > 0)
-    : [];
-  if (names.length === 0) {
-    return prompt;
-  }
-  const lines = [
-    'Managed Agents attached skills for this session:',
-    ...names.map((name) => `- ${name}`),
-    'When the user asks what skills are available in this Managed Agents session, count and name only the attached skills above unless they explicitly ask for built-in runtime skills.',
-  ];
-  return `${prompt}\n\n${lines.join('\n')}`;
-}
-
-function skillNameForPrompt(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
 export function claudeExtraArgsForSession(session) {
@@ -134,6 +114,22 @@ function timingFieldsForActiveRun(activeRun, extra = {}) {
     vendor_session_id: activeRun?.session?.vendor_session_id ?? null,
     elapsed_ms: elapsedMsSince(activeRun?.startedAtMs),
     ...extra,
+  };
+}
+
+function skillMetadataFieldsForClaudeSDKMessage(message) {
+  const skills = message?.skills;
+  if (!skills || typeof skills !== 'object') {
+    return {};
+  }
+  const frontmatter = Array.isArray(skills.skillFrontmatter) ? skills.skillFrontmatter : [];
+  const names = frontmatter
+    .map((entry) => String(entry?.name ?? '').trim())
+    .filter((name) => name.length > 0);
+  return {
+    skills_total: Number.isFinite(skills.totalSkills) ? skills.totalSkills : null,
+    skills_included: Number.isFinite(skills.includedSkills) ? skills.includedSkills : null,
+    skill_names: names,
   };
 }
 
@@ -366,6 +362,7 @@ export class ClaudeRuntime extends AgentRuntime {
             message_type: message?.type ?? null,
             message_subtype: message?.subtype ?? null,
             vendor_session_id: currentSession.vendor_session_id ?? message?.session_id ?? null,
+            ...skillMetadataFieldsForClaudeSDKMessage(message),
           }));
         }
         const callbackPayload = this.#mapMessage(currentSession, activeRun.run, message, activeRun.modelRequestStartID);

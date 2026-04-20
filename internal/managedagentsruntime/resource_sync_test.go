@@ -686,6 +686,13 @@ func TestSkillFileTargetPathUsesWorkspaceRelativeVolumePath(t *testing.T) {
 	}
 }
 
+func TestSkillFileTargetPathMatchesAgentSDKProjectSkillDirectory(t *testing.T) {
+	got := skillFileTargetPath("/workspace", "/workspace/project", "demo-skill", "demo-skill/SKILL.md")
+	if got != "/project/.claude/skills/demo-skill/SKILL.md" {
+		t.Fatalf("target path = %q, want Claude/Codex project skill path", got)
+	}
+}
+
 func TestSkillFileTargetPathRejectsWorkingDirectoryOutsideWorkspaceMount(t *testing.T) {
 	got := skillFileTargetPath("/workspace", "/tmp/project", "demo-skill", "SKILL.md")
 	if got != "" {

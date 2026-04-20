@@ -13,7 +13,6 @@ import {
   claudeToolsForSession,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
-  promptWithAttachedSkillInventory,
   providerErrorEventForText,
   querySkillNames,
   resolveToolPolicy,
@@ -226,7 +225,7 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
 
   assert.equal(typeof sdkCall.prompt?.[Symbol.asyncIterator], 'function');
   assert.equal(sdkCall.options.agent, 'managed-agent');
-  assert.match(sdkCall.options.agents['managed-agent'].prompt, /Managed Agents attached skills/);
+  assert.equal(sdkCall.options.agents['managed-agent'].prompt, 'Use attached skills.');
   assert.deepEqual(sdkCall.options.agents['managed-agent'].skills, ['workspace-map', 'regression-check']);
   assert.deepEqual(sdkCall.options.extraArgs, { 'debug-file': '/tmp/claude-debug.log' });
   assert.deepEqual(sdkCall.options.settingSources, ['local', 'project']);
@@ -428,6 +427,57 @@ test('ClaudeRuntime emits timing logs around resident query startup and first st
   assert.equal(firstMessageLog.vendor_session_id, 'vendor_sesn_timing');
 });
 
+test('ClaudeRuntime logs Claude SDK skill preload metadata from init events', async () => {
+  const runtime = new ClaudeRuntime({
+    queryFn: () => sdkResultStream({
+      sessionID: 'vendor_sesn_skill_metadata',
+      skills: {
+        totalSkills: 4,
+        includedSkills: 2,
+        tokens: 123,
+        skillFrontmatter: [
+          { name: 'workspace-map', source: 'projectSettings', tokens: 40 },
+          { name: 'regression-check', source: 'projectSettings', tokens: 38 },
+        ],
+      },
+    }),
+  });
+  let currentSession = {
+    session_id: 'sesn_skill_metadata',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: ['workspace-map', 'regression-check'],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+
+  const logs = await captureStructuredLogs(async () => {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_skill_metadata',
+      input_events: [{ type: 'user.message', content: 'hello skills' }],
+    }, { send: async () => {} }, sessionStore);
+  });
+
+  const firstMessageLog = logs.find((entry) => entry.msg === 'claude first stream message');
+  assert.equal(firstMessageLog.skills_total, 4);
+  assert.equal(firstMessageLog.skills_included, 2);
+  assert.deepEqual(firstMessageLog.skill_names, ['workspace-map', 'regression-check']);
+});
+
 test('ClaudeRuntime restarts a resident SDK query when session resources change', async () => {
   const sdkCalls = [];
   const prompts = [];
@@ -602,16 +652,17 @@ test('runtimeModelForSession prefers explicit engine model', () => {
   }), 'claude-sonnet-4-6');
 });
 
-async function* sdkResultStream() {
+async function* sdkResultStream({ sessionID = 'vendor_sesn_sdk_options', skills } = {}) {
   yield {
     type: 'system',
     subtype: 'init',
-    session_id: 'vendor_sesn_sdk_options',
+    session_id: sessionID,
+    ...(skills ? { skills } : {}),
   };
   yield {
     type: 'result',
     subtype: 'success',
-    session_id: 'vendor_sesn_sdk_options',
+    session_id: sessionID,
     stop_reason: 'end_turn',
     usage: {},
   };
@@ -904,30 +955,11 @@ test('claudeAgentContextOptions preloads skills through the main agent definitio
     agents: {
       'managed-agent': {
         description: 'Primary Sandbox0 Managed Agents coding session.',
-        prompt: [
-          'Use attached skills.',
-          '',
-          'Managed Agents attached skills for this session:',
-          '- workspace-map',
-          '- regression-check',
-          'When the user asks what skills are available in this Managed Agents session, count and name only the attached skills above unless they explicitly ask for built-in runtime skills.',
-        ].join('\n'),
+        prompt: 'Use attached skills.',
         skills: ['workspace-map', 'regression-check'],
       },
     },
   });
-});
-
-test('promptWithAttachedSkillInventory makes attached skills visible without tool calls', () => {
-  assert.equal(promptWithAttachedSkillInventory('Base prompt.', ['alpha', ' beta\nname ', '']), [
-    'Base prompt.',
-    '',
-    'Managed Agents attached skills for this session:',
-    '- alpha',
-    '- beta name',
-    'When the user asks what skills are available in this Managed Agents session, count and name only the attached skills above unless they explicitly ask for built-in runtime skills.',
-  ].join('\n'));
-  assert.equal(promptWithAttachedSkillInventory('Base prompt.', []), 'Base prompt.');
 });
 
 test('claudeAgentContextOptions keeps systemPrompt when no skills are attached', () => {
