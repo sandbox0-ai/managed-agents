@@ -6,3 +6,4 @@ coverage/
 vendor
 .env
 example-metadata.json
+node_modules

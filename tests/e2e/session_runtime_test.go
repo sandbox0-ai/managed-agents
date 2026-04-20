@@ -3,6 +3,7 @@ package e2e
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +46,45 @@ func TestRuntimeSessionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRuntimeSessionAcceptsAttachedSkillsWithoutModelAssertions(t *testing.T) {
+	cfg := loadConfig(t)
+	client := newClient(cfg)
+
+	skillName := "e2e-skill-" + strings.ToLower(cfg.Suffix)
+	skill := createSkill(t, client, skillName)
+	skillID := requireString(t, skill, "id")
+	skillVersion := requireString(t, skill, "latest_version")
+	env := createEnvironment(t, client, cfg.Suffix)
+	agent := createAgentWithSkills(t, client, cfg.Suffix, []map[string]any{{
+		"type":     "custom",
+		"skill_id": skillID,
+		"version":  skillVersion,
+	}})
+	vault := createLLMVault(t, client, cfg.Suffix)
+	createStaticBearerCredential(t, client, requireString(t, vault, "id"))
+	envID := requireString(t, env, "id")
+	agentID := requireString(t, agent, "id")
+	vaultID := requireString(t, vault, "id")
+	t.Cleanup(func() {
+		_, _, _ = client.post(t.Context(), "/v1/agents/"+agentID+"/archive", map[string]any{})
+		_, _, _ = client.delete(t.Context(), "/v1/vaults/"+vaultID)
+		_, _, _ = client.delete(t.Context(), "/v1/environments/"+envID)
+		_, _, _ = client.delete(t.Context(), "/v1/skills/"+skillID)
+	})
+
+	session := createSession(t, client, cfg.Suffix, agentID, envID, vaultID)
+	sessionID := requireString(t, session, "id")
+	t.Cleanup(func() {
+		_, _, _ = client.delete(t.Context(), "/v1/sessions/"+sessionID)
+	})
+
+	agentSnapshot, _ := session["agent"].(map[string]any)
+	skills, _ := agentSnapshot["skills"].([]any)
+	if len(skills) != 1 {
+		t.Fatalf("session agent skills = %#v, want one attached custom skill", skills)
+	}
+}
+
 func createSession(t *testing.T, client *apiClient, suffix, agentID, environmentID, vaultID string) map[string]any {
 	t.Helper()
 	body := map[string]any{
@@ -59,6 +99,21 @@ func createSession(t *testing.T, client *apiClient, suffix, agentID, environment
 		t.Fatalf("create session status=%d err=%v", status, err)
 	}
 	requireString(t, resp, "id")
+	return resp
+}
+
+func createSkill(t *testing.T, client *apiClient, name string) map[string]any {
+	t.Helper()
+	resp, status, err := client.postMultipart(t.Context(), "/v1/skills", map[string]string{
+		"display_title": name,
+	}, map[string]string{
+		name + "/SKILL.md": fmt.Sprintf("---\nname: %s\ndescription: E2E skill used to verify attached skill bootstrap.\n---\n", name),
+	})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("create skill status=%d err=%v", status, err)
+	}
+	requireString(t, resp, "id")
+	requireString(t, resp, "latest_version")
 	return resp
 }
 

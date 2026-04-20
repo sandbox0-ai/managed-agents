@@ -117,6 +117,22 @@ function timingFieldsForActiveRun(activeRun, extra = {}) {
   };
 }
 
+function skillMetadataFieldsForClaudeSDKMessage(message) {
+  const skills = message?.skills;
+  if (!skills || typeof skills !== 'object') {
+    return {};
+  }
+  const frontmatter = Array.isArray(skills.skillFrontmatter) ? skills.skillFrontmatter : [];
+  const names = frontmatter
+    .map((entry) => String(entry?.name ?? '').trim())
+    .filter((name) => name.length > 0);
+  return {
+    skills_total: Number.isFinite(skills.totalSkills) ? skills.totalSkills : null,
+    skills_included: Number.isFinite(skills.includedSkills) ? skills.includedSkills : null,
+    skill_names: names,
+  };
+}
+
 export function sessionErrorEventForClaudeSDKSystemMessage(message) {
   if (!message || typeof message !== 'object' || message.type !== 'system') {
     return null;
@@ -346,6 +362,7 @@ export class ClaudeRuntime extends AgentRuntime {
             message_type: message?.type ?? null,
             message_subtype: message?.subtype ?? null,
             vendor_session_id: currentSession.vendor_session_id ?? message?.session_id ?? null,
+            ...skillMetadataFieldsForClaudeSDKMessage(message),
           }));
         }
         const callbackPayload = this.#mapMessage(currentSession, activeRun.run, message, activeRun.modelRequestStartID);
