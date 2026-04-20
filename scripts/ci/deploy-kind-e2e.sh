@@ -10,6 +10,8 @@ SANDBOX0_INFRA_NAME="${SANDBOX0_INFRA_NAME:-managed-agents-e2e}"
 SANDBOX0_INFRA_SAMPLE="${SANDBOX0_INFRA_SAMPLE:-}"
 SANDBOX0_INFRA_READY_TIMEOUT="${SANDBOX0_INFRA_READY_TIMEOUT:-15m}"
 MANAGED_AGENTS_NAMESPACE="${MANAGED_AGENTS_NAMESPACE:-sandbox0-cloud}"
+# CI intentionally consumes sandbox0ai/infra:latest. If the sandbox0 deploy breaks,
+# fix or republish sandbox0 latest instead of pinning this repo to an old infra tag.
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-sandbox0ai/managed-agents}"
 GATEWAY_TAG="${GATEWAY_TAG:-gateway-testenv}"
 FAKE_WRAPPER_IMAGE="${FAKE_WRAPPER_IMAGE:-managed-agents/fake-wrapper:e2e}"
