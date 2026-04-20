@@ -302,8 +302,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}()
 	controlToken := gatewaymanagedagents.NewID("ctl")
 	claimOpts := []sandbox0sdk.SandboxOption{
-		sandbox0sdk.WithSandboxBootstrapMount(workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
-		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
+		sandbox0sdk.WithSandboxBootstrapMount(workspaceVolumeID, m.cfg.WorkspaceMountPath),
 		sandbox0sdk.WithSandboxTTL(int32(m.sandboxTTLSeconds())),
 		sandbox0sdk.WithSandboxHardTTL(0),
 		sandbox0sdk.WithSandboxAutoResume(true),
@@ -322,7 +321,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		zap.Int("package_mount_count", len(packageMounts)),
 	)
 	for _, mount := range packageMounts {
-		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath, nil))
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
 	phaseStarted = time.Now()

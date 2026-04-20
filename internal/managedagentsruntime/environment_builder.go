@@ -332,8 +332,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	}
 
 	claimOpts := []sandbox0sdk.SandboxOption{
-		sandbox0sdk.WithSandboxBootstrapMount(resources.workspaceVolumeID, m.cfg.WorkspaceMountPath, nil),
-		sandbox0sdk.WithSandboxBootstrapMountWait(m.cfg.SandboxRequestTimeout),
+		sandbox0sdk.WithSandboxBootstrapMount(resources.workspaceVolumeID, m.cfg.WorkspaceMountPath),
 		sandbox0sdk.WithSandboxTTL(0),
 		sandbox0sdk.WithSandboxHardTTL(0),
 		sandbox0sdk.WithSandboxNetworkPolicy(builderNetworkPolicy(environment)),
@@ -345,7 +344,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 			m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
 			return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", fmt.Errorf("environment builder is missing %s volume", manager)
 		}
-		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath, nil))
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath))
 	}
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession("claude", templateRequest), claimOpts...)
 	if err != nil {
