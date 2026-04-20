@@ -246,7 +246,7 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
 });
 
-test('CodexRuntime sends agent system via developerInstructions', async () => {
+test('CodexRuntime sends agent system via baseInstructions', async () => {
   const client = new FakeCodexClient();
   const runtime = new CodexRuntime({ clientFactory: () => client });
   let storedSession = codexSession({
@@ -260,11 +260,12 @@ test('CodexRuntime sends agent system via developerInstructions', async () => {
 
   await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
 
-  assert.equal(client.requests[0].params.developerInstructions, 'Reply with exactly one word.');
+  assert.equal(client.requests[0].params.baseInstructions, 'Reply with exactly one word.');
+  assert.equal('developerInstructions' in client.requests[0].params, false);
   assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
 });
 
-test('CodexRuntime sends MiniMax agent system via developerInstructions without rewriting turn input', async () => {
+test('CodexRuntime sends MiniMax agent system via baseInstructions without rewriting turn input', async () => {
   const client = new FakeCodexClient();
   const runtime = new CodexRuntime({ clientFactory: () => client });
   let storedSession = codexSession({
@@ -281,7 +282,8 @@ test('CodexRuntime sends MiniMax agent system via developerInstructions without 
 
   await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
 
-  assert.equal(client.requests[0].params.developerInstructions, 'Reply with exactly one word.');
+  assert.equal(client.requests[0].params.baseInstructions, 'Reply with exactly one word.');
+  assert.equal('developerInstructions' in client.requests[0].params, false);
   assert.deepEqual(client.requests[1].params.input, [{ type: 'text', text: 'hello' }]);
 });
 

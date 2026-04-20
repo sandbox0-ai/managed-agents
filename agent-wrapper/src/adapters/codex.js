@@ -571,7 +571,7 @@ function buildThreadParams(session, { includeDynamicTools, includeServiceName })
     config: codexConfigForSession(session),
   };
   if (typeof session.agent?.system === 'string' && session.agent.system.trim() !== '') {
-    params.developerInstructions = session.agent.system;
+    params.baseInstructions = session.agent.system;
   }
   const dynamicTools = includeDynamicTools ? dynamicToolsForAgent(session.agent?.tools) : [];
   if (dynamicTools.length > 0) {
