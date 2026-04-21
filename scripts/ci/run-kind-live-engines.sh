@@ -25,11 +25,18 @@ kubectl --context "${KUBE_CONTEXT}" -n "${MANAGED_AGENTS_NAMESPACE}" port-forwar
 pf_pid=$!
 trap 'kill ${pf_pid} >/dev/null 2>&1 || true' EXIT
 
+ready=0
 for _ in {1..60}; do
-  if curl -fsS "${MANAGED_AGENTS_E2E_BASE_URL}/healthz" >/dev/null 2>&1; then
+  if curl -fsS "${MANAGED_AGENTS_E2E_BASE_URL}/readyz" >/dev/null 2>&1; then
+    ready=1
     break
   fi
   sleep 1
 done
+
+if [[ "${ready}" != "1" ]]; then
+  echo "managed-agents agent-gateway never became ready" >&2
+  exit 1
+fi
 
 make -C "${ROOT_DIR}" test-live-engines

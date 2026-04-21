@@ -150,6 +150,9 @@ jobs:
           repository: sandbox0-ai/sdk-go
           path: sdk-go
 
+      - name: Free runner space
+        uses: ./.github/actions/free-runner-space
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -255,6 +258,9 @@ jobs:
         with:
           repository: sandbox0-ai/sdk-go
           path: sdk-go
+
+      - name: Free runner space
+        uses: ./.github/actions/free-runner-space
 
       - name: Set up Go
         uses: actions/setup-go@v5
