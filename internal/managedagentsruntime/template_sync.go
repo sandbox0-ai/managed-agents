@@ -17,8 +17,8 @@ const (
 
 var errManagedTemplateAdminKeyMissing = errors.New("sandbox admin api key is required for startup template sync")
 
-// StartManagedTemplateSync asynchronously pushes the configured managed-agent template into sandbox0.
-func (m *SDKRuntimeManager) StartManagedTemplateSync(ctx context.Context) {
+// SyncManagedTemplateOnStartup ensures the configured managed-agent template is present before serving traffic.
+func (m *SDKRuntimeManager) SyncManagedTemplateOnStartup(ctx context.Context) {
 	if m == nil || m.templateRequest == nil {
 		return
 	}
@@ -31,37 +31,47 @@ func (m *SDKRuntimeManager) StartManagedTemplateSync(ctx context.Context) {
 		logger.Info("skipping startup managed template sync; sandbox admin api key is not configured", zap.String("template_id", templateID))
 		return
 	}
-
-	go m.syncManagedTemplateWithRetry(ctx)
+	if err := m.syncManagedTemplateWithRetry(ctx); err != nil {
+		logger.Warn("startup managed template sync failed",
+			zap.String("template_id", templateID),
+			zap.Int("max_attempts", managedTemplateStartupSyncAttempts),
+			zap.Error(err),
+		)
+		return
+	}
+	logger.Info("startup managed template synced", zap.String("template_id", templateID))
 }
 
-func (m *SDKRuntimeManager) syncManagedTemplateWithRetry(ctx context.Context) {
-	logger := m.logger
-	if logger == nil {
-		logger = zap.NewNop()
+// StartManagedTemplateSync asynchronously pushes the configured managed-agent template into sandbox0.
+func (m *SDKRuntimeManager) StartManagedTemplateSync(ctx context.Context) {
+	if m == nil || m.templateRequest == nil {
+		return
 	}
-	templateID := strings.TrimSpace(m.templateRequest.TemplateID)
+	go m.SyncManagedTemplateOnStartup(ctx)
+}
 
+func (m *SDKRuntimeManager) syncManagedTemplateWithRetry(ctx context.Context) error {
+	var lastErr error
 	for attempt := 1; attempt <= managedTemplateStartupSyncAttempts; attempt++ {
 		if err := m.syncManagedTemplateOnce(ctx); err != nil {
-			logger.Warn("startup managed template sync failed",
-				zap.String("template_id", templateID),
-				zap.Int("attempt", attempt),
-				zap.Int("max_attempts", managedTemplateStartupSyncAttempts),
-				zap.Error(err),
-			)
+			lastErr = err
 			if attempt == managedTemplateStartupSyncAttempts {
-				return
+				break
 			}
 			if !sleepManagedTemplateSync(ctx, managedTemplateStartupSyncDelay) {
-				return
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				break
 			}
 			continue
 		}
-
-		logger.Info("startup managed template synced", zap.String("template_id", templateID), zap.Int("attempt", attempt))
-		return
+		return nil
 	}
+	if lastErr == nil {
+		lastErr = context.Canceled
+	}
+	return lastErr
 }
 
 func (m *SDKRuntimeManager) syncManagedTemplateOnce(ctx context.Context) error {
