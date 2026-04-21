@@ -20,6 +20,8 @@ spec:
   volumeMounts:
     - name: workspace
       mountPath: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH}
+    - name: managed-skill-bundle
+      mountPath: ${MANAGED_AGENT_TEMPLATE_WORKSPACE_MOUNT_PATH}/.claude/skills
     - name: managed-env-apt
       mountPath: /opt/managed-env/apt
     - name: managed-env-cargo

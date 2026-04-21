@@ -69,8 +69,8 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("volumeMounts missing from raw template spec")
 	}
-	if len(volumeMounts) != 7 {
-		t.Fatalf("volumeMounts length = %d, want 7", len(volumeMounts))
+	if len(volumeMounts) != 8 {
+		t.Fatalf("volumeMounts length = %d, want 8", len(volumeMounts))
 	}
 	firstMount, ok := volumeMounts[0].(map[string]any)
 	if !ok {
@@ -78,6 +78,13 @@ func TestLoadTemplateRequest(t *testing.T) {
 	}
 	if firstMount["name"] != "workspace" || firstMount["mountPath"] != "/workspace" {
 		t.Fatalf("volumeMounts[0] = %#v, want workspace mount", firstMount)
+	}
+	skillMount, ok := volumeMounts[1].(map[string]any)
+	if !ok {
+		t.Fatalf("volumeMounts[1] = %#v, want object", volumeMounts[1])
+	}
+	if skillMount["name"] != "managed-skill-bundle" || skillMount["mountPath"] != "/workspace/.claude/skills" {
+		t.Fatalf("volumeMounts[1] = %#v, want skill bundle mount", skillMount)
 	}
 }
 
