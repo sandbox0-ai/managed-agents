@@ -3,6 +3,7 @@ package managedagentsruntime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +88,57 @@ func TestSandboxNotFoundRecognizesAPIError(t *testing.T) {
 	}
 	if isSandboxNotFound(&sandbox0sdk.APIError{StatusCode: http.StatusInternalServerError}) {
 		t.Fatal("isSandboxNotFound returned true for sandbox0 500")
+	}
+}
+
+func TestShouldRetryClaimAfterTemplateSync(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "template not found api error",
+			err: &sandbox0sdk.APIError{
+				StatusCode: http.StatusNotFound,
+				Message:    "template managed-agents not found in namespace sandbox0",
+			},
+			want: true,
+		},
+		{
+			name: "mount drift api error",
+			err: &sandbox0sdk.APIError{
+				StatusCode: http.StatusBadRequest,
+				Message:    `invalid claim request: mounts[1].mount_point "/workspace/.claude/skills" is not declared by template`,
+			},
+			want: true,
+		},
+		{
+			name: "wrapped mount drift api error",
+			err:  fmt.Errorf("claim sandbox: %w", &sandbox0sdk.APIError{StatusCode: http.StatusBadRequest, Message: `invalid claim request: mounts[1].mount_point "/workspace/.claude/skills" is not declared by template`}),
+			want: true,
+		},
+		{
+			name: "generic context canceled",
+			err:  context.Canceled,
+			want: false,
+		},
+		{
+			name: "non-template bad request",
+			err: &sandbox0sdk.APIError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "invalid claim request: duplicate mount_point \"/workspace\" in claim mounts",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRetryClaimAfterTemplateSync(tt.err); got != tt.want {
+				t.Fatalf("shouldRetryClaimAfterTemplateSync(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -239,12 +239,6 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}
 	op.ObservePhase("prepare_template_request", time.Since(phaseStarted), nil)
 	phaseStarted = time.Now()
-	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
-		op.ObservePhase("ensure_template", time.Since(phaseStarted), err)
-		return nil, fmt.Errorf("ensure managed template: %w", err)
-	}
-	op.ObservePhase("ensure_template", time.Since(phaseStarted), nil)
-	phaseStarted = time.Now()
 	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest, templateClient)
 	if err != nil {
 		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
@@ -337,7 +331,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
 	phaseStarted = time.Now()
-	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
+	sandbox, err := m.claimSandboxWithTemplateFallback(ctx, client, templateClient, templateRequest, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
 		op.ObservePhase("claim_sandbox", time.Since(phaseStarted), err,
 			zap.Int("bootstrap_mount_count", len(packageMounts)+1+boolToInt(skillBundleMount != nil)),
@@ -733,6 +727,43 @@ func (m *SDKRuntimeManager) templateIDForSession(vendor string, request *managed
 		return request.TemplateID
 	}
 	return m.templateForVendor(vendor)
+}
+
+func (m *SDKRuntimeManager) claimSandboxWithTemplateFallback(ctx context.Context, client *sandbox0sdk.Client, templateClient templateClient, templateRequest *managedTemplateRequest, templateID string, claimOpts ...sandbox0sdk.SandboxOption) (*sandbox0sdk.Sandbox, error) {
+	sandbox, err := client.ClaimSandbox(ctx, templateID, claimOpts...)
+	if err == nil || !shouldRetryClaimAfterTemplateSync(err) || templateClient == nil || templateRequest == nil {
+		return sandbox, err
+	}
+	if syncErr := m.ensureManagedTemplate(ctx, templateClient, templateRequest); syncErr != nil {
+		return nil, fmt.Errorf("ensure managed template after claim failure: %v (initial claim error: %w)", syncErr, err)
+	}
+	sandbox, retryErr := client.ClaimSandbox(ctx, templateID, claimOpts...)
+	if retryErr != nil {
+		return nil, fmt.Errorf("retry claim sandbox after ensuring template: %w (initial claim error: %v)", retryErr, err)
+	}
+	return sandbox, nil
+}
+
+func shouldRetryClaimAfterTemplateSync(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *sandbox0sdk.APIError
+	if errors.As(err, &apiErr) {
+		message := strings.ToLower(strings.TrimSpace(apiErr.Message))
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			if strings.Contains(message, "template") && strings.Contains(message, "not found") {
+				return true
+			}
+		case http.StatusBadRequest:
+			if strings.Contains(message, "is not declared by template") {
+				return true
+			}
+		}
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "is not declared by template") || (strings.Contains(message, "template") && strings.Contains(message, "not found"))
 }
 
 func (m *SDKRuntimeManager) sandboxTTLSeconds() int {

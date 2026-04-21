@@ -51,9 +51,6 @@ func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, cre
 	if err != nil {
 		return fmt.Errorf("prepare environment template: %w", err)
 	}
-	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
-		return fmt.Errorf("ensure managed template: %w", err)
-	}
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, &gatewaymanagedagents.SessionRecord{
 		TeamID:        teamID,
 		EnvironmentID: environment.ID,
@@ -325,12 +322,6 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	if err != nil {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", err
 	}
-
-	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
-		m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
-		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", fmt.Errorf("ensure managed template: %w", err)
-	}
-
 	claimOpts := []sandbox0sdk.SandboxOption{
 		sandbox0sdk.WithSandboxBootstrapMount(resources.workspaceVolumeID, m.cfg.WorkspaceMountPath),
 		sandbox0sdk.WithSandboxTTL(0),
@@ -346,7 +337,7 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 		}
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(volumeID, mountPath))
 	}
-	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession("claude", templateRequest), claimOpts...)
+	sandbox, err := m.claimSandboxWithTemplateFallback(ctx, client, templateClient, templateRequest, m.templateIDForSession("claude", templateRequest), claimOpts...)
 	if err != nil {
 		m.cleanupEnvironmentBuildResources(ctx, client, nil, resources)
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, "", fmt.Errorf("claim environment builder sandbox: %w", err)
