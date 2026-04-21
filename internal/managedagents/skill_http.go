@@ -18,7 +18,7 @@ const maxSkillUploadBytes int64 = 30 * 1024 * 1024
 var errSkillUploadTooLarge = errors.New("skill upload exceeds 30 MiB limit")
 
 func (h *Handler) CreateSkill(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -27,7 +27,7 @@ func (h *Handler) CreateSkill(c *gin.Context) {
 		writeSkillUploadError(c, err)
 		return
 	}
-	skill, err := h.service.CreateSkill(c.Request.Context(), principal, displayTitle, files)
+	skill, err := h.service.CreateSkill(c.Request.Context(), principal, credential, displayTitle, files)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return
@@ -104,7 +104,7 @@ func (h *Handler) DeleteSkill(c *gin.Context) {
 }
 
 func (h *Handler) CreateSkillVersion(c *gin.Context) {
-	principal, _, ok := h.requirePrincipal(c)
+	principal, credential, ok := h.requirePrincipal(c)
 	if !ok {
 		return
 	}
@@ -113,7 +113,7 @@ func (h *Handler) CreateSkillVersion(c *gin.Context) {
 		writeSkillUploadError(c, err)
 		return
 	}
-	version, err := h.service.CreateSkillVersion(c.Request.Context(), principal, c.Param("skill_id"), files)
+	version, err := h.service.CreateSkillVersion(c.Request.Context(), principal, credential, c.Param("skill_id"), files)
 	if err != nil {
 		h.writeServiceError(c, err)
 		return

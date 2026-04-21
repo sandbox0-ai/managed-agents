@@ -43,11 +43,12 @@ const (
 
 // Service coordinates session truth and runtime orchestration.
 type Service struct {
-	repo          *Repository
-	runtime       RuntimeManager
-	logger        *zap.Logger
-	fileStore     FileStore
-	observability *Observability
+	repo               *Repository
+	runtime            RuntimeManager
+	logger             *zap.Logger
+	fileStore          FileStore
+	skillArtifactStore SkillArtifactStore
+	observability      *Observability
 }
 
 type ServiceOption func(*Service)
@@ -56,6 +57,14 @@ func WithFileStore(store FileStore) ServiceOption {
 	return func(s *Service) {
 		if store != nil {
 			s.fileStore = store
+		}
+	}
+}
+
+func WithSkillArtifactStore(store SkillArtifactStore) ServiceOption {
+	return func(s *Service) {
+		if store != nil {
+			s.skillArtifactStore = store
 		}
 	}
 }

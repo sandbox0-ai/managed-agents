@@ -1,6 +1,7 @@
 package managedagents
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -8,7 +9,7 @@ import (
 	"time"
 )
 
-func (s *Service) CreateSkill(ctx context.Context, principal Principal, displayTitle *string, files []uploadedSkillFile) (*Skill, error) {
+func (s *Service) CreateSkill(ctx context.Context, principal Principal, credential RequestCredential, displayTitle *string, files []uploadedSkillFile) (*Skill, error) {
 	fallbackDirectory := ""
 	if displayTitle != nil {
 		fallbackDirectory = *displayTitle
@@ -22,7 +23,12 @@ func (s *Service) CreateSkill(ctx context.Context, principal Principal, displayT
 	versionValue := strconv.FormatInt(now.UnixMicro(), 10)
 	skill := buildSkillObject(skillID, displayTitle, &versionValue, now)
 	version := buildSkillVersionObject(NewID("skillver"), skillID, versionValue, parsed, now)
-	if err := s.repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, version, buildStoredSkillFiles(parsed), now); err != nil {
+	artifact, legacyFiles, err := s.prepareSkillVersionStorage(ctx, credential, principal.TeamID, skillID, versionValue, parsed)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, parsed.Name, version, artifact, legacyFiles, now); err != nil {
+		s.cleanupStoredSkillArtifact(ctx, credential, principal.TeamID, skillID, versionValue, artifact)
 		return nil, err
 	}
 	return &skill, nil
@@ -53,15 +59,31 @@ func (s *Service) DeleteSkill(ctx context.Context, principal Principal, skillID 
 	return deletedObject("skill_deleted", skillID), nil
 }
 
-func (s *Service) CreateSkillVersion(ctx context.Context, principal Principal, skillID string, files []uploadedSkillFile) (*SkillVersion, error) {
+func (s *Service) CreateSkillVersion(ctx context.Context, principal Principal, credential RequestCredential, skillID string, files []uploadedSkillFile) (*SkillVersion, error) {
 	parsed, err := parseSkillUpload(files, skillID)
 	if err != nil {
 		return nil, err
 	}
+	storedSkill, err := s.repo.GetStoredSkill(ctx, principal.TeamID, skillID)
+	if err != nil {
+		return nil, err
+	}
+	existingMountSlug := strings.TrimSpace(storedSkill.MountSlug)
+	if existingMountSlug == "" {
+		existingMountSlug = strings.TrimSpace(parsed.Name)
+	}
+	if existingMountSlug != "" && strings.TrimSpace(parsed.Name) != "" && existingMountSlug != strings.TrimSpace(parsed.Name) {
+		return nil, errors.New("skill name must remain stable across versions")
+	}
 	now := time.Now().UTC()
 	versionValue := strconv.FormatInt(now.UnixMicro(), 10)
 	version := buildSkillVersionObject(NewID("skillver"), skillID, versionValue, parsed, now)
-	if err := s.repo.CreateSkillVersion(ctx, principal.TeamID, skillID, version, buildStoredSkillFiles(parsed), now); err != nil {
+	artifact, legacyFiles, err := s.prepareSkillVersionStorage(ctx, credential, principal.TeamID, skillID, versionValue, parsed)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.CreateSkillVersion(ctx, principal.TeamID, skillID, version, existingMountSlug, artifact, legacyFiles, now); err != nil {
+		s.cleanupStoredSkillArtifact(ctx, credential, principal.TeamID, skillID, versionValue, artifact)
 		return nil, err
 	}
 	return &version, nil
@@ -80,4 +102,48 @@ func (s *Service) DeleteSkillVersion(ctx context.Context, principal Principal, s
 		return nil, err
 	}
 	return deletedObject("skill_version_deleted", version), nil
+}
+
+func (s *Service) prepareSkillVersionStorage(ctx context.Context, credential RequestCredential, teamID, skillID, version string, parsed *parsedSkillUpload) (skillVersionArtifact, []storedSkillFile, error) {
+	if parsed == nil {
+		return skillVersionArtifact{}, nil, errors.New("parsed skill upload is required")
+	}
+	if s.skillArtifactStore == nil {
+		return skillVersionArtifact{}, buildStoredSkillFiles(parsed), nil
+	}
+	artifact, err := buildSkillArtifact(parsed)
+	if err != nil {
+		return skillVersionArtifact{}, nil, err
+	}
+	stored, err := s.skillArtifactStore.PutSkillVersion(ctx, credential, SkillArtifactPutRequest{
+		TeamID:        teamID,
+		SkillID:       skillID,
+		Version:       version,
+		ContentDigest: artifact.ContentDigest,
+		Content:       bytes.NewReader(artifact.Archive),
+	})
+	if err != nil {
+		return skillVersionArtifact{}, nil, err
+	}
+	return skillVersionArtifact{
+		VolumeID:      stored.VolumeID,
+		Path:          stored.Path,
+		ContentDigest: artifact.ContentDigest,
+		ArchiveSHA256: stored.SHA256,
+		SizeBytes:     stored.SizeBytes,
+		FileCount:     artifact.FileCount,
+	}, nil, nil
+}
+
+func (s *Service) cleanupStoredSkillArtifact(ctx context.Context, credential RequestCredential, teamID, skillID, version string, artifact skillVersionArtifact) {
+	if s.skillArtifactStore == nil || strings.TrimSpace(artifact.VolumeID) == "" || strings.TrimSpace(artifact.Path) == "" {
+		return
+	}
+	_ = s.skillArtifactStore.DeleteSkillVersion(ctx, credential, SkillArtifactDeleteRequest{
+		TeamID:   teamID,
+		SkillID:  skillID,
+		Version:  version,
+		VolumeID: artifact.VolumeID,
+		Path:     artifact.Path,
+	})
 }

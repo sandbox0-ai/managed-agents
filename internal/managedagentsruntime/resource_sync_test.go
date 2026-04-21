@@ -709,7 +709,7 @@ func TestWorkspaceMountedPathToVolumePathRejectsSiblingPrefix(t *testing.T) {
 
 func TestMaterializeAgentSkillsRejectsAnthropicPrebuiltSkill(t *testing.T) {
 	manager := &SDKRuntimeManager{}
-	_, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{}, map[string]any{
+	_, err := manager.materializeAgentSkills(t.Context(), "team_123", map[string]any{
 		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "not supported") {

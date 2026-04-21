@@ -124,7 +124,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		zap.Int("bootstrap_event_count", len(bootstrapEvents)),
 	)
 	phaseStarted = time.Now()
-	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
+	skillNames, err := m.materializeAgentSkills(ctx, record.TeamID, req.Agent)
 	if err != nil {
 		op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), err)
 		return err
@@ -295,49 +295,12 @@ func retryVolumeFileOperation(ctx context.Context, operation func() error) error
 	return lastErr
 }
 
-func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID, workingDirectory, vendor string, engine map[string]any, agent map[string]any) ([]string, error) {
-	skillEntries := anySlice(agent["skills"])
-	if len(skillEntries) == 0 {
-		return []string{}, nil
+func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, teamID string, agent map[string]any) ([]string, error) {
+	skills, err := m.resolveCustomAgentSkills(ctx, teamID, agent)
+	if err != nil {
+		return nil, err
 	}
-	preloadSet := make(map[string]struct{}, len(skillEntries))
-	for _, raw := range skillEntries {
-		skill := mapValue(raw)
-		skillType := strings.TrimSpace(stringValue(skill["type"]))
-		skillID := strings.TrimSpace(stringValue(skill["skill_id"]))
-		version := strings.TrimSpace(stringValue(skill["version"]))
-		if skillID == "" {
-			return nil, errors.New("agent skill is missing skill_id")
-		}
-		switch skillType {
-		case "anthropic":
-			return nil, fmt.Errorf("anthropic pre-built skill %s is not supported", skillID)
-		case "custom":
-			if version == "" {
-				return nil, fmt.Errorf("custom skill %s is missing version", skillID)
-			}
-			stored, err := m.repo.GetStoredSkillVersion(ctx, teamID, skillID, version)
-			if err != nil {
-				return nil, fmt.Errorf("resolve custom skill %s@%s: %w", skillID, version, err)
-			}
-			directory := skillDirectoryName(stored, skillID)
-			if directory == "" {
-				return nil, fmt.Errorf("custom skill %s@%s is missing directory", skillID, version)
-			}
-			if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, m.cfg.WorkspaceMountPath, workingDirectory, directory, stored.Files); err != nil {
-				return nil, fmt.Errorf("materialize custom skill %s@%s: %w", skillID, version, err)
-			}
-			preloadSet[directory] = struct{}{}
-		default:
-			return nil, fmt.Errorf("unsupported agent skill type %q", skillType)
-		}
-	}
-	preloadNames := make([]string, 0, len(preloadSet))
-	for name := range preloadSet {
-		preloadNames = append(preloadNames, name)
-	}
-	sort.Strings(preloadNames)
-	return preloadNames, nil
+	return orderedSkillNames(skills), nil
 }
 
 func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, resources []map[string]any) ([]managedCredentialBinding, error) {

@@ -17,6 +17,29 @@ type storedSkillFile struct {
 
 type StoredSkillFile = storedSkillFile
 
+type skillVersionArtifact struct {
+	VolumeID      string `json:"volume_id"`
+	Path          string `json:"path"`
+	ContentDigest string `json:"content_digest"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	SizeBytes     int64  `json:"size_bytes"`
+	FileCount     int    `json:"file_count"`
+}
+
+type SkillVersionArtifact = skillVersionArtifact
+
+type skillBundle struct {
+	ID        string         `json:"id"`
+	TeamID    string         `json:"team_id"`
+	CacheKey  string         `json:"cache_key"`
+	VolumeID  string         `json:"volume_id"`
+	Snapshot  map[string]any `json:"snapshot"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+type SkillBundle = skillBundle
+
 type Skill struct {
 	Type          string  `json:"type"`
 	ID            string  `json:"id"`
@@ -51,8 +74,15 @@ type ListSkillVersionsResponse struct {
 }
 
 type StoredSkillVersion struct {
-	Snapshot SkillVersion
-	Files    []storedSkillFile
+	Snapshot  SkillVersion
+	MountSlug string
+	Artifact  skillVersionArtifact
+	Files     []storedSkillFile
+}
+
+type storedSkill struct {
+	Snapshot  Skill
+	MountSlug string
 }
 
 type parsedSkillUpload struct {

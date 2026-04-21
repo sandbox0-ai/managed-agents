@@ -320,15 +320,27 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	op.ObservePhase("prepare_environment_artifact_mounts", time.Since(phaseStarted), nil,
 		zap.Int("package_mount_count", len(packageMounts)),
 	)
+	phaseStarted = time.Now()
+	skillBundleMount, err := m.ensureSkillBundleMount(ctx, client, session.TeamID, session.WorkingDirectory, session.Agent)
+	if err != nil {
+		op.ObservePhase("prepare_skill_bundle_mount", time.Since(phaseStarted), err)
+		return nil, err
+	}
+	op.ObservePhase("prepare_skill_bundle_mount", time.Since(phaseStarted), nil,
+		zap.Bool("has_skill_bundle_mount", skillBundleMount != nil),
+	)
 	for _, mount := range packageMounts {
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath))
+	}
+	if skillBundleMount != nil {
+		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(skillBundleMount.volumeID, skillBundleMount.mountPath))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
 	phaseStarted = time.Now()
 	sandbox, err := client.ClaimSandbox(ctx, m.templateIDForSession(session.Vendor, templateRequest), claimOpts...)
 	if err != nil {
 		op.ObservePhase("claim_sandbox", time.Since(phaseStarted), err,
-			zap.Int("bootstrap_mount_count", len(packageMounts)+1),
+			zap.Int("bootstrap_mount_count", len(packageMounts)+1+boolToInt(skillBundleMount != nil)),
 		)
 		return nil, fmt.Errorf("claim sandbox: %w", err)
 	}
@@ -339,7 +351,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	)
 	op.ObservePhase("claim_sandbox", time.Since(phaseStarted), nil,
 		zap.String("sandbox_id", sandboxID),
-		zap.Int("bootstrap_mount_count", len(packageMounts)+1),
+		zap.Int("bootstrap_mount_count", len(packageMounts)+1+boolToInt(skillBundleMount != nil)),
 	)
 	phaseStarted = time.Now()
 	publicURL, err := m.exposeWrapperPort(ctx, client.Sandbox(sandbox.ID))
@@ -951,4 +963,11 @@ func decodeNetworkPolicy(engine map[string]any) (apispec.SandboxNetworkPolicy, b
 		return apispec.SandboxNetworkPolicy{}, false
 	}
 	return policy, true
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

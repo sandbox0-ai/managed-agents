@@ -35,7 +35,7 @@ func TestListSkillsWithoutSourceIncludesOnlyCustomSkills(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
 	principal := Principal{TeamID: "team_123"}
-	_, err := service.CreateSkill(context.Background(), principal, nil, []uploadedSkillFile{{
+	_, err := service.CreateSkill(context.Background(), principal, RequestCredential{}, nil, []uploadedSkillFile{{
 		Path:    "demo-skill/SKILL.md",
 		Content: []byte("---\nname: demo-skill\ndescription: >-\n  Demo skill\n---\n\n# Demo Skill\n"),
 	}})

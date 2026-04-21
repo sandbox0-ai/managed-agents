@@ -27,6 +27,8 @@ var (
 	ErrFileNotFound                = errors.New("managed-agent file not found")
 	ErrSkillNotFound               = errors.New("managed-agent skill not found")
 	ErrSkillVersionNotFound        = errors.New("managed-agent skill version not found")
+	ErrSkillArtifactStoreNotFound  = errors.New("managed-agent skill artifact store not found")
+	ErrSkillSetBundleNotFound      = errors.New("managed-agent skill set bundle not found")
 	ErrResourceNotFound            = errors.New("managed-agent session resource not found")
 	ErrEventNotFound               = errors.New("managed-agent event not found")
 	ErrSessionRunning              = errors.New("managed-agent session is running")
@@ -1012,6 +1014,20 @@ func nullableStringPointer(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func nullableInt(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableInt64(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 func usageCacheCreationEphemeral1H(usage Usage) int64 {
