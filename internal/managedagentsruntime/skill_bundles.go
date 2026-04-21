@@ -105,7 +105,7 @@ func (m *SDKRuntimeManager) resolveCustomAgentSkills(ctx context.Context, teamID
 			if err != nil {
 				return nil, fmt.Errorf("resolve custom skill %s@%s: %w", skillID, version, err)
 			}
-			mountSlug := stableSkillMountSlug(stored, skillID)
+			mountSlug := stableSkillMountSlug(stored)
 			if mountSlug == "" {
 				return nil, fmt.Errorf("custom skill %s@%s is missing mount slug", skillID, version)
 			}
@@ -204,18 +204,16 @@ func materializeResolvedSkill(ctx context.Context, client *sandbox0sdk.Client, v
 	if skill.stored == nil {
 		return errors.New("resolved skill snapshot is required")
 	}
-	if artifact := skill.stored.Artifact; strings.TrimSpace(artifact.VolumeID) != "" && strings.TrimSpace(artifact.Path) != "" {
-		content, err := client.ReadVolumeFile(ctx, artifact.VolumeID, artifact.Path)
-		if err != nil {
-			return fmt.Errorf("read skill artifact %s@%s: %w", skill.skillID, skill.version, err)
-		}
-		if err := extractSkillArchiveToVolume(ctx, client, volumeID, skill.mountSlug, content); err != nil {
-			return fmt.Errorf("extract skill artifact %s@%s: %w", skill.skillID, skill.version, err)
-		}
-		return nil
+	artifact := skill.stored.Artifact
+	if strings.TrimSpace(artifact.VolumeID) == "" || strings.TrimSpace(artifact.Path) == "" || strings.TrimSpace(artifact.ContentDigest) == "" {
+		return fmt.Errorf("custom skill %s@%s is missing artifact metadata", skill.skillID, skill.version)
 	}
-	if err := writeLegacyStoredSkillFilesToBundle(ctx, client, volumeID, skill.mountSlug, skill.stored); err != nil {
-		return fmt.Errorf("materialize legacy skill %s@%s: %w", skill.skillID, skill.version, err)
+	content, err := client.ReadVolumeFile(ctx, artifact.VolumeID, artifact.Path)
+	if err != nil {
+		return fmt.Errorf("read skill artifact %s@%s: %w", skill.skillID, skill.version, err)
+	}
+	if err := extractSkillArchiveToVolume(ctx, client, volumeID, skill.mountSlug, content); err != nil {
+		return fmt.Errorf("extract skill artifact %s@%s: %w", skill.skillID, skill.version, err)
 	}
 	return nil
 }
@@ -256,22 +254,6 @@ func extractSkillArchiveToVolume(ctx context.Context, client *sandbox0sdk.Client
 	}
 }
 
-func writeLegacyStoredSkillFilesToBundle(ctx context.Context, client *sandbox0sdk.Client, volumeID, mountSlug string, stored *gatewaymanagedagents.StoredSkillVersion) error {
-	if stored == nil {
-		return errors.New("stored skill version is required")
-	}
-	for _, file := range stored.Files {
-		targetPath := legacyStoredSkillBundlePath(stored.Snapshot.Directory, mountSlug, file.Path)
-		if targetPath == "" {
-			return errors.New("stored skill file path is invalid")
-		}
-		if err := writeVolumeFileWithParents(ctx, client, volumeID, targetPath, file.Content); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func writeVolumeFileWithParents(ctx context.Context, client *sandbox0sdk.Client, volumeID, targetPath string, content []byte) error {
 	parent := path.Dir(targetPath)
 	if parent != "." && parent != "/" {
@@ -295,19 +277,11 @@ func skillBundleMountPath(workingDirectory string) string {
 	return cleanMountPath(path.Join(strings.TrimSpace(workingDirectory), ".claude", "skills"))
 }
 
-func stableSkillMountSlug(stored *gatewaymanagedagents.StoredSkillVersion, fallback string) string {
-	if stored != nil {
-		if slug := strings.TrimSpace(stored.MountSlug); slug != "" {
-			return slug
-		}
-		if slug := strings.TrimSpace(stored.Snapshot.Name); slug != "" {
-			return slug
-		}
-		if slug := sanitizeName(stored.Snapshot.Directory); slug != "" {
-			return slug
-		}
+func stableSkillMountSlug(stored *gatewaymanagedagents.StoredSkillVersion) string {
+	if stored == nil {
+		return ""
 	}
-	return sanitizeName(fallback)
+	return strings.TrimSpace(stored.MountSlug)
 }
 
 func storedSkillContentDigest(stored *gatewaymanagedagents.StoredSkillVersion) (string, error) {
@@ -317,39 +291,7 @@ func storedSkillContentDigest(stored *gatewaymanagedagents.StoredSkillVersion) (
 	if digest := strings.TrimSpace(stored.Artifact.ContentDigest); digest != "" {
 		return digest, nil
 	}
-	type digestFile struct {
-		Path      string `json:"path"`
-		SHA256    string `json:"sha256"`
-		SizeBytes int    `json:"size_bytes"`
-	}
-	payload := struct {
-		Schema string       `json:"schema"`
-		Files  []digestFile `json:"files"`
-	}{
-		Schema: "managed-agent-skill-version-v1",
-		Files:  make([]digestFile, 0, len(stored.Files)),
-	}
-	for _, file := range stored.Files {
-		relativePath := storedSkillArtifactRelativePath(stored.Snapshot.Directory, file.Path)
-		if relativePath == "" {
-			return "", fmt.Errorf("stored skill file path %q is invalid", file.Path)
-		}
-		sum := sha256.Sum256(file.Content)
-		payload.Files = append(payload.Files, digestFile{
-			Path:      relativePath,
-			SHA256:    hex.EncodeToString(sum[:]),
-			SizeBytes: len(file.Content),
-		})
-	}
-	sort.Slice(payload.Files, func(i, j int) bool {
-		return payload.Files[i].Path < payload.Files[j].Path
-	})
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal skill bundle digest payload: %w", err)
-	}
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
+	return "", errors.New("custom skill is missing content digest")
 }
 
 func skillBundleCacheKey(skills []resolvedAgentSkill) (string, error) {
@@ -410,46 +352,6 @@ func normalizedBundleArchivePath(value string) string {
 		return ""
 	}
 	return cleaned
-}
-
-func storedSkillArtifactRelativePath(root, storedPath string) string {
-	cleanRoot := path.Clean(strings.TrimSpace(strings.TrimPrefix(root, "/")))
-	cleanPath := path.Clean(strings.TrimSpace(strings.TrimPrefix(storedPath, "/")))
-	if cleanRoot == "." || cleanRoot == "" || cleanPath == "." || cleanPath == "" || strings.HasPrefix(cleanPath, "../") {
-		return ""
-	}
-	prefix := cleanRoot + "/"
-	if !strings.HasPrefix(cleanPath, prefix) {
-		return ""
-	}
-	relative := strings.TrimPrefix(cleanPath, prefix)
-	if relative == "." || relative == "" || strings.HasPrefix(relative, "../") {
-		return ""
-	}
-	return relative
-}
-
-func legacyStoredSkillBundlePath(originalDirectory, mountSlug, storedPath string) string {
-	cleanMountSlug := strings.TrimSpace(mountSlug)
-	cleanOriginalDirectory := path.Clean(strings.TrimSpace(strings.TrimPrefix(originalDirectory, "/")))
-	cleanPath := path.Clean(strings.TrimSpace(strings.TrimPrefix(storedPath, "/")))
-	if cleanMountSlug == "" || cleanPath == "." || cleanPath == "" || strings.HasPrefix(cleanPath, "../") {
-		return ""
-	}
-	relativePath := cleanPath
-	if cleanOriginalDirectory != "." && cleanOriginalDirectory != "" {
-		if relativePath == cleanOriginalDirectory {
-			return ""
-		}
-		prefix := cleanOriginalDirectory + "/"
-		if strings.HasPrefix(relativePath, prefix) {
-			relativePath = strings.TrimPrefix(relativePath, prefix)
-		}
-	}
-	if relativePath == "." || relativePath == "" || strings.HasPrefix(relativePath, "../") {
-		return ""
-	}
-	return cleanMountPath(path.Join("/", cleanMountSlug, relativePath))
 }
 
 func isUniqueViolation(err error) bool {

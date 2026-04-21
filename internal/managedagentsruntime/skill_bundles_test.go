@@ -57,18 +57,11 @@ func TestStableSkillMountSlugPrefersStoredMountSlug(t *testing.T) {
 			Directory: "uploaded-dir",
 		},
 	}
-	if got := stableSkillMountSlug(stored, "fallback"); got != "stable-slug" {
+	if got := stableSkillMountSlug(stored); got != "stable-slug" {
 		t.Fatalf("stableSkillMountSlug = %q, want stable-slug", got)
 	}
 	stored.MountSlug = ""
-	if got := stableSkillMountSlug(stored, "fallback"); got != "skill-name" {
-		t.Fatalf("stableSkillMountSlug fallback to name = %q, want skill-name", got)
-	}
-}
-
-func TestLegacyStoredSkillBundlePathReRootsUploadedDirectory(t *testing.T) {
-	got := legacyStoredSkillBundlePath("uploaded-dir", "stable-slug", "uploaded-dir/docs/guide.md")
-	if got != "/stable-slug/docs/guide.md" {
-		t.Fatalf("legacyStoredSkillBundlePath = %q, want /stable-slug/docs/guide.md", got)
+	if got := stableSkillMountSlug(stored); got != "" {
+		t.Fatalf("stableSkillMountSlug = %q, want empty when mount slug missing", got)
 	}
 }

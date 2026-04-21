@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, skill Skill, mountSlug string, version SkillVersion, artifact skillVersionArtifact, files []storedSkillFile, now time.Time) error {
+func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, skill Skill, mountSlug string, version SkillVersion, artifact skillVersionArtifact, now time.Time) error {
 	skillJSON, err := json.Marshal(skill)
 	if err != nil {
 		return fmt.Errorf("marshal skill snapshot: %w", err)
@@ -18,10 +18,6 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	versionJSON, err := json.Marshal(version)
 	if err != nil {
 		return fmt.Errorf("marshal skill version snapshot: %w", err)
-	}
-	filesJSON, err := json.Marshal(files)
-	if err != nil {
-		return fmt.Errorf("marshal skill version files: %w", err)
 	}
 	tx, err := r.db(ctx).Begin(ctx)
 	if err != nil {
@@ -36,11 +32,11 @@ func (r *Repository) CreateSkillWithVersion(ctx context.Context, teamID string, 
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO managed_agent_skill_versions (
-			id, skill_id, version, snapshot, files, artifact_volume_id, artifact_path, content_digest,
+			id, skill_id, version, snapshot, artifact_volume_id, artifact_path, content_digest,
 			artifact_sha256, artifact_size_bytes, file_count, created_at
 		)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
-	`, version.ID, version.SkillID, version.Version, string(versionJSON), string(filesJSON),
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11)
+	`, version.ID, version.SkillID, version.Version, string(versionJSON),
 		nullableString(artifact.VolumeID), nullableString(artifact.Path), nullableString(artifact.ContentDigest),
 		nullableString(artifact.ArchiveSHA256), nullableInt64(artifact.SizeBytes), nullableInt(artifact.FileCount), now); err != nil {
 		return fmt.Errorf("insert managed-agent skill version: %w", err)
@@ -154,14 +150,10 @@ func (r *Repository) DeleteSkill(ctx context.Context, teamID, skillID string) er
 	return r.deleteSnapshotObject(ctx, "managed_agent_skills", teamID, skillID, ErrSkillNotFound)
 }
 
-func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID string, snapshot SkillVersion, mountSlug string, artifact skillVersionArtifact, files []storedSkillFile, now time.Time) error {
+func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID string, snapshot SkillVersion, mountSlug string, artifact skillVersionArtifact, now time.Time) error {
 	payloadJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal skill version snapshot: %w", err)
-	}
-	filesJSON, err := json.Marshal(files)
-	if err != nil {
-		return fmt.Errorf("marshal skill version files: %w", err)
 	}
 	tx, err := r.db(ctx).Begin(ctx)
 	if err != nil {
@@ -193,11 +185,11 @@ func (r *Repository) CreateSkillVersion(ctx context.Context, teamID, skillID str
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO managed_agent_skill_versions (
-			id, skill_id, version, snapshot, files, artifact_volume_id, artifact_path, content_digest,
+			id, skill_id, version, snapshot, artifact_volume_id, artifact_path, content_digest,
 			artifact_sha256, artifact_size_bytes, file_count, created_at
 		)
-		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
-	`, snapshot.ID, strings.TrimSpace(skillID), snapshot.Version, string(payloadJSON), string(filesJSON),
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11)
+	`, snapshot.ID, strings.TrimSpace(skillID), snapshot.Version, string(payloadJSON),
 		nullableString(artifact.VolumeID), nullableString(artifact.Path), nullableString(artifact.ContentDigest),
 		nullableString(artifact.ArchiveSHA256), nullableInt64(artifact.SizeBytes), nullableInt(artifact.FileCount), now); err != nil {
 		return fmt.Errorf("insert managed-agent skill version: %w", err)
@@ -300,7 +292,6 @@ func (r *Repository) GetSkillVersion(ctx context.Context, teamID, skillID, versi
 func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID, version string) (*StoredSkillVersion, error) {
 	var (
 		payloadJSON      []byte
-		filesJSON        []byte
 		mountSlug        string
 		artifactVolumeID string
 		artifactPath     string
@@ -312,7 +303,6 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 	err := r.db(ctx).QueryRow(ctx, `
 		SELECT
 			v.snapshot,
-			v.files,
 			COALESCE(s.mount_slug, ''),
 			COALESCE(v.artifact_volume_id, ''),
 			COALESCE(v.artifact_path, ''),
@@ -325,7 +315,6 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 		WHERE s.team_id = $1 AND s.id = $2 AND v.version = $3
 	`, teamID, strings.TrimSpace(skillID), strings.TrimSpace(version)).Scan(
 		&payloadJSON,
-		&filesJSON,
 		&mountSlug,
 		&artifactVolumeID,
 		&artifactPath,
@@ -344,12 +333,6 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 	if err != nil {
 		return nil, err
 	}
-	files := []storedSkillFile{}
-	if len(filesJSON) != 0 {
-		if err := json.Unmarshal(filesJSON, &files); err != nil {
-			return nil, fmt.Errorf("decode managed-agent skill version files: %w", err)
-		}
-	}
 	return &StoredSkillVersion{
 		Snapshot:  snapshot,
 		MountSlug: strings.TrimSpace(mountSlug),
@@ -361,7 +344,6 @@ func (r *Repository) GetStoredSkillVersion(ctx context.Context, teamID, skillID,
 			SizeBytes:     artifactSize,
 			FileCount:     fileCount,
 		},
-		Files: files,
 	}, nil
 }
 

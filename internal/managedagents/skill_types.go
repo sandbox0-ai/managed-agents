@@ -15,8 +15,6 @@ type storedSkillFile struct {
 	Content []byte `json:"content"`
 }
 
-type StoredSkillFile = storedSkillFile
-
 type skillVersionArtifact struct {
 	VolumeID      string `json:"volume_id"`
 	Path          string `json:"path"`
@@ -77,7 +75,6 @@ type StoredSkillVersion struct {
 	Snapshot  SkillVersion
 	MountSlug string
 	Artifact  skillVersionArtifact
-	Files     []storedSkillFile
 }
 
 type storedSkill struct {
@@ -129,18 +126,4 @@ func normalizeNullableString(value *string) *string {
 		return nil
 	}
 	return &trimmed
-}
-
-func buildStoredSkillFiles(parsed *parsedSkillUpload) []storedSkillFile {
-	if parsed == nil || len(parsed.Files) == 0 {
-		return []storedSkillFile{}
-	}
-	files := make([]storedSkillFile, 0, len(parsed.Files))
-	for _, file := range parsed.Files {
-		files = append(files, storedSkillFile{
-			Path:    strings.TrimSpace(file.Path),
-			Content: append([]byte(nil), file.Content...),
-		})
-	}
-	return files
 }
