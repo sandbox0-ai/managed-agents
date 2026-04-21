@@ -151,7 +151,7 @@ jobs:
           path: sdk-go
 
       - name: Free runner space
-        uses: ./.github/actions/free-runner-space
+        uses: ./managed-agents/.github/actions/free-runner-space
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -260,7 +260,7 @@ jobs:
           path: sdk-go
 
       - name: Free runner space
-        uses: ./.github/actions/free-runner-space
+        uses: ./managed-agents/.github/actions/free-runner-space
 
       - name: Set up Go
         uses: actions/setup-go@v5
