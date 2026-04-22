@@ -323,7 +323,7 @@ func (h *Handler) writeServiceError(c *gin.Context, err error) {
 		return
 	}
 	switch {
-	case errors.Is(err, ErrSessionRunning) || errors.Is(err, ErrSessionArchived):
+	case errors.Is(err, ErrSessionRunning) || errors.Is(err, ErrSessionArchived) || errors.Is(err, ErrEnvironmentArtifactBuilding):
 		writeError(c, http.StatusConflict, "invalid_request_error", err.Error())
 	case strings.Contains(err.Error(), "forbidden"):
 		writeError(c, http.StatusForbidden, "permission_error", err.Error())
