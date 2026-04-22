@@ -1015,6 +1015,13 @@ func nullableStringPointer(value *string) any {
 	return *value
 }
 
+func nullableInt64(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
 func usageCacheCreationEphemeral1H(usage Usage) int64 {
 	if usage.CacheCreation == nil {
 		return 0
