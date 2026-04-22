@@ -869,6 +869,59 @@ func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 	}
 }
 
+func TestCreateSessionPersistsBootstrapState(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 7,
+	}}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	session, err := service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	storedSession, engine, err := repo.GetSession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	expectedHash, err := runtimeBootstrapStateHash(storedSession, engine)
+	if err != nil {
+		t.Fatalf("runtimeBootstrapStateHash: %v", err)
+	}
+	storedRuntime, err := repo.GetRuntime(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if storedRuntime.BootstrappedRuntimeGeneration != 7 {
+		t.Fatalf("bootstrapped runtime generation = %d, want 7", storedRuntime.BootstrappedRuntimeGeneration)
+	}
+	if storedRuntime.BootstrapStateHash != expectedHash {
+		t.Fatalf("bootstrap state hash = %q, want %q", storedRuntime.BootstrapStateHash, expectedHash)
+	}
+}
+
 func TestCreateSessionRollsBackSessionWhenRuntimeEnsureFails(t *testing.T) {
 	repo := newTestRepository(t)
 	ensureErr := errors.New("ensure runtime failed")

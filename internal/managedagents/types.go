@@ -321,19 +321,21 @@ type SessionRecord struct {
 }
 
 type RuntimeRecord struct {
-	SessionID         string
-	Vendor            string
-	RegionID          string
-	SandboxID         string
-	WrapperURL        string
-	WorkspaceVolumeID string
-	ControlToken      string
-	VendorSessionID   string
-	RuntimeGeneration int64
-	ActiveRunID       *string
-	SandboxDeletedAt  *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	SessionID                     string
+	Vendor                        string
+	RegionID                      string
+	SandboxID                     string
+	WrapperURL                    string
+	WorkspaceVolumeID             string
+	ControlToken                  string
+	VendorSessionID               string
+	RuntimeGeneration             int64
+	BootstrappedRuntimeGeneration int64
+	BootstrapStateHash            string
+	ActiveRunID                   *string
+	SandboxDeletedAt              *time.Time
+	CreatedAt                     time.Time
+	UpdatedAt                     time.Time
 }
 
 type EnvironmentArtifact struct {

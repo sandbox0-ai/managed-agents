@@ -249,6 +249,71 @@ func TestSendEventsQueuesUserMessageWhileRunIsActive(t *testing.T) {
 	}
 }
 
+func TestSendEventsSkipsBootstrapWhenRuntimeStateIsCurrent(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{}
+	service := NewService(repo, runtimeManager, nil)
+	now := time.Date(2026, 4, 10, 5, 20, 0, 0, time.UTC)
+	record := &SessionRecord{
+		ID:                    "sesn_bootstrap_current_123",
+		TeamID:                "team_123",
+		CreatedByUserID:       "user_123",
+		Vendor:                "claude",
+		EnvironmentID:         "env_123",
+		EnvironmentArtifactID: "ear_123",
+		WorkingDirectory:      "/workspace",
+		Agent:                 map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:             []map[string]any{{"id": "rsc_123", "type": "file", "file_id": "file_123", "mount_path": "/tmp/input.txt"}},
+		VaultIDs:              []string{"vlt_123"},
+		Status:                "idle",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	if err := repo.CreateSession(context.Background(), record, map[string]any{"env": map[string]any{"FOO": "bar"}}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	stateHash, err := runtimeBootstrapStateHash(record, map[string]any{"env": map[string]any{"FOO": "bar"}})
+	if err != nil {
+		t.Fatalf("runtimeBootstrapStateHash: %v", err)
+	}
+	if err := repo.UpsertRuntime(context.Background(), &RuntimeRecord{
+		SessionID:                     record.ID,
+		Vendor:                        "claude",
+		RegionID:                      "test-region",
+		SandboxID:                     "sbx_bootstrap_current_123",
+		WorkspaceVolumeID:             "vol_workspace",
+		ControlToken:                  "ctl_123",
+		RuntimeGeneration:             4,
+		BootstrappedRuntimeGeneration: 4,
+		BootstrapStateHash:            stateHash,
+		CreatedAt:                     now,
+		UpdatedAt:                     now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+
+	events, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.message", Content: []UserContentBlock{{Type: "text", Text: "hello"}}}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if len(runtimeManager.bootstrapReqs) != 0 {
+		t.Fatalf("bootstrap calls = %d, want 0", len(runtimeManager.bootstrapReqs))
+	}
+	if len(runtimeManager.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtimeManager.startRunReqs))
+	}
+	updatedRuntime, err := repo.GetRuntime(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.BootstrappedRuntimeGeneration != 4 || updatedRuntime.BootstrapStateHash != stateHash {
+		t.Fatalf("bootstrap state = generation:%d hash:%q, want 4/%q", updatedRuntime.BootstrappedRuntimeGeneration, updatedRuntime.BootstrapStateHash, stateHash)
+	}
+}
+
 func TestDeleteSessionRejectsRunningSession(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, &recordingRuntimeManager{}, nil)

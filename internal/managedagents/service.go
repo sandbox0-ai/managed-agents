@@ -226,7 +226,7 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 			)
 			if runtime != nil {
 				phaseStarted = time.Now()
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+				if err := s.ensureSessionBootstrapStateLocked(ctx, credential, record, nil, runtime); err != nil {
 					op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
 						zap.String("session_id", record.ID),
 						zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
@@ -350,7 +350,7 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 			// Sandbox0 treats vault updates as runtime state refreshes, not run configuration changes.
 			// Refresh bootstrap state even while a run is active so the next credential use sees the latest vault set.
 			if strings.TrimSpace(runtime.SandboxID) != "" {
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+				if err := s.ensureSessionBootstrapStateLocked(ctx, credential, record, engine, runtime); err != nil {
 					return nil, err
 				}
 			}
@@ -585,7 +585,7 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 			return nil, err
 		}
 		phaseStarted = time.Now()
-		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+		if err := s.ensureSessionBootstrapStateLocked(ctx, credential, record, engine, runtime); err != nil {
 			op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), err,
 				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 			)
@@ -667,9 +667,8 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
 		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 	)
-	bootstrapReq := bootstrapRequestFor(record, engine, runtime)
 	phaseStarted = time.Now()
-	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapReq); err != nil {
+	if err := s.ensureSessionBootstrapStateLocked(ctx, credential, record, engine, runtime); err != nil {
 		op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
 			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 		)
@@ -999,7 +998,7 @@ func (s *Service) applyRuntimePayloadLocked(ctx context.Context, runtime *Runtim
 			return err
 		}
 		if batch != nil {
-			if err := s.runtime.BootstrapSession(ctx, RequestCredential{}, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+			if err := s.ensureSessionBootstrapStateLocked(ctx, RequestCredential{}, record, engine, runtime); err != nil {
 				return err
 			}
 		}
@@ -1130,6 +1129,28 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 		Engine:           cloneMap(engine),
 	}
 	return req
+}
+
+// ensureSessionBootstrapStateLocked refreshes wrapper-side session state only when
+// the current runtime generation or session bootstrap inputs changed.
+func (s *Service) ensureSessionBootstrapStateLocked(ctx context.Context, credential RequestCredential, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord) error {
+	if runtime == nil {
+		return errors.New("runtime is required")
+	}
+	stateHash, err := runtimeBootstrapStateHash(record, engine)
+	if err != nil {
+		return err
+	}
+	if runtimeBootstrapStateCurrent(runtime, stateHash) {
+		return nil
+	}
+	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+		return err
+	}
+	runtime.BootstrappedRuntimeGeneration = runtime.RuntimeGeneration
+	runtime.BootstrapStateHash = stateHash
+	runtime.UpdatedAt = time.Now().UTC()
+	return s.repo.UpsertRuntime(ctx, runtime)
 }
 
 func runtimeSandboxIDForLog(runtime *RuntimeRecord) string {

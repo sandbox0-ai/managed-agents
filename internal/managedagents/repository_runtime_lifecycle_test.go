@@ -30,18 +30,20 @@ func TestRuntimeSandboxDeletionKeepsRebuildState(t *testing.T) {
 	}
 	activeRunID := "srun_requires_action"
 	runtime := &RuntimeRecord{
-		SessionID:         session.ID,
-		Vendor:            session.Vendor,
-		RegionID:          "default",
-		SandboxID:         "sbx_123",
-		WrapperURL:        "https://wrapper.test",
-		WorkspaceVolumeID: "vol_workspace",
-		ControlToken:      "ctl_123",
-		VendorSessionID:   "vendor_session",
-		RuntimeGeneration: 3,
-		ActiveRunID:       &activeRunID,
-		CreatedAt:         old,
-		UpdatedAt:         old,
+		SessionID:                     session.ID,
+		Vendor:                        session.Vendor,
+		RegionID:                      "default",
+		SandboxID:                     "sbx_123",
+		WrapperURL:                    "https://wrapper.test",
+		WorkspaceVolumeID:             "vol_workspace",
+		ControlToken:                  "ctl_123",
+		VendorSessionID:               "vendor_session",
+		RuntimeGeneration:             3,
+		BootstrappedRuntimeGeneration: 3,
+		BootstrapStateHash:            "bootstrap_hash_123",
+		ActiveRunID:                   &activeRunID,
+		CreatedAt:                     old,
+		UpdatedAt:                     old,
 	}
 	if err := repo.UpsertRuntime(ctx, runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
@@ -68,6 +70,9 @@ func TestRuntimeSandboxDeletionKeepsRebuildState(t *testing.T) {
 	}
 	if stored.WorkspaceVolumeID != "vol_workspace" || stored.VendorSessionID != "vendor_session" {
 		t.Fatalf("runtime rebuild fields = volume:%q vendor_session:%q, want preserved", stored.WorkspaceVolumeID, stored.VendorSessionID)
+	}
+	if stored.BootstrappedRuntimeGeneration != 3 || stored.BootstrapStateHash != "bootstrap_hash_123" {
+		t.Fatalf("bootstrap state = generation:%d hash:%q, want 3/bootstrap_hash_123", stored.BootstrappedRuntimeGeneration, stored.BootstrapStateHash)
 	}
 	if stored.ActiveRunID == nil || *stored.ActiveRunID != activeRunID {
 		t.Fatalf("active_run_id = %v, want %q preserved", stored.ActiveRunID, activeRunID)
