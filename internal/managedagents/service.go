@@ -46,16 +46,16 @@ type Service struct {
 	repo          *Repository
 	runtime       RuntimeManager
 	logger        *zap.Logger
-	fileStore     FileStore
+	assetStore    AssetStore
 	observability *Observability
 }
 
 type ServiceOption func(*Service)
 
-func WithFileStore(store FileStore) ServiceOption {
+func WithAssetStore(store AssetStore) ServiceOption {
 	return func(s *Service) {
 		if store != nil {
-			s.fileStore = store
+			s.assetStore = store
 		}
 	}
 }

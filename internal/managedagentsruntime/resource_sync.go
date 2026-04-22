@@ -229,6 +229,7 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 	if strings.TrimSpace(workspaceVolumeID) == "" {
 		return errors.New("workspace volume is required")
 	}
+	var teamStore *gatewaymanagedagents.TeamAssetStore
 	for _, resource := range resources {
 		if resourceType(resource) != "file" {
 			continue
@@ -243,7 +244,23 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 			return fmt.Errorf("resolve file resource %s: %w", fileID, err)
 		}
 		content := record.Content
-		if strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "" {
+		switch {
+		case strings.TrimSpace(record.StorePath) != "":
+			if teamStore == nil {
+				regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
+				if err != nil {
+					return fmt.Errorf("resolve team asset store region: %w", err)
+				}
+				teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
+				if err != nil {
+					return fmt.Errorf("resolve team asset store: %w", err)
+				}
+			}
+			content, err = client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+			if err != nil {
+				return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
+			}
+		case strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "":
 			content, err = client.ReadVolumeFile(ctx, record.FileStoreVolumeID, record.FileStorePath)
 			if err != nil {
 				return fmt.Errorf("read file-store resource %s: %w", fileID, err)

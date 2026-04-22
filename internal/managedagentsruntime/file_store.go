@@ -21,7 +21,7 @@ type VolumeFileStore struct {
 	sandbox0APIKey string
 }
 
-func NewVolumeFileStore(baseURL string, timeout time.Duration, sandbox0APIKey string) *VolumeFileStore {
+func NewVolumeAssetStore(baseURL string, timeout time.Duration, sandbox0APIKey string) *VolumeFileStore {
 	return &VolumeFileStore{
 		baseURL:        strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		timeout:        timeout,
@@ -29,56 +29,19 @@ func NewVolumeFileStore(baseURL string, timeout time.Duration, sandbox0APIKey st
 	}
 }
 
-func (s *VolumeFileStore) PutFile(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.FileStorePutRequest) (gatewaymanagedagents.FileStoreObject, error) {
+func (s *VolumeFileStore) CreateStore(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.AssetStoreCreateStoreRequest) (gatewaymanagedagents.AssetStoreVolume, error) {
 	client, err := s.client(credential, req.TeamID)
 	if err != nil {
-		return gatewaymanagedagents.FileStoreObject{}, err
+		return gatewaymanagedagents.AssetStoreVolume{}, err
 	}
-	content, err := io.ReadAll(req.Content)
-	if err != nil {
-		return gatewaymanagedagents.FileStoreObject{}, fmt.Errorf("read upload content: %w", err)
-	}
-	sum := sha256.Sum256(content)
 	volume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
 	if err != nil {
-		return gatewaymanagedagents.FileStoreObject{}, fmt.Errorf("create file-store volume: %w", err)
+		return gatewaymanagedagents.AssetStoreVolume{}, fmt.Errorf("create asset-store volume: %w", err)
 	}
-	filePath := managedFileStorePath(req.TeamID, req.FileID, req.Filename)
-	if _, err := client.MkdirVolumeFile(ctx, volume.ID, path.Dir(filePath), true); err != nil {
-		_, _ = client.DeleteVolumeWithOptions(ctx, volume.ID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
-		return gatewaymanagedagents.FileStoreObject{}, fmt.Errorf("create file-store directory: %w", err)
-	}
-	if _, err := client.WriteVolumeFile(ctx, volume.ID, filePath, content); err != nil {
-		_, _ = client.DeleteVolumeWithOptions(ctx, volume.ID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
-		return gatewaymanagedagents.FileStoreObject{}, fmt.Errorf("write file-store content: %w", err)
-	}
-	return gatewaymanagedagents.FileStoreObject{
-		VolumeID:  volume.ID,
-		Path:      filePath,
-		SizeBytes: int64(len(content)),
-		SHA256:    hex.EncodeToString(sum[:]),
-	}, nil
+	return gatewaymanagedagents.AssetStoreVolume{VolumeID: volume.ID}, nil
 }
 
-func (s *VolumeFileStore) ReadFile(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.FileStoreReadRequest) ([]byte, error) {
-	if strings.TrimSpace(req.VolumeID) == "" || strings.TrimSpace(req.Path) == "" {
-		if len(req.FallbackContent) == 0 {
-			return nil, gatewaymanagedagents.ErrFileNotFound
-		}
-		return append([]byte(nil), req.FallbackContent...), nil
-	}
-	client, err := s.client(credential, req.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	content, err := client.ReadVolumeFile(ctx, req.VolumeID, req.Path)
-	if err != nil {
-		return nil, fmt.Errorf("read file-store content: %w", err)
-	}
-	return content, nil
-}
-
-func (s *VolumeFileStore) DeleteFile(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.FileStoreDeleteRequest) error {
+func (s *VolumeFileStore) DeleteStore(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.AssetStoreDeleteStoreRequest) error {
 	if strings.TrimSpace(req.VolumeID) == "" {
 		return nil
 	}
@@ -90,7 +53,68 @@ func (s *VolumeFileStore) DeleteFile(ctx context.Context, credential gatewaymana
 		if isSandboxNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("delete file-store volume: %w", err)
+		return fmt.Errorf("delete asset-store volume: %w", err)
+	}
+	return nil
+}
+
+func (s *VolumeFileStore) PutObject(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.AssetStorePutObjectRequest) (gatewaymanagedagents.AssetStoreObject, error) {
+	client, err := s.client(credential, req.TeamID)
+	if err != nil {
+		return gatewaymanagedagents.AssetStoreObject{}, err
+	}
+	content, err := io.ReadAll(req.Content)
+	if err != nil {
+		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("read asset-store content: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	if strings.TrimSpace(req.VolumeID) == "" {
+		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("asset-store volume id is required")
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("asset-store path is required")
+	}
+	if _, err := client.MkdirVolumeFile(ctx, req.VolumeID, path.Dir(req.Path), true); err != nil {
+		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("create asset-store directory: %w", err)
+	}
+	if _, err := client.WriteVolumeFile(ctx, req.VolumeID, req.Path, content); err != nil {
+		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("write asset-store content: %w", err)
+	}
+	return gatewaymanagedagents.AssetStoreObject{
+		Path:      req.Path,
+		SizeBytes: int64(len(content)),
+		SHA256:    hex.EncodeToString(sum[:]),
+	}, nil
+}
+
+func (s *VolumeFileStore) ReadObject(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.AssetStoreReadObjectRequest) ([]byte, error) {
+	if strings.TrimSpace(req.VolumeID) == "" || strings.TrimSpace(req.Path) == "" {
+		return nil, gatewaymanagedagents.ErrFileNotFound
+	}
+	client, err := s.client(credential, req.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	content, err := client.ReadVolumeFile(ctx, req.VolumeID, req.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read asset-store content: %w", err)
+	}
+	return content, nil
+}
+
+func (s *VolumeFileStore) DeleteObject(ctx context.Context, credential gatewaymanagedagents.RequestCredential, req gatewaymanagedagents.AssetStoreDeleteObjectRequest) error {
+	if strings.TrimSpace(req.VolumeID) == "" || strings.TrimSpace(req.Path) == "" {
+		return nil
+	}
+	client, err := s.client(credential, req.TeamID)
+	if err != nil {
+		return err
+	}
+	if _, err := client.DeleteVolumeFile(ctx, req.VolumeID, req.Path); err != nil {
+		if isSandboxNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("delete asset-store object: %w", err)
 	}
 	return nil
 }
@@ -110,12 +134,4 @@ func (s *VolumeFileStore) client(credential gatewaymanagedagents.RequestCredenti
 		sandbox0sdk.WithTimeout(s.timeout),
 	}
 	return sandbox0sdk.NewClient(opts...)
-}
-
-func managedFileStorePath(teamID, fileID, filename string) string {
-	name := sanitizeName(filename)
-	if name == "" {
-		name = "content"
-	}
-	return path.Join("/managed-agent-files", sanitizeName(teamID), sanitizeName(fileID), name)
 }

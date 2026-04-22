@@ -161,6 +161,7 @@ type managedFileRecord struct {
 	SizeBytes         int64
 	ScopeType         string
 	ScopeID           string
+	StorePath         string
 	FileStoreVolumeID string
 	FileStorePath     string
 	SHA256            string

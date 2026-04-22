@@ -21,6 +21,7 @@ var (
 	ErrEnvironmentArtifactNotFound = errors.New("managed-agent environment artifact not found")
 	ErrEnvironmentNameConflict     = errors.New("managed-agent environment already exists")
 	ErrEnvironmentInUse            = errors.New("managed-agent environment is referenced by existing sessions")
+	ErrTeamAssetStoreNotFound      = errors.New("managed-agent team asset store not found")
 	ErrVaultNotFound               = errors.New("managed-agent vault not found")
 	ErrVaultInUse                  = errors.New("managed-agent vault is referenced by existing sessions")
 	ErrCredentialNotFound          = errors.New("managed-agent credential not found")
