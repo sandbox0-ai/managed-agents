@@ -703,6 +703,111 @@ func TestServiceUploadFileReusesTeamAssetStore(t *testing.T) {
 	}
 }
 
+func TestGetFileContentSupportsLegacyFileStoreLocator(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:                "file_legacy_locator",
+		TeamID:            principal.TeamID,
+		Filename:          "legacy.txt",
+		MimeType:          "text/plain",
+		SizeBytes:         int64(len("legacy-bytes")),
+		FileStoreVolumeID: "vol_legacy",
+		FileStorePath:     "/managed-agent-files/team_123/file_legacy_locator/content",
+		SHA256:            "legacy-sha",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, record.FileStorePath)] = []byte("legacy-bytes")
+
+	file, err := service.GetFileContent(ctx, principal, credential, record.ID)
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if got := string(file.Content); got != "legacy-bytes" {
+		t.Fatalf("file content = %q, want legacy-bytes", got)
+	}
+}
+
+func TestGetFileContentSupportsLegacyPostgresBytes(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:        "file_legacy_postgres",
+		TeamID:    principal.TeamID,
+		Filename:  "legacy.txt",
+		MimeType:  "text/plain",
+		SizeBytes: int64(len("legacy-postgres")),
+		Content:   []byte("legacy-postgres"),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+
+	file, err := service.GetFileContent(ctx, principal, RequestCredential{}, record.ID)
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if got := string(file.Content); got != "legacy-postgres" {
+		t.Fatalf("file content = %q, want legacy-postgres", got)
+	}
+}
+
+func TestDeleteFileSupportsLegacyPerFileVolume(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:                "file_legacy_delete",
+		TeamID:            principal.TeamID,
+		Filename:          "legacy.txt",
+		MimeType:          "text/plain",
+		SizeBytes:         int64(len("legacy-delete")),
+		FileStoreVolumeID: "vol_legacy_delete",
+		FileStorePath:     "/managed-agent-files/team_123/file_legacy_delete/content",
+		SHA256:            "legacy-sha",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, record.FileStorePath)] = []byte("legacy-delete")
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, "/managed-agent-files/team_123/file_legacy_delete/extra")] = []byte("extra")
+
+	if _, err := service.DeleteFile(ctx, principal, credential, record.ID); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if _, err := repo.GetFile(ctx, principal.TeamID, record.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("GetFile error = %v, want ErrFileNotFound", err)
+	}
+	for key := range store.objects {
+		if strings.HasPrefix(key, record.FileStoreVolumeID+":") {
+			t.Fatalf("legacy volume objects still present after delete: %s", key)
+		}
+	}
+}
+
 func TestServiceUpdateAgentRejectsVersionMismatch(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
