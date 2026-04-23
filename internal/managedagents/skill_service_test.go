@@ -9,7 +9,6 @@ import (
 	"io"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestListAnthropicSkillsReturnsEmpty(t *testing.T) {
@@ -91,9 +90,6 @@ func TestCreateSkillStoresBundleOutsidePostgres(t *testing.T) {
 	stored, err := repo.GetStoredSkillVersion(ctx, principal.TeamID, created.ID, *created.LatestVersion)
 	if err != nil {
 		t.Fatalf("GetStoredSkillVersion: %v", err)
-	}
-	if len(stored.Files) != 0 {
-		t.Fatalf("stored files = %d, want 0 for bundle-backed skills", len(stored.Files))
 	}
 	if stored.Bundle.Path == "" {
 		t.Fatal("bundle path is empty")
@@ -250,35 +246,6 @@ func TestDeleteSkillVersionRemovesOnlyRequestedBundle(t *testing.T) {
 	}
 	if _, err := repo.GetSkillVersion(ctx, principal.TeamID, created.ID, second.Version); !errors.Is(err, ErrSkillVersionNotFound) {
 		t.Fatalf("GetSkillVersion deleted version error = %v, want ErrSkillVersionNotFound", err)
-	}
-}
-
-func TestDeleteLegacySkillVersionDoesNotRequireBundleStore(t *testing.T) {
-	repo := newTestRepository(t)
-	service := NewService(repo, noopRuntimeManager{}, nil)
-	ctx := context.Background()
-	principal := Principal{TeamID: "team_123"}
-	now := time.Now().UTC()
-
-	versionValue := "1"
-	skill := buildSkillObject("skill_legacy", nil, &versionValue, now)
-	version := buildSkillVersionObject("skillver_legacy", skill.ID, versionValue, &parsedSkillUpload{
-		Name:        "demo-skill",
-		Description: "Legacy skill",
-		Directory:   "demo-skill",
-	}, now)
-	if err := repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, version, []storedSkillFile{{
-		Path:    "demo-skill/SKILL.md",
-		Content: []byte("---\nname: demo-skill\ndescription: Legacy skill\n---\n\n# Demo Skill\n"),
-	}}, storedSkillBundle{}, now); err != nil {
-		t.Fatalf("CreateSkillWithVersion: %v", err)
-	}
-
-	if _, err := service.DeleteSkillVersion(ctx, principal, skill.ID, version.Version); err != nil {
-		t.Fatalf("DeleteSkillVersion: %v", err)
-	}
-	if _, err := repo.GetSkillVersion(ctx, principal.TeamID, skill.ID, version.Version); !errors.Is(err, ErrSkillVersionNotFound) {
-		t.Fatalf("GetSkillVersion error = %v, want ErrSkillVersionNotFound", err)
 	}
 }
 

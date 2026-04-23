@@ -1002,25 +1002,11 @@ func nullableString(value string) any {
 	return value
 }
 
-func nullableBytes(value []byte) any {
-	if len(value) == 0 {
-		return nil
-	}
-	return value
-}
-
 func nullableStringPointer(value *string) any {
 	if value == nil || strings.TrimSpace(*value) == "" {
 		return nil
 	}
 	return *value
-}
-
-func nullableInt64(value int64) any {
-	if value == 0 {
-		return nil
-	}
-	return value
 }
 
 func usageCacheCreationEphemeral1H(usage Usage) int64 {

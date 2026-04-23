@@ -672,32 +672,20 @@ func (s *Service) DeleteFile(ctx context.Context, principal Principal, credentia
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(record.StorePath) != "" || strings.TrimSpace(record.FileStoreVolumeID) != "" {
-		if s.assetStore == nil {
-			return nil, errors.New("asset store is not configured")
-		}
-		switch {
-		case strings.TrimSpace(record.StorePath) != "":
-			store, err := s.getTeamAssetStore(ctx, credential, principal.TeamID)
-			if err != nil {
-				return nil, err
-			}
-			if err := s.assetStore.DeleteObject(ctx, credential, AssetStoreDeleteObjectRequest{
-				TeamID:   principal.TeamID,
-				RegionID: store.RegionID,
-				VolumeID: store.VolumeID,
-				Path:     record.StorePath,
-			}); err != nil {
-				return nil, err
-			}
-		case strings.TrimSpace(record.FileStoreVolumeID) != "":
-			if err := s.assetStore.DeleteStore(ctx, credential, AssetStoreDeleteStoreRequest{
-				TeamID:   principal.TeamID,
-				VolumeID: record.FileStoreVolumeID,
-			}); err != nil {
-				return nil, err
-			}
-		}
+	if s.assetStore == nil {
+		return nil, errors.New("asset store is not configured")
+	}
+	store, err := s.getTeamAssetStore(ctx, credential, principal.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.assetStore.DeleteObject(ctx, credential, AssetStoreDeleteObjectRequest{
+		TeamID:   principal.TeamID,
+		RegionID: store.RegionID,
+		VolumeID: store.VolumeID,
+		Path:     record.StorePath,
+	}); err != nil {
+		return nil, err
 	}
 	if err := s.repo.DeleteFile(ctx, principal.TeamID, fileID); err != nil {
 		return nil, err
@@ -709,36 +697,19 @@ func (s *Service) readFileContent(ctx context.Context, credential RequestCredent
 	if record == nil {
 		return nil, ErrFileNotFound
 	}
-	switch {
-	case strings.TrimSpace(record.StorePath) != "":
-		if s.assetStore == nil {
-			return nil, errors.New("asset store is not configured")
-		}
-		store, err := s.getTeamAssetStore(ctx, credential, record.TeamID)
-		if err != nil {
-			return nil, err
-		}
-		return s.assetStore.ReadObject(ctx, credential, AssetStoreReadObjectRequest{
-			TeamID:   record.TeamID,
-			RegionID: store.RegionID,
-			VolumeID: store.VolumeID,
-			Path:     record.StorePath,
-		})
-	case strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "":
-		if s.assetStore == nil {
-			return nil, errors.New("asset store is not configured")
-		}
-		return s.assetStore.ReadObject(ctx, credential, AssetStoreReadObjectRequest{
-			TeamID:   record.TeamID,
-			VolumeID: record.FileStoreVolumeID,
-			Path:     record.FileStorePath,
-		})
-	default:
-		if len(record.Content) == 0 {
-			return nil, ErrFileNotFound
-		}
-		return append([]byte(nil), record.Content...), nil
+	if s.assetStore == nil {
+		return nil, errors.New("asset store is not configured")
 	}
+	store, err := s.getTeamAssetStore(ctx, credential, record.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	return s.assetStore.ReadObject(ctx, credential, AssetStoreReadObjectRequest{
+		TeamID:   record.TeamID,
+		RegionID: store.RegionID,
+		VolumeID: store.VolumeID,
+		Path:     record.StorePath,
+	})
 }
 
 func (s *Service) ArchiveSession(ctx context.Context, principal Principal, sessionID string) (*Session, error) {

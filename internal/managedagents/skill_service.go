@@ -52,7 +52,7 @@ func (s *Service) CreateSkill(ctx context.Context, principal Principal, displayT
 		SHA256:    storedBundle.SHA256,
 		SizeBytes: storedBundle.SizeBytes,
 	}
-	if err := s.repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, version, []storedSkillFile{}, bundle, now); err != nil {
+	if err := s.repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, version, bundle, now); err != nil {
 		_ = s.assetStore.DeleteObject(ctx, RequestCredential{}, AssetStoreDeleteObjectRequest{
 			TeamID:   principal.TeamID,
 			RegionID: store.RegionID,
@@ -132,7 +132,7 @@ func (s *Service) CreateSkillVersion(ctx context.Context, principal Principal, s
 		SHA256:    storedBundle.SHA256,
 		SizeBytes: storedBundle.SizeBytes,
 	}
-	if err := s.repo.CreateSkillVersion(ctx, principal.TeamID, skillID, version, []storedSkillFile{}, bundle, now); err != nil {
+	if err := s.repo.CreateSkillVersion(ctx, principal.TeamID, skillID, version, bundle, now); err != nil {
 		_ = s.assetStore.DeleteObject(ctx, RequestCredential{}, AssetStoreDeleteObjectRequest{
 			TeamID:   principal.TeamID,
 			RegionID: store.RegionID,
