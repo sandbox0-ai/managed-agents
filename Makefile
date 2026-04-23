@@ -15,6 +15,7 @@ FAKE_WRAPPER_IMAGE ?= managed-agents/fake-wrapper:e2e
 SDK_GO_DIR ?= ../sdk-go
 
 SANDBOX0_BASE_URL ?= https://api.sandbox0.ai
+SANDBOX0_AUTH_BASE_URL ?= $(SANDBOX0_BASE_URL)
 RUNTIME_CALLBACK_BASE_URL ?=
 INGRESS_ENABLED ?= false
 INGRESS_CLASS_NAME ?= nginx
@@ -26,6 +27,7 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.image.tag=$(GATEWAY_TAG) \
 	--set-string agentGateway.image.pullPolicy=IfNotPresent \
 	--set-string agentGateway.env.sandbox0BaseURL=$(SANDBOX0_BASE_URL) \
+	--set-string agentGateway.env.sandbox0AuthBaseURL=$(SANDBOX0_AUTH_BASE_URL) \
 	--set-string agentGateway.env.runtimeCallbackBaseURL=$(RUNTIME_CALLBACK_BASE_URL) \
 	--set-string agentGateway.env.templateMainImage=$(IMAGE_REPOSITORY):$(WRAPPER_TAG) \
 	--set agentGateway.ingress.enabled=$(INGRESS_ENABLED) \
