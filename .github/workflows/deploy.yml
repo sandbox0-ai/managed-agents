@@ -29,6 +29,7 @@ jobs:
       KUBE_NAMESPACE: ${{ vars.MANAGED_AGENTS_KUBE_NAMESPACE || 'sandbox0-cloud' }}
       IMAGE_REPOSITORY: ${{ vars.MANAGED_AGENTS_IMAGE_REPOSITORY || 'sandbox0ai/managed-agents' }}
       SANDBOX0_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_BASE_URL || 'https://api.sandbox0.ai' }}
+      SANDBOX0_AUTH_BASE_URL: ${{ vars.MANAGED_AGENTS_SANDBOX0_AUTH_BASE_URL || 'https://api.sandbox0.ai' }}
       RUNTIME_CALLBACK_BASE_URL: ${{ vars.MANAGED_AGENTS_RUNTIME_CALLBACK_BASE_URL || '' }}
       RUNTIME_ENABLED: ${{ vars.MANAGED_AGENTS_RUNTIME_ENABLED || 'true' }}
       TEMPLATE_ID: ${{ vars.MANAGED_AGENTS_TEMPLATE_ID || vars.MANAGED_AGENTS_CLAUDE_TEMPLATE || 'managed-agents' }}
@@ -138,6 +139,7 @@ jobs:
             GATEWAY_TAG="${{ steps.image.outputs.gateway_tag }}" \
             WRAPPER_TAG="${{ steps.image.outputs.wrapper_tag }}" \
             SANDBOX0_BASE_URL="${SANDBOX0_BASE_URL}" \
+            SANDBOX0_AUTH_BASE_URL="${SANDBOX0_AUTH_BASE_URL}" \
             RUNTIME_CALLBACK_BASE_URL="${RUNTIME_CALLBACK_BASE_URL}" \
             INGRESS_ENABLED="${INGRESS_ENABLED}" \
             INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME}" \
