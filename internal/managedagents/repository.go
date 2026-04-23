@@ -19,8 +19,10 @@ var (
 	ErrAgentNotFound               = errors.New("managed-agent agent not found")
 	ErrEnvironmentNotFound         = errors.New("managed-agent environment not found")
 	ErrEnvironmentArtifactNotFound = errors.New("managed-agent environment artifact not found")
+	ErrEnvironmentArtifactBuilding = errors.New("managed-agent environment artifact is still building")
 	ErrEnvironmentNameConflict     = errors.New("managed-agent environment already exists")
 	ErrEnvironmentInUse            = errors.New("managed-agent environment is referenced by existing sessions")
+	ErrTeamAssetStoreNotFound      = errors.New("managed-agent team asset store not found")
 	ErrVaultNotFound               = errors.New("managed-agent vault not found")
 	ErrVaultInUse                  = errors.New("managed-agent vault is referenced by existing sessions")
 	ErrCredentialNotFound          = errors.New("managed-agent credential not found")
@@ -1012,6 +1014,13 @@ func nullableStringPointer(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func nullableInt64(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 func usageCacheCreationEphemeral1H(usage Usage) int64 {

@@ -578,8 +578,8 @@ func (s *Service) ArchiveCredential(ctx context.Context, principal Principal, va
 }
 
 func (s *Service) UploadFile(ctx context.Context, principal Principal, credential RequestCredential, filename, mimeType string, content io.Reader) (FileMetadata, error) {
-	if s.fileStore == nil {
-		return FileMetadata{}, errors.New("file store is not configured")
+	if s.assetStore == nil {
+		return FileMetadata{}, errors.New("asset store is not configured")
 	}
 	trimmedName := strings.TrimSpace(filename)
 	if trimmedName == "" {
@@ -594,30 +594,39 @@ func (s *Service) UploadFile(ctx context.Context, principal Principal, credentia
 	}
 	now := time.Now().UTC()
 	fileID := NewID("file")
-	stored, err := s.fileStore.PutFile(ctx, credential, FileStorePutRequest{
+	store, err := s.ensureTeamAssetStore(ctx, credential, principal.TeamID)
+	if err != nil {
+		return FileMetadata{}, err
+	}
+	storePath := teamFileAssetStorePath(fileID)
+	stored, err := s.assetStore.PutObject(ctx, credential, AssetStorePutObjectRequest{
 		TeamID:   principal.TeamID,
-		FileID:   fileID,
-		Filename: trimmedName,
-		MimeType: resolvedMimeType,
+		RegionID: store.RegionID,
+		VolumeID: store.VolumeID,
+		Path:     storePath,
 		Content:  content,
 	})
 	if err != nil {
 		return FileMetadata{}, err
 	}
 	record := &managedFileRecord{
-		ID:                fileID,
-		TeamID:            principal.TeamID,
-		Filename:          trimmedName,
-		MimeType:          resolvedMimeType,
-		SizeBytes:         stored.SizeBytes,
-		FileStoreVolumeID: stored.VolumeID,
-		FileStorePath:     stored.Path,
-		SHA256:            stored.SHA256,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:        fileID,
+		TeamID:    principal.TeamID,
+		Filename:  trimmedName,
+		MimeType:  resolvedMimeType,
+		SizeBytes: stored.SizeBytes,
+		StorePath: stored.Path,
+		SHA256:    stored.SHA256,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := s.repo.CreateFile(ctx, record); err != nil {
-		_ = s.fileStore.DeleteFile(ctx, credential, FileStoreDeleteRequest{TeamID: principal.TeamID, FileID: fileID, VolumeID: stored.VolumeID, Path: stored.Path})
+		_ = s.assetStore.DeleteObject(ctx, credential, AssetStoreDeleteObjectRequest{
+			TeamID:   principal.TeamID,
+			RegionID: store.RegionID,
+			VolumeID: store.VolumeID,
+			Path:     stored.Path,
+		})
 		return FileMetadata{}, err
 	}
 	return buildFileObject(record), nil
@@ -663,14 +672,31 @@ func (s *Service) DeleteFile(ctx context.Context, principal Principal, credentia
 	if err != nil {
 		return nil, err
 	}
-	if s.fileStore != nil {
-		if err := s.fileStore.DeleteFile(ctx, credential, FileStoreDeleteRequest{
-			TeamID:   principal.TeamID,
-			FileID:   record.ID,
-			VolumeID: record.FileStoreVolumeID,
-			Path:     record.FileStorePath,
-		}); err != nil {
-			return nil, err
+	if strings.TrimSpace(record.StorePath) != "" || strings.TrimSpace(record.FileStoreVolumeID) != "" {
+		if s.assetStore == nil {
+			return nil, errors.New("asset store is not configured")
+		}
+		switch {
+		case strings.TrimSpace(record.StorePath) != "":
+			store, err := s.getTeamAssetStore(ctx, credential, principal.TeamID)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.assetStore.DeleteObject(ctx, credential, AssetStoreDeleteObjectRequest{
+				TeamID:   principal.TeamID,
+				RegionID: store.RegionID,
+				VolumeID: store.VolumeID,
+				Path:     record.StorePath,
+			}); err != nil {
+				return nil, err
+			}
+		case strings.TrimSpace(record.FileStoreVolumeID) != "":
+			if err := s.assetStore.DeleteStore(ctx, credential, AssetStoreDeleteStoreRequest{
+				TeamID:   principal.TeamID,
+				VolumeID: record.FileStoreVolumeID,
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := s.repo.DeleteFile(ctx, principal.TeamID, fileID); err != nil {
@@ -683,22 +709,36 @@ func (s *Service) readFileContent(ctx context.Context, credential RequestCredent
 	if record == nil {
 		return nil, ErrFileNotFound
 	}
-	if strings.TrimSpace(record.FileStoreVolumeID) == "" || strings.TrimSpace(record.FileStorePath) == "" {
+	switch {
+	case strings.TrimSpace(record.StorePath) != "":
+		if s.assetStore == nil {
+			return nil, errors.New("asset store is not configured")
+		}
+		store, err := s.getTeamAssetStore(ctx, credential, record.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		return s.assetStore.ReadObject(ctx, credential, AssetStoreReadObjectRequest{
+			TeamID:   record.TeamID,
+			RegionID: store.RegionID,
+			VolumeID: store.VolumeID,
+			Path:     record.StorePath,
+		})
+	case strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "":
+		if s.assetStore == nil {
+			return nil, errors.New("asset store is not configured")
+		}
+		return s.assetStore.ReadObject(ctx, credential, AssetStoreReadObjectRequest{
+			TeamID:   record.TeamID,
+			VolumeID: record.FileStoreVolumeID,
+			Path:     record.FileStorePath,
+		})
+	default:
 		if len(record.Content) == 0 {
 			return nil, ErrFileNotFound
 		}
 		return append([]byte(nil), record.Content...), nil
 	}
-	if s.fileStore == nil {
-		return nil, errors.New("file store is not configured")
-	}
-	return s.fileStore.ReadFile(ctx, credential, FileStoreReadRequest{
-		TeamID:          record.TeamID,
-		FileID:          record.ID,
-		VolumeID:        record.FileStoreVolumeID,
-		Path:            record.FileStorePath,
-		FallbackContent: record.Content,
-	})
 }
 
 func (s *Service) ArchiveSession(ctx context.Context, principal Principal, sessionID string) (*Session, error) {
@@ -1227,6 +1267,10 @@ func defaultFileMountPath(fileID, mountPath string) string {
 		return trimmed
 	}
 	return "/mnt/session/uploads/" + fileID
+}
+
+func teamFileAssetStorePath(fileID string) string {
+	return path.Join("/managed-agents-assets/files", strings.TrimSpace(fileID), "content")
 }
 
 func defaultGitHubMountPath(repoName, mountPath string) string {

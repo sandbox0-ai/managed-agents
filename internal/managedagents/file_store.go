@@ -5,39 +5,54 @@ import (
 	"io"
 )
 
-// FileStore keeps uploaded file bytes outside PostgreSQL while PostgreSQL remains
-// the metadata source of truth.
-type FileStore interface {
-	PutFile(ctx context.Context, credential RequestCredential, req FileStorePutRequest) (FileStoreObject, error)
-	ReadFile(ctx context.Context, credential RequestCredential, req FileStoreReadRequest) ([]byte, error)
-	DeleteFile(ctx context.Context, credential RequestCredential, req FileStoreDeleteRequest) error
+// AssetStore keeps file-like asset bytes outside PostgreSQL while PostgreSQL
+// remains the metadata source of truth.
+type AssetStore interface {
+	CreateStore(ctx context.Context, credential RequestCredential, req AssetStoreCreateStoreRequest) (AssetStoreVolume, error)
+	DeleteStore(ctx context.Context, credential RequestCredential, req AssetStoreDeleteStoreRequest) error
+	PutObject(ctx context.Context, credential RequestCredential, req AssetStorePutObjectRequest) (AssetStoreObject, error)
+	ReadObject(ctx context.Context, credential RequestCredential, req AssetStoreReadObjectRequest) ([]byte, error)
+	DeleteObject(ctx context.Context, credential RequestCredential, req AssetStoreDeleteObjectRequest) error
 }
 
-type FileStorePutRequest struct {
+type AssetStoreCreateStoreRequest struct {
 	TeamID   string
-	FileID   string
-	Filename string
-	MimeType string
+	RegionID string
+}
+
+type AssetStoreDeleteStoreRequest struct {
+	TeamID   string
+	RegionID string
+	VolumeID string
+}
+
+type AssetStorePutObjectRequest struct {
+	TeamID   string
+	RegionID string
+	VolumeID string
+	Path     string
 	Content  io.Reader
 }
 
-type FileStoreReadRequest struct {
-	TeamID          string
-	FileID          string
-	VolumeID        string
-	Path            string
-	FallbackContent []byte
-}
-
-type FileStoreDeleteRequest struct {
+type AssetStoreReadObjectRequest struct {
 	TeamID   string
-	FileID   string
+	RegionID string
 	VolumeID string
 	Path     string
 }
 
-type FileStoreObject struct {
-	VolumeID  string
+type AssetStoreDeleteObjectRequest struct {
+	TeamID   string
+	RegionID string
+	VolumeID string
+	Path     string
+}
+
+type AssetStoreVolume struct {
+	VolumeID string
+}
+
+type AssetStoreObject struct {
 	Path      string
 	SizeBytes int64
 	SHA256    string

@@ -124,7 +124,7 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		zap.Int("bootstrap_event_count", len(bootstrapEvents)),
 	)
 	phaseStarted = time.Now()
-	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
+	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.SandboxID, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
 	if err != nil {
 		op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), err)
 		return err
@@ -229,6 +229,7 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 	if strings.TrimSpace(workspaceVolumeID) == "" {
 		return errors.New("workspace volume is required")
 	}
+	var teamStore *gatewaymanagedagents.TeamAssetStore
 	for _, resource := range resources {
 		if resourceType(resource) != "file" {
 			continue
@@ -243,7 +244,23 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 			return fmt.Errorf("resolve file resource %s: %w", fileID, err)
 		}
 		content := record.Content
-		if strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "" {
+		switch {
+		case strings.TrimSpace(record.StorePath) != "":
+			if teamStore == nil {
+				regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
+				if err != nil {
+					return fmt.Errorf("resolve team asset store region: %w", err)
+				}
+				teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
+				if err != nil {
+					return fmt.Errorf("resolve team asset store: %w", err)
+				}
+			}
+			content, err = client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+			if err != nil {
+				return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
+			}
+		case strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "":
 			content, err = client.ReadVolumeFile(ctx, record.FileStoreVolumeID, record.FileStorePath)
 			if err != nil {
 				return fmt.Errorf("read file-store resource %s: %w", fileID, err)
@@ -295,12 +312,13 @@ func retryVolumeFileOperation(ctx context.Context, operation func() error) error
 	return lastErr
 }
 
-func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID, workingDirectory, vendor string, engine map[string]any, agent map[string]any) ([]string, error) {
+func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *sandbox0sdk.Client, sandboxID, workspaceVolumeID, teamID, workingDirectory, vendor string, engine map[string]any, agent map[string]any) ([]string, error) {
 	skillEntries := anySlice(agent["skills"])
 	if len(skillEntries) == 0 {
 		return []string{}, nil
 	}
 	preloadSet := make(map[string]struct{}, len(skillEntries))
+	var teamStore *gatewaymanagedagents.TeamAssetStore
 	for _, raw := range skillEntries {
 		skill := mapValue(raw)
 		skillType := strings.TrimSpace(stringValue(skill["type"]))
@@ -324,8 +342,24 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 			if directory == "" {
 				return nil, fmt.Errorf("custom skill %s@%s is missing directory", skillID, version)
 			}
-			if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, m.cfg.WorkspaceMountPath, workingDirectory, directory, stored.Files); err != nil {
-				return nil, fmt.Errorf("materialize custom skill %s@%s: %w", skillID, version, err)
+			if strings.TrimSpace(stored.Bundle.Path) != "" {
+				if teamStore == nil {
+					regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
+					if err != nil {
+						return nil, fmt.Errorf("resolve team asset store region: %w", err)
+					}
+					teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
+					if err != nil {
+						return nil, fmt.Errorf("resolve team asset store: %w", err)
+					}
+				}
+				if err := m.materializeStoredSkillBundle(ctx, client, sandboxID, workspaceVolumeID, teamStore.VolumeID, stored.Snapshot.ID, stored.Bundle.Path, workingDirectory, directory); err != nil {
+					return nil, fmt.Errorf("materialize custom skill %s@%s bundle: %w", skillID, version, err)
+				}
+			} else {
+				if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, m.cfg.WorkspaceMountPath, workingDirectory, directory, stored.Files); err != nil {
+					return nil, fmt.Errorf("materialize custom skill %s@%s: %w", skillID, version, err)
+				}
 			}
 			preloadSet[directory] = struct{}{}
 		default:
@@ -338,6 +372,62 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 	}
 	sort.Strings(preloadNames)
 	return preloadNames, nil
+}
+
+func (m *SDKRuntimeManager) materializeStoredSkillBundle(ctx context.Context, client *sandbox0sdk.Client, sandboxID, workspaceVolumeID, assetVolumeID, skillVersionID, bundlePath, workingDirectory, directory string) error {
+	if strings.TrimSpace(sandboxID) == "" {
+		return errors.New("sandbox id is required")
+	}
+	if strings.TrimSpace(workspaceVolumeID) == "" {
+		return errors.New("workspace volume is required")
+	}
+	if strings.TrimSpace(assetVolumeID) == "" || strings.TrimSpace(bundlePath) == "" {
+		return errors.New("skill bundle asset source is incomplete")
+	}
+
+	bundleContent, err := client.ReadVolumeFile(ctx, assetVolumeID, bundlePath)
+	if err != nil {
+		return fmt.Errorf("read skill bundle: %w", err)
+	}
+
+	bundleVolumePath := skillBundleWorkspaceVolumePath(skillVersionID)
+	parent := path.Dir(bundleVolumePath)
+	if parent != "." && parent != "/" {
+		err := retryVolumeFileOperation(ctx, func() error {
+			_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("mkdir skill bundle path %s: %w", parent, err)
+		}
+	}
+	err = retryVolumeFileOperation(ctx, func() error {
+		_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, bundleVolumePath, bundleContent)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("write skill bundle %s: %w", bundleVolumePath, err)
+	}
+
+	bundleContainerPath := workspaceVolumePathToMountedPath(m.cfg.WorkspaceMountPath, bundleVolumePath)
+	skillsContainerPath := skillWorkspaceSkillsContainerPath(workingDirectory)
+	if bundleContainerPath == "" || skillsContainerPath == "" || workspaceMountedPathToVolumePath(m.cfg.WorkspaceMountPath, skillsContainerPath) == "" {
+		return errors.New("skill workspace path is invalid")
+	}
+	result, err := client.Sandbox(sandboxID).Cmd(
+		ctx,
+		"managed-agent-skill-bundle-unpack",
+		sandbox0sdk.WithCommand(skillBundleUnpackCommand(bundleContainerPath, skillsContainerPath, directory)),
+		sandbox0sdk.WithCmdCWD("/"),
+	)
+	if err != nil {
+		output := strings.TrimSpace(result.OutputRaw)
+		if output != "" {
+			return fmt.Errorf("unpack skill bundle: %w: %s", err, output)
+		}
+		return fmt.Errorf("unpack skill bundle: %w", err)
+	}
+	return nil
 }
 
 func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, resources []map[string]any) ([]managedCredentialBinding, error) {
@@ -983,6 +1073,14 @@ func skillFileTargetPath(workspaceMountPath, workingDirectory, directory, stored
 	return cleanMountPath(path.Join(volumeBase, relative))
 }
 
+func skillBundleWorkspaceVolumePath(skillVersionID string) string {
+	return cleanMountPath(path.Join("/.sandbox0/managed-agents/skills", sanitizeName(skillVersionID), "bundle.tar.gz"))
+}
+
+func skillWorkspaceSkillsContainerPath(workingDirectory string) string {
+	return cleanMountPath(path.Join(strings.TrimSpace(workingDirectory), ".claude", "skills"))
+}
+
 func workspaceMountedPathToVolumePath(workspaceMountPath, containerPath string) string {
 	mountPath := cleanMountPath(workspaceMountPath)
 	if mountPath == "" {
@@ -1005,6 +1103,21 @@ func workspaceMountedPathToVolumePath(workspaceMountPath, containerPath string) 
 	return cleanMountPath("/" + strings.TrimPrefix(targetPath, prefix))
 }
 
+func workspaceVolumePathToMountedPath(workspaceMountPath, volumePath string) string {
+	mountPath := cleanMountPath(workspaceMountPath)
+	if mountPath == "" {
+		mountPath = "/workspace"
+	}
+	targetPath := cleanMountPath(volumePath)
+	if targetPath == "" {
+		return ""
+	}
+	if mountPath == "/" {
+		return targetPath
+	}
+	return cleanMountPath(path.Join(mountPath, strings.TrimPrefix(targetPath, "/")))
+}
+
 func normalizedStoredSkillRelativePath(directory, storedPath string) string {
 	cleanDirectory := sanitizeName(directory)
 	cleanPath := path.Clean(strings.TrimSpace(strings.TrimPrefix(storedPath, "/")))
@@ -1015,6 +1128,25 @@ func normalizedStoredSkillRelativePath(directory, storedPath string) string {
 		return cleanPath
 	}
 	return path.Join(cleanDirectory, cleanPath)
+}
+
+func skillBundleUnpackCommand(bundleContainerPath, skillsContainerPath, directory string) []string {
+	script := strings.Join([]string{
+		"set -eu",
+		`BUNDLE_PATH="$1"`,
+		`SKILLS_ROOT="$2"`,
+		`SKILL_DIR="$3"`,
+		`TMP_ROOT="$SKILLS_ROOT/.tmp-$SKILL_DIR-$$"`,
+		`rm -rf "$TMP_ROOT"`,
+		`mkdir -p "$TMP_ROOT" "$SKILLS_ROOT"`,
+		`tar -xzf "$BUNDLE_PATH" -C "$TMP_ROOT"`,
+		`if [ ! -f "$TMP_ROOT/$SKILL_DIR/SKILL.md" ]; then echo "missing extracted SKILL.md for $SKILL_DIR" >&2; exit 1; fi`,
+		`rm -rf "$SKILLS_ROOT/$SKILL_DIR"`,
+		`mv "$TMP_ROOT/$SKILL_DIR" "$SKILLS_ROOT/$SKILL_DIR"`,
+		`rm -rf "$TMP_ROOT"`,
+		`rm -f "$BUNDLE_PATH"`,
+	}, "\n")
+	return []string{"sh", "-lc", script, "managed-agent-skill-bundle", bundleContainerPath, skillsContainerPath, directory}
 }
 
 func resourceType(resource map[string]any) string {

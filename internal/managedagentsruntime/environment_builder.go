@@ -19,6 +19,8 @@ type environmentBuildResources struct {
 }
 
 const environmentBuildCleanupTimeout = 2 * time.Minute
+const environmentArtifactCleanupPollInterval = 100 * time.Millisecond
+const environmentArtifactCleanupGracePeriod = 2 * time.Second
 
 func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
@@ -84,14 +86,9 @@ func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, cre
 	if _, err := m.runtimeSandboxToken(); err != nil {
 		return err
 	}
-	artifacts, err := m.repo.ListEnvironmentArtifacts(ctx, teamID, environmentID)
+	artifacts, err := m.waitForEnvironmentArtifactsToSettle(ctx, teamID, environmentID)
 	if err != nil {
 		return err
-	}
-	for _, artifact := range artifacts {
-		if strings.TrimSpace(artifact.Status) == gatewaymanagedagents.EnvironmentArtifactStatusBuilding {
-			return fmt.Errorf("environment artifact %s is still building", artifact.ID)
-		}
 	}
 	client, err := m.runtimeSandboxClient()
 	if err != nil {
@@ -125,6 +122,42 @@ func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, cre
 		}
 	}
 	return nil
+}
+
+func (m *SDKRuntimeManager) waitForEnvironmentArtifactsToSettle(ctx context.Context, teamID, environmentID string) ([]*gatewaymanagedagents.EnvironmentArtifact, error) {
+	waitBudget := environmentArtifactCleanupGracePeriod
+	if m.cfg.SandboxRequestTimeout > 0 && m.cfg.SandboxRequestTimeout < waitBudget {
+		waitBudget = m.cfg.SandboxRequestTimeout
+	}
+	deadline := time.Now().UTC().Add(waitBudget)
+	for {
+		artifacts, err := m.repo.ListEnvironmentArtifacts(ctx, teamID, environmentID)
+		if err != nil {
+			return nil, err
+		}
+		buildingID := ""
+		for _, artifact := range artifacts {
+			if strings.TrimSpace(artifact.Status) == gatewaymanagedagents.EnvironmentArtifactStatusBuilding {
+				buildingID = artifact.ID
+				break
+			}
+		}
+		if buildingID == "" {
+			return artifacts, nil
+		}
+		if time.Now().UTC().After(deadline) {
+			return nil, fmt.Errorf("%w: %s", gatewaymanagedagents.ErrEnvironmentArtifactBuilding, buildingID)
+		}
+		timer := time.NewTimer(environmentArtifactCleanupPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifact, error) {

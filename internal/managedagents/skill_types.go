@@ -17,6 +17,14 @@ type storedSkillFile struct {
 
 type StoredSkillFile = storedSkillFile
 
+type storedSkillBundle struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type StoredSkillBundle = storedSkillBundle
+
 type Skill struct {
 	Type          string  `json:"type"`
 	ID            string  `json:"id"`
@@ -53,6 +61,7 @@ type ListSkillVersionsResponse struct {
 type StoredSkillVersion struct {
 	Snapshot SkillVersion
 	Files    []storedSkillFile
+	Bundle   storedSkillBundle
 }
 
 type parsedSkillUpload struct {

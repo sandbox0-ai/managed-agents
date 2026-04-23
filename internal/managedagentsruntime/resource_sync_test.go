@@ -707,9 +707,23 @@ func TestWorkspaceMountedPathToVolumePathRejectsSiblingPrefix(t *testing.T) {
 	}
 }
 
+func TestWorkspaceVolumePathToMountedPathUsesWorkspaceMount(t *testing.T) {
+	got := workspaceVolumePathToMountedPath("/workspace", "/.sandbox0/bootstrap/demo.tar.gz")
+	if got != "/workspace/.sandbox0/bootstrap/demo.tar.gz" {
+		t.Fatalf("mounted path = %q, want workspace-mounted path", got)
+	}
+}
+
+func TestSkillBundleWorkspaceVolumePathUsesVersionScopedDirectory(t *testing.T) {
+	got := skillBundleWorkspaceVolumePath("skillver_123")
+	if got != "/.sandbox0/managed-agents/skills/skillver-123/bundle.tar.gz" {
+		t.Fatalf("bundle volume path = %q", got)
+	}
+}
+
 func TestMaterializeAgentSkillsRejectsAnthropicPrebuiltSkill(t *testing.T) {
 	manager := &SDKRuntimeManager{}
-	_, err := manager.materializeAgentSkills(t.Context(), nil, "vol_123", "team_123", "/workspace", "claude", map[string]any{}, map[string]any{
+	_, err := manager.materializeAgentSkills(t.Context(), nil, "sbox_123", "vol_123", "team_123", "/workspace", "claude", map[string]any{}, map[string]any{
 		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "xlsx", "version": "1"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "not supported") {

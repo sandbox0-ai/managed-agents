@@ -1,9 +1,15 @@
 package managedagents
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestListAnthropicSkillsReturnsEmpty(t *testing.T) {
@@ -33,7 +39,8 @@ func TestNormalizeAgentSkillsRejectsAnthropicPrebuiltSkill(t *testing.T) {
 
 func TestListSkillsWithoutSourceIncludesOnlyCustomSkills(t *testing.T) {
 	repo := newTestRepository(t)
-	service := NewService(repo, noopRuntimeManager{}, nil)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
 	principal := Principal{TeamID: "team_123"}
 	_, err := service.CreateSkill(context.Background(), principal, nil, []uploadedSkillFile{{
 		Path:    "demo-skill/SKILL.md",
@@ -54,5 +61,250 @@ func TestListSkillsWithoutSourceIncludesOnlyCustomSkills(t *testing.T) {
 	}
 	if hasMore && nextPage == nil {
 		t.Fatal("expected next_page when has_more is true")
+	}
+}
+
+func TestCreateSkillStoresBundleOutsidePostgres(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+
+	created, err := service.CreateSkill(ctx, principal, nil, []uploadedSkillFile{
+		{
+			Path:    "demo-skill/SKILL.md",
+			Content: []byte("---\nname: demo-skill\ndescription: Demo skill\n---\n\n# Demo Skill\n"),
+		},
+		{
+			Path:    "demo-skill/docs/guide.md",
+			Content: []byte("guide"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+	if created.LatestVersion == nil || *created.LatestVersion == "" {
+		t.Fatalf("latest_version = %#v, want populated", created.LatestVersion)
+	}
+
+	stored, err := repo.GetStoredSkillVersion(ctx, principal.TeamID, created.ID, *created.LatestVersion)
+	if err != nil {
+		t.Fatalf("GetStoredSkillVersion: %v", err)
+	}
+	if len(stored.Files) != 0 {
+		t.Fatalf("stored files = %d, want 0 for bundle-backed skills", len(stored.Files))
+	}
+	if stored.Bundle.Path == "" {
+		t.Fatal("bundle path is empty")
+	}
+
+	teamStore, err := repo.GetTeamAssetStore(ctx, principal.TeamID, "default")
+	if err != nil {
+		t.Fatalf("GetTeamAssetStore: %v", err)
+	}
+	bundleContent, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, stored.Bundle.Path)]
+	if !ok {
+		t.Fatalf("missing bundle content for %s", stored.Bundle.Path)
+	}
+	bundleFiles := readSkillBundleFiles(t, bundleContent)
+	if got := string(bundleFiles["demo-skill/SKILL.md"]); !strings.Contains(got, "name: demo-skill") {
+		t.Fatalf("bundle SKILL.md = %q", got)
+	}
+	if got := string(bundleFiles["demo-skill/docs/guide.md"]); got != "guide" {
+		t.Fatalf("bundle guide = %q, want guide", got)
+	}
+}
+
+func TestDeleteSkillRemovesStoredBundles(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+
+	created, err := service.CreateSkill(ctx, principal, nil, []uploadedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill\n---\n\n# Demo Skill\n"),
+	}})
+	if err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+	version, err := service.CreateSkillVersion(ctx, principal, created.ID, []uploadedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill v2\n---\n\n# Demo Skill\n"),
+	}})
+	if err != nil {
+		t.Fatalf("CreateSkillVersion: %v", err)
+	}
+	if store.createStoreCalls != 1 {
+		t.Fatalf("createStoreCalls = %d, want 1", store.createStoreCalls)
+	}
+
+	storedVersions, err := repo.ListStoredSkillVersions(ctx, principal.TeamID, created.ID)
+	if err != nil {
+		t.Fatalf("ListStoredSkillVersions: %v", err)
+	}
+	if len(storedVersions) != 2 {
+		t.Fatalf("stored version count = %d, want 2", len(storedVersions))
+	}
+	teamStore, err := repo.GetTeamAssetStore(ctx, principal.TeamID, "default")
+	if err != nil {
+		t.Fatalf("GetTeamAssetStore: %v", err)
+	}
+	for _, stored := range storedVersions {
+		if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, stored.Bundle.Path)]; !ok {
+			t.Fatalf("missing stored bundle before delete: %s", stored.Bundle.Path)
+		}
+	}
+
+	if _, err := service.DeleteSkill(ctx, principal, created.ID); err != nil {
+		t.Fatalf("DeleteSkill: %v", err)
+	}
+	for _, stored := range storedVersions {
+		if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, stored.Bundle.Path)]; ok {
+			t.Fatalf("bundle still present after delete: %s", stored.Bundle.Path)
+		}
+	}
+	if _, err := repo.GetSkillVersion(ctx, principal.TeamID, created.ID, version.Version); err == nil {
+		t.Fatal("expected deleted skill version to be gone")
+	}
+}
+
+func TestCreateSkillVersionMissingSkillCleansUploadedBundle(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+
+	_, err := service.CreateSkillVersion(ctx, principal, "skill_missing", []uploadedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill\n---\n\n# Demo Skill\n"),
+	}})
+	if !errors.Is(err, ErrSkillNotFound) {
+		t.Fatalf("CreateSkillVersion error = %v, want ErrSkillNotFound", err)
+	}
+	if store.createStoreCalls != 1 {
+		t.Fatalf("createStoreCalls = %d, want 1", store.createStoreCalls)
+	}
+	if len(store.objects) != 0 {
+		t.Fatalf("asset-store objects = %#v, want empty after rollback", store.objects)
+	}
+}
+
+func TestDeleteSkillVersionRemovesOnlyRequestedBundle(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+
+	created, err := service.CreateSkill(ctx, principal, nil, []uploadedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill\n---\n\n# Demo Skill\n"),
+	}})
+	if err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+	firstVersion := *created.LatestVersion
+	second, err := service.CreateSkillVersion(ctx, principal, created.ID, []uploadedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Demo skill v2\n---\n\n# Demo Skill\n"),
+	}})
+	if err != nil {
+		t.Fatalf("CreateSkillVersion: %v", err)
+	}
+
+	storedVersions, err := repo.ListStoredSkillVersions(ctx, principal.TeamID, created.ID)
+	if err != nil {
+		t.Fatalf("ListStoredSkillVersions: %v", err)
+	}
+	if len(storedVersions) != 2 {
+		t.Fatalf("stored version count = %d, want 2", len(storedVersions))
+	}
+	teamStore, err := repo.GetTeamAssetStore(ctx, principal.TeamID, "default")
+	if err != nil {
+		t.Fatalf("GetTeamAssetStore: %v", err)
+	}
+	bundlePathByVersion := map[string]string{}
+	for _, stored := range storedVersions {
+		bundlePathByVersion[stored.Snapshot.Version] = stored.Bundle.Path
+	}
+
+	if _, err := service.DeleteSkillVersion(ctx, principal, created.ID, second.Version); err != nil {
+		t.Fatalf("DeleteSkillVersion: %v", err)
+	}
+	if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, bundlePathByVersion[second.Version])]; ok {
+		t.Fatalf("deleted version bundle still present: %s", bundlePathByVersion[second.Version])
+	}
+	if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, bundlePathByVersion[firstVersion])]; !ok {
+		t.Fatalf("previous version bundle missing: %s", bundlePathByVersion[firstVersion])
+	}
+	skill, err := service.GetSkill(ctx, principal, created.ID)
+	if err != nil {
+		t.Fatalf("GetSkill: %v", err)
+	}
+	if skill.LatestVersion == nil || *skill.LatestVersion != firstVersion {
+		t.Fatalf("latest_version = %#v, want %q", skill.LatestVersion, firstVersion)
+	}
+	if _, err := repo.GetSkillVersion(ctx, principal.TeamID, created.ID, second.Version); !errors.Is(err, ErrSkillVersionNotFound) {
+		t.Fatalf("GetSkillVersion deleted version error = %v, want ErrSkillVersionNotFound", err)
+	}
+}
+
+func TestDeleteLegacySkillVersionDoesNotRequireBundleStore(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+
+	versionValue := "1"
+	skill := buildSkillObject("skill_legacy", nil, &versionValue, now)
+	version := buildSkillVersionObject("skillver_legacy", skill.ID, versionValue, &parsedSkillUpload{
+		Name:        "demo-skill",
+		Description: "Legacy skill",
+		Directory:   "demo-skill",
+	}, now)
+	if err := repo.CreateSkillWithVersion(ctx, principal.TeamID, skill, version, []storedSkillFile{{
+		Path:    "demo-skill/SKILL.md",
+		Content: []byte("---\nname: demo-skill\ndescription: Legacy skill\n---\n\n# Demo Skill\n"),
+	}}, storedSkillBundle{}, now); err != nil {
+		t.Fatalf("CreateSkillWithVersion: %v", err)
+	}
+
+	if _, err := service.DeleteSkillVersion(ctx, principal, skill.ID, version.Version); err != nil {
+		t.Fatalf("DeleteSkillVersion: %v", err)
+	}
+	if _, err := repo.GetSkillVersion(ctx, principal.TeamID, skill.ID, version.Version); !errors.Is(err, ErrSkillVersionNotFound) {
+		t.Fatalf("GetSkillVersion error = %v, want ErrSkillVersionNotFound", err)
+	}
+}
+
+func readSkillBundleFiles(t *testing.T, content []byte) map[string][]byte {
+	t.Helper()
+
+	reader, err := gzip.NewReader(bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer reader.Close()
+
+	tarReader := tar.NewReader(reader)
+	files := map[string][]byte{}
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return files
+		}
+		if err != nil {
+			t.Fatalf("tar next: %v", err)
+		}
+		data, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatalf("read tar entry %s: %v", header.Name, err)
+		}
+		files[header.Name] = data
 	}
 }

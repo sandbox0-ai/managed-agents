@@ -336,6 +336,14 @@ type RuntimeRecord struct {
 	UpdatedAt         time.Time
 }
 
+type TeamAssetStore struct {
+	TeamID    string
+	RegionID  string
+	VolumeID  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type EnvironmentArtifact struct {
 	ID             string
 	TeamID         string

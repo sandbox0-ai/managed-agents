@@ -563,8 +563,8 @@ func TestDeleteVaultAndCredentialRejectReferencedSessions(t *testing.T) {
 
 func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
 	repo := newTestRepository(t)
-	store := newTestFileStore()
-	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
 	ctx := context.Background()
 	principal := Principal{TeamID: "team_123"}
 	credential := RequestCredential{Token: "token"}
@@ -580,8 +580,11 @@ func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
 	if len(record.Content) != 0 {
 		t.Fatalf("postgres content bytes = %d, want 0", len(record.Content))
 	}
-	if record.FileStoreVolumeID == "" || record.FileStorePath == "" {
-		t.Fatalf("file-store location missing: %#v", record)
+	if record.StorePath == "" {
+		t.Fatalf("asset-store path missing: %#v", record)
+	}
+	if record.FileStoreVolumeID != "" || record.FileStorePath != "" {
+		t.Fatalf("legacy file-store fields should be empty: %#v", record)
 	}
 	file, err := service.GetFileContent(ctx, principal, credential, metadata.ID)
 	if err != nil {
@@ -594,8 +597,8 @@ func TestServiceUploadFileStoresBytesOutsidePostgres(t *testing.T) {
 
 func TestDeleteFileKeepsRecordWhenFileStoreDeleteFails(t *testing.T) {
 	repo := newTestRepository(t)
-	store := newTestFileStore()
-	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
 	ctx := context.Background()
 	principal := Principal{TeamID: "team_123"}
 	credential := RequestCredential{Token: "token"}
@@ -603,11 +606,11 @@ func TestDeleteFileKeepsRecordWhenFileStoreDeleteFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UploadFile: %v", err)
 	}
-	store.deleteErr = errors.New("delete volume failed")
+	store.deleteObjectErr = errors.New("delete object failed")
 
 	_, err = service.DeleteFile(ctx, principal, credential, metadata.ID)
-	if err == nil || !strings.Contains(err.Error(), "delete volume failed") {
-		t.Fatalf("DeleteFile error = %v, want file-store failure", err)
+	if err == nil || !strings.Contains(err.Error(), "delete object failed") {
+		t.Fatalf("DeleteFile error = %v, want asset-store failure", err)
 	}
 	if _, err := repo.GetFile(ctx, principal.TeamID, metadata.ID); err != nil {
 		t.Fatalf("GetFile after failed delete: %v", err)
@@ -616,8 +619,8 @@ func TestDeleteFileKeepsRecordWhenFileStoreDeleteFails(t *testing.T) {
 
 func TestResolveFileBackedInputEventsValidatesMIMEAndInlinesBase64(t *testing.T) {
 	repo := newTestRepository(t)
-	store := newTestFileStore()
-	service := NewService(repo, noopRuntimeManager{}, nil, WithFileStore(store))
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
 	ctx := context.Background()
 	principal := Principal{TeamID: "team_123"}
 	credential := RequestCredential{Token: "token"}
@@ -658,6 +661,150 @@ func TestResolveFileBackedInputEventsValidatesMIMEAndInlinesBase64(t *testing.T)
 	_, err = service.resolveFileBackedInputEvents(ctx, principal, credential, badEvents)
 	if err == nil || !strings.Contains(err.Error(), "not supported for document") {
 		t.Fatalf("resolveFileBackedInputEvents error = %v, want MIME rejection", err)
+	}
+}
+
+func TestServiceUploadFileReusesTeamAssetStore(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+
+	first, err := service.UploadFile(ctx, principal, credential, "first.txt", "text/plain", strings.NewReader("first"))
+	if err != nil {
+		t.Fatalf("UploadFile first: %v", err)
+	}
+	second, err := service.UploadFile(ctx, principal, credential, "second.txt", "text/plain", strings.NewReader("second"))
+	if err != nil {
+		t.Fatalf("UploadFile second: %v", err)
+	}
+	if store.createStoreCalls != 1 {
+		t.Fatalf("createStoreCalls = %d, want 1", store.createStoreCalls)
+	}
+	teamStore, err := repo.GetTeamAssetStore(ctx, principal.TeamID, "default")
+	if err != nil {
+		t.Fatalf("GetTeamAssetStore: %v", err)
+	}
+	firstRecord, err := repo.GetFile(ctx, principal.TeamID, first.ID)
+	if err != nil {
+		t.Fatalf("GetFile first: %v", err)
+	}
+	secondRecord, err := repo.GetFile(ctx, principal.TeamID, second.ID)
+	if err != nil {
+		t.Fatalf("GetFile second: %v", err)
+	}
+	if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, firstRecord.StorePath)]; !ok {
+		t.Fatalf("missing first asset object for %s", firstRecord.StorePath)
+	}
+	if _, ok := store.objects[testAssetStoreKey(teamStore.VolumeID, secondRecord.StorePath)]; !ok {
+		t.Fatalf("missing second asset object for %s", secondRecord.StorePath)
+	}
+}
+
+func TestGetFileContentSupportsLegacyFileStoreLocator(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:                "file_legacy_locator",
+		TeamID:            principal.TeamID,
+		Filename:          "legacy.txt",
+		MimeType:          "text/plain",
+		SizeBytes:         int64(len("legacy-bytes")),
+		FileStoreVolumeID: "vol_legacy",
+		FileStorePath:     "/managed-agent-files/team_123/file_legacy_locator/content",
+		SHA256:            "legacy-sha",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, record.FileStorePath)] = []byte("legacy-bytes")
+
+	file, err := service.GetFileContent(ctx, principal, credential, record.ID)
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if got := string(file.Content); got != "legacy-bytes" {
+		t.Fatalf("file content = %q, want legacy-bytes", got)
+	}
+}
+
+func TestGetFileContentSupportsLegacyPostgresBytes(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, noopRuntimeManager{}, nil)
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:        "file_legacy_postgres",
+		TeamID:    principal.TeamID,
+		Filename:  "legacy.txt",
+		MimeType:  "text/plain",
+		SizeBytes: int64(len("legacy-postgres")),
+		Content:   []byte("legacy-postgres"),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+
+	file, err := service.GetFileContent(ctx, principal, RequestCredential{}, record.ID)
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if got := string(file.Content); got != "legacy-postgres" {
+		t.Fatalf("file content = %q, want legacy-postgres", got)
+	}
+}
+
+func TestDeleteFileSupportsLegacyPerFileVolume(t *testing.T) {
+	repo := newTestRepository(t)
+	store := newTestAssetStore()
+	service := NewService(repo, noopRuntimeManager{}, nil, WithAssetStore(store))
+	ctx := context.Background()
+	principal := Principal{TeamID: "team_123"}
+	credential := RequestCredential{Token: "token"}
+	now := time.Now().UTC()
+
+	record := &managedFileRecord{
+		ID:                "file_legacy_delete",
+		TeamID:            principal.TeamID,
+		Filename:          "legacy.txt",
+		MimeType:          "text/plain",
+		SizeBytes:         int64(len("legacy-delete")),
+		FileStoreVolumeID: "vol_legacy_delete",
+		FileStorePath:     "/managed-agent-files/team_123/file_legacy_delete/content",
+		SHA256:            "legacy-sha",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.CreateFile(ctx, record); err != nil {
+		t.Fatalf("CreateFile: %v", err)
+	}
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, record.FileStorePath)] = []byte("legacy-delete")
+	store.objects[testAssetStoreKey(record.FileStoreVolumeID, "/managed-agent-files/team_123/file_legacy_delete/extra")] = []byte("extra")
+
+	if _, err := service.DeleteFile(ctx, principal, credential, record.ID); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if _, err := repo.GetFile(ctx, principal.TeamID, record.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("GetFile error = %v, want ErrFileNotFound", err)
+	}
+	for key := range store.objects {
+		if strings.HasPrefix(key, record.FileStoreVolumeID+":") {
+			t.Fatalf("legacy volume objects still present after delete: %s", key)
+		}
 	}
 }
 
@@ -1782,44 +1929,65 @@ func (m *updateSessionRuntimeManager) DestroyRuntime(context.Context, RequestCre
 	return nil
 }
 
-type testFileStore struct {
-	content   map[string][]byte
-	deleteErr error
+type testAssetStore struct {
+	createStoreCalls int
+	nextStoreID      int
+	objects          map[string][]byte
+	deleteStoreErr   error
+	deleteObjectErr  error
 }
 
-func newTestFileStore() *testFileStore {
-	return &testFileStore{content: map[string][]byte{}}
+func newTestAssetStore() *testAssetStore {
+	return &testAssetStore{objects: map[string][]byte{}}
 }
 
-func (s *testFileStore) PutFile(_ context.Context, _ RequestCredential, req FileStorePutRequest) (FileStoreObject, error) {
+func testAssetStoreKey(volumeID, path string) string {
+	return volumeID + ":" + path
+}
+
+func (s *testAssetStore) CreateStore(_ context.Context, _ RequestCredential, req AssetStoreCreateStoreRequest) (AssetStoreVolume, error) {
+	s.createStoreCalls++
+	s.nextStoreID++
+	return AssetStoreVolume{VolumeID: fmt.Sprintf("vol_%s_%d", req.TeamID, s.nextStoreID)}, nil
+}
+
+func (s *testAssetStore) DeleteStore(_ context.Context, _ RequestCredential, req AssetStoreDeleteStoreRequest) error {
+	if s.deleteStoreErr != nil {
+		return s.deleteStoreErr
+	}
+	for key := range s.objects {
+		if strings.HasPrefix(key, req.VolumeID+":") {
+			delete(s.objects, key)
+		}
+	}
+	return nil
+}
+
+func (s *testAssetStore) PutObject(_ context.Context, _ RequestCredential, req AssetStorePutObjectRequest) (AssetStoreObject, error) {
 	data, err := io.ReadAll(req.Content)
 	if err != nil {
-		return FileStoreObject{}, err
+		return AssetStoreObject{}, err
 	}
-	s.content[req.FileID] = append([]byte(nil), data...)
-	return FileStoreObject{
-		VolumeID:  "vol_" + req.FileID,
-		Path:      "/files/" + req.FileID,
+	s.objects[testAssetStoreKey(req.VolumeID, req.Path)] = append([]byte(nil), data...)
+	return AssetStoreObject{
+		Path:      req.Path,
 		SizeBytes: int64(len(data)),
 		SHA256:    "test-sha",
 	}, nil
 }
 
-func (s *testFileStore) ReadFile(_ context.Context, _ RequestCredential, req FileStoreReadRequest) ([]byte, error) {
-	if data, ok := s.content[req.FileID]; ok {
+func (s *testAssetStore) ReadObject(_ context.Context, _ RequestCredential, req AssetStoreReadObjectRequest) ([]byte, error) {
+	if data, ok := s.objects[testAssetStoreKey(req.VolumeID, req.Path)]; ok {
 		return append([]byte(nil), data...), nil
-	}
-	if len(req.FallbackContent) > 0 {
-		return append([]byte(nil), req.FallbackContent...), nil
 	}
 	return nil, ErrFileNotFound
 }
 
-func (s *testFileStore) DeleteFile(_ context.Context, _ RequestCredential, req FileStoreDeleteRequest) error {
-	if s.deleteErr != nil {
-		return s.deleteErr
+func (s *testAssetStore) DeleteObject(_ context.Context, _ RequestCredential, req AssetStoreDeleteObjectRequest) error {
+	if s.deleteObjectErr != nil {
+		return s.deleteObjectErr
 	}
-	delete(s.content, req.FileID)
+	delete(s.objects, testAssetStoreKey(req.VolumeID, req.Path))
 	return nil
 }
 

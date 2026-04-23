@@ -578,11 +578,11 @@ func (r *Repository) CreateFile(ctx context.Context, record *managedFileRecord) 
 	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_files (
 			id, team_id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id,
-			file_store_volume_id, file_store_path, sha256, content, snapshot, created_at, updated_at
+			store_path, file_store_volume_id, file_store_path, sha256, content, snapshot, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)
 	`, record.ID, record.TeamID, record.Filename, record.MimeType, record.SizeBytes, nullableString(record.ScopeType), nullableString(record.ScopeID),
-		nullableString(record.FileStoreVolumeID), nullableString(record.FileStorePath), nullableString(record.SHA256), nullableBytes(record.Content), string(payloadJSON), record.CreatedAt, record.UpdatedAt)
+		nullableString(record.StorePath), nullableString(record.FileStoreVolumeID), nullableString(record.FileStorePath), nullableString(record.SHA256), nullableBytes(record.Content), string(payloadJSON), record.CreatedAt, record.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert managed-agent file: %w", err)
 	}
@@ -647,12 +647,14 @@ func (r *Repository) GetFile(ctx context.Context, teamID, fileID string) (*manag
 	var record managedFileRecord
 	err := r.db(ctx).QueryRow(ctx, `
 		SELECT id, team_id, filename, mime_type, size_bytes, COALESCE(scope_type, ''), COALESCE(scope_id, ''),
+			COALESCE(store_path, ''),
 			COALESCE(file_store_volume_id, ''), COALESCE(file_store_path, ''), COALESCE(sha256, ''),
 			COALESCE(content, ''::bytea), created_at, updated_at
 		FROM managed_agent_files
 		WHERE team_id = $1 AND id = $2
 	`, teamID, strings.TrimSpace(fileID)).Scan(
 		&record.ID, &record.TeamID, &record.Filename, &record.MimeType, &record.SizeBytes, &record.ScopeType, &record.ScopeID,
+		&record.StorePath,
 		&record.FileStoreVolumeID, &record.FileStorePath, &record.SHA256, &record.Content, &record.CreatedAt, &record.UpdatedAt,
 	)
 	if err != nil {
