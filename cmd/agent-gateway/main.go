@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -36,6 +38,7 @@ import (
 )
 
 type config struct {
+	RunMode                 string
 	HTTPAddr                string
 	LogLevel                string
 	DatabaseURL             string
@@ -62,6 +65,12 @@ type config struct {
 	TraceOTLPEndpoint       string
 	TraceOTLPInsecure       bool
 	TraceSampleRate         float64
+	BackfillDryRun          bool
+	BackfillFiles           bool
+	BackfillSkills          bool
+	BackfillBatchSize       int
+	BackfillMaxItems        int
+	BackfillTeamID          string
 }
 
 const defaultSandbox0BaseURL = "https://api.sandbox0.ai"
@@ -139,6 +148,13 @@ func main() {
 
 	if err := runMigrations(ctx, pool, cfg.DatabaseSchema, logger); err != nil {
 		logger.Fatal("run migrations", zap.Error(err))
+	}
+
+	if strings.EqualFold(cfg.RunMode, "asset-backfill") {
+		if err := runAssetBackfill(ctx, cfg, pool, logger, managedObservability); err != nil {
+			logger.Fatal("run asset backfill", zap.Error(err))
+		}
+		return
 	}
 
 	authenticator, err := httpauth.NewSandbox0Authenticator(httpauth.Sandbox0AuthenticatorConfig{
@@ -242,6 +258,7 @@ func main() {
 func loadConfig() (config, error) {
 	sandbox0BaseURL := trimURL(envOrDefault("MANAGED_AGENT_SANDBOX0_BASE_URL", defaultSandbox0BaseURL))
 	cfg := config{
+		RunMode:                 strings.ToLower(envOrDefault("MANAGED_AGENT_RUN_MODE", "server")),
 		HTTPAddr:                envOrDefault("MANAGED_AGENT_HTTP_ADDR", ":8080"),
 		LogLevel:                envOrDefault("MANAGED_AGENT_LOG_LEVEL", "info"),
 		DatabaseURL:             strings.TrimSpace(os.Getenv("MANAGED_AGENT_DATABASE_URL")),
@@ -268,6 +285,12 @@ func loadConfig() (config, error) {
 		TraceOTLPEndpoint:       strings.TrimSpace(os.Getenv("MANAGED_AGENT_TRACE_OTLP_ENDPOINT")),
 		TraceOTLPInsecure:       envBool("MANAGED_AGENT_TRACE_OTLP_INSECURE", true),
 		TraceSampleRate:         envFloat("MANAGED_AGENT_TRACE_SAMPLE_RATE", 1),
+		BackfillDryRun:          envBool("MANAGED_AGENT_BACKFILL_DRY_RUN", true),
+		BackfillFiles:           envBool("MANAGED_AGENT_BACKFILL_FILES", true),
+		BackfillSkills:          envBool("MANAGED_AGENT_BACKFILL_SKILLS", true),
+		BackfillBatchSize:       envInt("MANAGED_AGENT_BACKFILL_BATCH_SIZE", 100),
+		BackfillMaxItems:        envInt("MANAGED_AGENT_BACKFILL_MAX_ITEMS", 0),
+		BackfillTeamID:          strings.TrimSpace(os.Getenv("MANAGED_AGENT_BACKFILL_TEAM_ID")),
 	}
 	if cfg.TraceExporter == "noop" && cfg.TraceOTLPEndpoint != "" {
 		cfg.TraceExporter = "otlp"
@@ -275,7 +298,57 @@ func loadConfig() (config, error) {
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("MANAGED_AGENT_DATABASE_URL is required")
 	}
+	switch cfg.RunMode {
+	case "", "server", "asset-backfill":
+	default:
+		return config{}, fmt.Errorf("unsupported MANAGED_AGENT_RUN_MODE %q", cfg.RunMode)
+	}
+	if cfg.RunMode == "asset-backfill" {
+		if cfg.Sandbox0AdminAPIKey == "" {
+			return config{}, fmt.Errorf("MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY is required for asset backfill")
+		}
+		if cfg.BackfillBatchSize <= 0 {
+			return config{}, fmt.Errorf("MANAGED_AGENT_BACKFILL_BATCH_SIZE must be greater than zero")
+		}
+		if cfg.BackfillMaxItems < 0 {
+			return config{}, fmt.Errorf("MANAGED_AGENT_BACKFILL_MAX_ITEMS must be zero or greater")
+		}
+		if !cfg.BackfillFiles && !cfg.BackfillSkills {
+			return config{}, fmt.Errorf("at least one of MANAGED_AGENT_BACKFILL_FILES or MANAGED_AGENT_BACKFILL_SKILLS must be true")
+		}
+	}
 	return cfg, nil
+}
+
+func runAssetBackfill(ctx context.Context, cfg config, pool *pgxpool.Pool, logger *zap.Logger, observability *managedagents.Observability) error {
+	repo := managedagents.NewRepository(pool)
+	service := managedagents.NewService(
+		repo,
+		nil,
+		logger,
+		managedagents.WithAssetStore(managedagentsruntime.NewVolumeAssetStore(cfg.Sandbox0BaseURL, cfg.Sandbox0Timeout, cfg.Sandbox0AdminAPIKey)),
+		managedagents.WithObservability(observability),
+	)
+	summary, err := service.BackfillTeamAssetStore(ctx, managedagents.RequestCredential{}, managedagents.AssetBackfillOptions{
+		DryRun:    cfg.BackfillDryRun,
+		Files:     cfg.BackfillFiles,
+		Skills:    cfg.BackfillSkills,
+		TeamID:    cfg.BackfillTeamID,
+		BatchSize: cfg.BackfillBatchSize,
+		MaxItems:  cfg.BackfillMaxItems,
+	})
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("encode asset backfill summary: %w", err)
+	}
+	logger.Info("asset backfill completed", zap.ByteString("summary", encoded))
+	if summary.Files.Failed > 0 || summary.Skills.Failed > 0 {
+		return errors.New("asset backfill completed with failures")
+	}
+	return nil
 }
 
 func initTracing(ctx context.Context, cfg config, logger *zap.Logger) (trace.Tracer, func(context.Context) error, error) {
