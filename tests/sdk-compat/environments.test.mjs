@@ -27,9 +27,7 @@ test('environments support cloud config, package updates, list, archive, and del
       },
       packages: {
         type: 'packages',
-        pip: ['ruff==0.9.0'],
-        npm: ['typescript@latest'],
-        apt: ['git'],
+        pip: ['six==1.17.0'],
         cargo: [],
         gem: [],
         go: [],
@@ -41,7 +39,7 @@ test('environments support cloud config, package updates, list, archive, and del
   assert.equal(environment.type, 'environment');
   assert.equal(environment.config.type, 'cloud');
   assert.equal(environment.config.networking.type, 'limited');
-  assert.deepEqual(environment.config.packages.pip, ['ruff==0.9.0']);
+  assert.deepEqual(environment.config.packages.pip, ['six==1.17.0']);
 
   const retrieved = await client.beta.environments.retrieve(environment.id);
   assert.equal(retrieved.id, environment.id);
@@ -51,14 +49,14 @@ test('environments support cloud config, package updates, list, archive, and del
     config: {
       type: 'cloud',
       packages: {
-        pip: ['ruff==0.10.0'],
+        pip: ['colorama==0.4.6'],
       },
     },
     metadata: { sdk_compat_updated: 'true' },
   });
   assert.equal(updated.name, `${environment.name}-updated`);
   assert.equal(updated.metadata.sdk_compat_updated, 'true');
-  assert.deepEqual(updated.config.packages.pip, ['ruff==0.10.0']);
+  assert.deepEqual(updated.config.packages.pip, ['colorama==0.4.6']);
   assert.deepEqual(updated.config.networking.allowed_hosts, ['api.example.com']);
 
   const listed = await collectAsyncIterable(client.beta.environments.list({ limit: 5 }), 20);
@@ -108,8 +106,7 @@ test('environments preserve defaults and support partial clears through the SDK'
         allowed_hosts: ['api.example.com'],
       },
       packages: {
-        pip: ['pytest==8.3.4'],
-        npm: ['tsx@latest'],
+        pip: ['six==1.17.0'],
       },
     },
   });
@@ -117,7 +114,7 @@ test('environments preserve defaults and support partial clears through the SDK'
   assert.deepEqual(limited.config.networking.allowed_hosts, ['api.example.com']);
   assert.equal(limited.config.networking.allow_mcp_servers, false);
   assert.equal(limited.config.networking.allow_package_managers, false);
-  assert.deepEqual(limited.config.packages.pip, ['pytest==8.3.4']);
+  assert.deepEqual(limited.config.packages.pip, ['six==1.17.0']);
 
   const cleared = await client.beta.environments.update(environment.id, {
     description: '',

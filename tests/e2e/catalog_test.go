@@ -3,6 +3,7 @@ package e2e
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,58 @@ func TestCatalogLifecycle(t *testing.T) {
 	}
 }
 
+func TestCreateEnvironmentBuildsPackagesSynchronously(t *testing.T) {
+	cfg := loadConfig(t)
+	client := newClient(cfg)
+
+	env := createEnvironmentWithPackages(t, client, cfg.Suffix, map[string]any{
+		"pip": []string{"six==1.17.0"},
+	})
+	envID := requireString(t, env, "id")
+	t.Cleanup(func() {
+		_, _, _ = client.delete(t.Context(), "/v1/environments/"+envID)
+	})
+
+	config, _ := env["config"].(map[string]any)
+	packages, _ := config["packages"].(map[string]any)
+	if !containsStringValue(packages["pip"], "six==1.17.0") {
+		t.Fatalf("environment packages.pip = %#v, want six==1.17.0", packages["pip"])
+	}
+}
+
+func TestCreateEnvironmentPackageBuildFailureDoesNotPersist(t *testing.T) {
+	cfg := loadConfig(t)
+	client := newClient(cfg)
+
+	name := fmt.Sprintf("e2e-env-failing-packages-%s", cfg.Suffix)
+	body := map[string]any{
+		"name": name,
+		"config": map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+			"packages": map[string]any{
+				"type": "packages",
+				"pip":  []string{"definitely-not-a-real-managed-agents-package==0.0.1"},
+			},
+		},
+		"metadata": map[string]string{"e2e": "managed-agents"},
+	}
+	if _, status, err := client.post(t.Context(), "/v1/environments", body); err == nil || status != http.StatusBadRequest {
+		t.Fatalf("create failing package environment status=%d err=%v, want 400", status, err)
+	}
+
+	resp, status, err := client.get(t.Context(), "/v1/environments?limit=100")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("list environments status=%d err=%v", status, err)
+	}
+	for _, item := range listData(resp) {
+		environment, _ := item.(map[string]any)
+		if environment["name"] == name {
+			t.Fatalf("failed package environment %q was persisted: %#v", name, environment)
+		}
+	}
+}
+
 func createEnvironment(t *testing.T, client *apiClient, suffix string) map[string]any {
 	t.Helper()
 	body := map[string]any{
@@ -64,6 +117,27 @@ func createEnvironment(t *testing.T, client *apiClient, suffix string) map[strin
 	resp, status, err := client.post(t.Context(), "/v1/environments", body)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("create environment status=%d err=%v", status, err)
+	}
+	requireString(t, resp, "id")
+	return resp
+}
+
+func createEnvironmentWithPackages(t *testing.T, client *apiClient, suffix string, packages map[string]any) map[string]any {
+	t.Helper()
+	body := map[string]any{
+		"name": fmt.Sprintf("e2e-env-packages-%s", suffix),
+		"config": map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "unrestricted"},
+			"packages": mergeStringAnyMap(map[string]any{
+				"type": "packages",
+			}, packages),
+		},
+		"metadata": map[string]string{"e2e": "managed-agents"},
+	}
+	resp, status, err := client.post(t.Context(), "/v1/environments", body)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("create package environment status=%d err=%v", status, err)
 	}
 	requireString(t, resp, "id")
 	return resp
@@ -90,6 +164,30 @@ func createAgent(t *testing.T, client *apiClient, suffix string) map[string]any 
 	}
 	requireString(t, resp, "id")
 	return resp
+}
+
+func mergeStringAnyMap(base, extra map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(extra))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
+}
+
+func containsStringValue(value any, expected string) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(fmt.Sprint(item)) == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func createAgentWithSkills(t *testing.T, client *apiClient, suffix string, skills []map[string]any) map[string]any {

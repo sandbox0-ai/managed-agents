@@ -245,10 +245,26 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}
 	op.ObservePhase("ensure_template", time.Since(phaseStarted), nil)
 	phaseStarted = time.Now()
-	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest, templateClient)
+	artifactID := strings.TrimSpace(session.EnvironmentArtifactID)
+	if artifactID == "" {
+		err := fmt.Errorf("%w: session %s has no prepared environment artifact", gatewaymanagedagents.ErrEnvironmentBuildFailed, session.ID)
+		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
+		return nil, err
+	}
+	artifact, err := m.repo.GetEnvironmentArtifact(ctx, session.TeamID, artifactID)
 	if err != nil {
 		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("resolve environment artifact: %w", err)
+	}
+	switch strings.TrimSpace(artifact.Status) {
+	case gatewaymanagedagents.EnvironmentArtifactStatusReady:
+	case gatewaymanagedagents.EnvironmentArtifactStatusBuilding:
+		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), gatewaymanagedagents.ErrEnvironmentArtifactBuilding)
+		return nil, gatewaymanagedagents.ErrEnvironmentArtifactBuilding
+	default:
+		err := fmt.Errorf("%w: environment artifact %s is %s", gatewaymanagedagents.ErrEnvironmentBuildFailed, artifact.ID, artifact.Status)
+		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
+		return nil, err
 	}
 	op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), nil,
 		zap.String("environment_artifact_id", artifact.ID),

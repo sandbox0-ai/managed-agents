@@ -24,9 +24,17 @@ type RuntimeManager interface {
 	DestroyRuntime(ctx context.Context, credential RequestCredential, runtime *RuntimeRecord) error
 }
 
-// EnvironmentArtifactPrebuilder optionally moves environment package builds off the session cold-start path.
-type EnvironmentArtifactPrebuilder interface {
-	PrebuildEnvironmentArtifact(ctx context.Context, credential RequestCredential, teamID string, environment *Environment) error
+// EnvironmentArtifactBuildResult contains package artifact assets prepared before
+// an environment version becomes visible to sessions.
+type EnvironmentArtifactBuildResult struct {
+	Assets   EnvironmentArtifactAssets
+	BuildLog string
+}
+
+// EnvironmentArtifactBuilder prepares environment package artifacts synchronously.
+type EnvironmentArtifactBuilder interface {
+	BuildEnvironmentArtifact(ctx context.Context, credential RequestCredential, teamID string, environment *Environment) (*EnvironmentArtifactBuildResult, error)
+	CleanupEnvironmentArtifactAssets(ctx context.Context, credential RequestCredential, teamID string, assets EnvironmentArtifactAssets) error
 }
 
 // EnvironmentArtifactCleaner deletes sandbox0 resources owned by environment artifacts.
@@ -150,7 +158,7 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 	}
 	op.ObservePhase("resolve_vendor_from_vaults", time.Since(phaseStarted), nil)
 	phaseStarted = time.Now()
-	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
+	artifact, err := s.readyEnvironmentArtifactForSession(ctx, principal.TeamID, environment)
 	if err != nil {
 		op.ObservePhase("ensure_environment_artifact_record", time.Since(phaseStarted), err)
 		return nil, err

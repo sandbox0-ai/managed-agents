@@ -823,9 +823,9 @@ func TestCreateSessionPinsEnvironmentArtifact(t *testing.T) {
 	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	artifact, err := service.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment)
-	if err != nil {
-		t.Fatalf("ensureEnvironmentArtifactRecord: %v", err)
+	artifact := readyTestEnvironmentArtifact(t, principal.TeamID, &environment, EnvironmentArtifactAssets{PipVolumeID: "vol_pip"})
+	if err := repo.CreateEnvironmentArtifact(ctx, artifact); err != nil {
+		t.Fatalf("CreateEnvironmentArtifact: %v", err)
 	}
 	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
 	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
@@ -1068,9 +1068,9 @@ func TestCreateEnvironmentAllowsCustomMetadata(t *testing.T) {
 	}
 }
 
-func TestCreateAndUpdateEnvironmentStartArtifactPrebuild(t *testing.T) {
+func TestCreateAndUpdateEnvironmentBuildArtifactsSynchronously(t *testing.T) {
 	repo := newTestRepository(t)
-	runtime := &prebuildRuntimeManager{calls: make(chan prebuildEnvironmentCall, 2)}
+	runtime := &buildRuntimeManager{calls: make(chan buildEnvironmentCall, 2)}
 	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
@@ -1088,15 +1088,22 @@ func TestCreateAndUpdateEnvironmentStartArtifactPrebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	createCall := waitPrebuildEnvironmentCall(t, runtime.calls)
+	createCall := waitBuildEnvironmentCall(t, runtime.calls)
 	if createCall.Credential.Token != "token_create" {
-		t.Fatalf("create prebuild credential = %#v", createCall.Credential)
+		t.Fatalf("create build credential = %#v", createCall.Credential)
 	}
 	if createCall.TeamID != principal.TeamID || createCall.EnvironmentID != created.ID {
-		t.Fatalf("create prebuild call = %#v", createCall)
+		t.Fatalf("create build call = %#v", createCall)
 	}
 	if !reflect.DeepEqual(createCall.PipPackages, []string{"ruff==0.9.0"}) {
-		t.Fatalf("create prebuild pip packages = %#v", createCall.PipPackages)
+		t.Fatalf("create build pip packages = %#v", createCall.PipPackages)
+	}
+	artifact, err := repo.GetLatestEnvironmentArtifact(ctx, principal.TeamID, created.ID)
+	if err != nil {
+		t.Fatalf("GetLatestEnvironmentArtifact after create: %v", err)
+	}
+	if artifact.Status != EnvironmentArtifactStatusReady || artifact.Assets.PipVolumeID == "" {
+		t.Fatalf("create artifact = status:%q assets:%#v, want ready pip volume", artifact.Status, artifact.Assets)
 	}
 
 	updated, err := service.UpdateEnvironment(ctx, principal, RequestCredential{Token: "token_update"}, created.ID, UpdateEnvironmentRequest{
@@ -1109,15 +1116,44 @@ func TestCreateAndUpdateEnvironmentStartArtifactPrebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateEnvironment: %v", err)
 	}
-	updateCall := waitPrebuildEnvironmentCall(t, runtime.calls)
+	updateCall := waitBuildEnvironmentCall(t, runtime.calls)
 	if updateCall.Credential.Token != "token_update" {
-		t.Fatalf("update prebuild credential = %#v", updateCall.Credential)
+		t.Fatalf("update build credential = %#v", updateCall.Credential)
 	}
 	if updateCall.TeamID != principal.TeamID || updateCall.EnvironmentID != updated.ID {
-		t.Fatalf("update prebuild call = %#v", updateCall)
+		t.Fatalf("update build call = %#v", updateCall)
 	}
 	if !reflect.DeepEqual(updateCall.PipPackages, []string{"ruff==0.10.0"}) {
-		t.Fatalf("update prebuild pip packages = %#v", updateCall.PipPackages)
+		t.Fatalf("update build pip packages = %#v", updateCall.PipPackages)
+	}
+}
+
+func TestCreateEnvironmentBuildFailureDoesNotCreateEnvironment(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &buildRuntimeManager{calls: make(chan buildEnvironmentCall, 1), buildErr: errors.New("pip install failed")}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123"}
+	ctx := context.Background()
+
+	_, err := service.CreateEnvironment(ctx, principal, RequestCredential{Token: "token_create"}, CreateEnvironmentRequest{
+		Name: "python",
+		Config: map[string]any{
+			"type": "cloud",
+			"packages": map[string]any{
+				"type": "packages",
+				"pip":  []any{"does-not-exist==0.0.1"},
+			},
+		},
+	})
+	if !errors.Is(err, ErrEnvironmentBuildFailed) {
+		t.Fatalf("CreateEnvironment error = %v, want ErrEnvironmentBuildFailed", err)
+	}
+	items, _, err := service.ListEnvironments(ctx, principal, 10, "", true)
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("environments after failed build = %#v, want none", items)
 	}
 }
 
@@ -1143,7 +1179,7 @@ func TestUpdateEnvironmentRejectsUnsupportedManagedMetadata(t *testing.T) {
 
 func TestCreateEnvironmentRoundTripsAllPackageFields(t *testing.T) {
 	repo := newTestRepository(t)
-	service := NewService(repo, noopRuntimeManager{}, nil)
+	service := NewService(repo, &buildRuntimeManager{calls: make(chan buildEnvironmentCall, 1)}, nil)
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
@@ -1194,7 +1230,7 @@ func TestCreateEnvironmentRoundTripsAllPackageFields(t *testing.T) {
 
 func TestEnvironmentLifecycleFlow(t *testing.T) {
 	repo := newTestRepository(t)
-	service := NewService(repo, noopRuntimeManager{}, nil)
+	service := NewService(repo, &buildRuntimeManager{calls: make(chan buildEnvironmentCall, 1)}, nil)
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 
@@ -1285,7 +1321,7 @@ func TestEnvironmentLifecycleFlow(t *testing.T) {
 
 func TestEnvironmentUpdateOnlyAffectsNewSessionsAndReusesArtifactsForStableConfig(t *testing.T) {
 	repo := newTestRepository(t)
-	service := NewService(repo, noopRuntimeManager{}, nil)
+	service := NewService(repo, &buildRuntimeManager{calls: make(chan buildEnvironmentCall, 2)}, nil)
 	principal := Principal{TeamID: "team_123"}
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1390,9 +1426,6 @@ func TestDeleteEnvironmentRejectsReferencedSessions(t *testing.T) {
 	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
 	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
-	}
-	if _, err := service.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment); err != nil {
-		t.Fatalf("ensureEnvironmentArtifactRecord: %v", err)
 	}
 	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
 	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
@@ -1662,20 +1695,47 @@ func createTestSession(ctx context.Context, service *Service, principal Principa
 	return service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, params, "http://gateway.test")
 }
 
-type prebuildEnvironmentCall struct {
+func readyTestEnvironmentArtifact(t *testing.T, teamID string, environment *Environment, assets EnvironmentArtifactAssets) *EnvironmentArtifact {
+	t.Helper()
+	compatibility := DefaultEnvironmentArtifactCompatibility()
+	digest, err := EnvironmentArtifactDigest(environment.Config, compatibility)
+	if err != nil {
+		t.Fatalf("EnvironmentArtifactDigest: %v", err)
+	}
+	now := time.Now().UTC()
+	return &EnvironmentArtifact{
+		ID:             NewID("envart"),
+		TeamID:         teamID,
+		EnvironmentID:  environment.ID,
+		Digest:         digest,
+		Status:         EnvironmentArtifactStatusReady,
+		ConfigSnapshot: EnvironmentConfigSnapshotForArtifact(environment.Config),
+		Compatibility:  compatibility,
+		Assets:         assets,
+		BuildLog:       "test ready artifact\n",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+}
+
+type buildEnvironmentCall struct {
 	Credential    RequestCredential
 	TeamID        string
 	EnvironmentID string
 	PipPackages   []string
 }
 
-type prebuildRuntimeManager struct {
+type buildRuntimeManager struct {
 	noopRuntimeManager
-	calls chan prebuildEnvironmentCall
+	calls       chan buildEnvironmentCall
+	buildErr    error
+	cleanedUp   []EnvironmentArtifactAssets
+	buildLog    string
+	pipVolumeID string
 }
 
-func (m *prebuildRuntimeManager) PrebuildEnvironmentArtifact(_ context.Context, credential RequestCredential, teamID string, environment *Environment) error {
-	call := prebuildEnvironmentCall{
+func (m *buildRuntimeManager) BuildEnvironmentArtifact(_ context.Context, credential RequestCredential, teamID string, environment *Environment) (*EnvironmentArtifactBuildResult, error) {
+	call := buildEnvironmentCall{
 		Credential: credential,
 		TeamID:     teamID,
 	}
@@ -1683,18 +1743,49 @@ func (m *prebuildRuntimeManager) PrebuildEnvironmentArtifact(_ context.Context, 
 		call.EnvironmentID = environment.ID
 		call.PipPackages = append([]string(nil), environment.Config.Packages.Pip...)
 	}
-	m.calls <- call
+	if m.calls != nil {
+		m.calls <- call
+	}
+	if m.buildErr != nil {
+		return nil, m.buildErr
+	}
+	pipVolumeID := m.pipVolumeID
+	if pipVolumeID == "" {
+		pipVolumeID = "vol_pip_" + call.EnvironmentID
+	}
+	assets := EnvironmentArtifactAssets{}
+	if environment != nil {
+		for _, manager := range ConfiguredEnvironmentPackageManagers(environment.Config) {
+			volumeID := "vol_" + manager + "_" + call.EnvironmentID
+			if manager == "pip" {
+				volumeID = pipVolumeID
+			}
+			assets.SetVolumeIDForManager(manager, volumeID)
+		}
+	}
+	buildLog := m.buildLog
+	if buildLog == "" {
+		buildLog = "built test environment artifact\n"
+	}
+	return &EnvironmentArtifactBuildResult{
+		Assets:   assets,
+		BuildLog: buildLog,
+	}, nil
+}
+
+func (m *buildRuntimeManager) CleanupEnvironmentArtifactAssets(_ context.Context, _ RequestCredential, _ string, assets EnvironmentArtifactAssets) error {
+	m.cleanedUp = append(m.cleanedUp, assets)
 	return nil
 }
 
-func waitPrebuildEnvironmentCall(t *testing.T, calls <-chan prebuildEnvironmentCall) prebuildEnvironmentCall {
+func waitBuildEnvironmentCall(t *testing.T, calls <-chan buildEnvironmentCall) buildEnvironmentCall {
 	t.Helper()
 	select {
 	case call := <-calls:
 		return call
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for environment artifact prebuild")
-		return prebuildEnvironmentCall{}
+		t.Fatal("timed out waiting for environment artifact build")
+		return buildEnvironmentCall{}
 	}
 }
 
