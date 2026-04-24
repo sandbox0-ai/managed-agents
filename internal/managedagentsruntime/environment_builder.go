@@ -317,21 +317,39 @@ func publishEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.
 
 func publishEnvironmentArtifactVolumesWithRetry(ctx context.Context, client *sandbox0sdk.Client, tempVolumes map[string]string, retryTimeout, retryInterval time.Duration) (gatewaymanagedagents.EnvironmentArtifactAssets, error) {
 	assets := gatewaymanagedagents.EnvironmentArtifactAssets{}
-	published := make([]string, 0, len(tempVolumes))
+	type publishResult struct {
+		manager  string
+		volumeID string
+	}
+	results := make(chan publishResult, len(tempVolumes))
+	group, groupCtx := errgroup.WithContext(ctx)
 	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
 		tempVolumeID := strings.TrimSpace(tempVolumes[manager])
 		if tempVolumeID == "" {
 			continue
 		}
-		volume, err := forkEnvironmentArtifactVolumeWithRetry(ctx, client, tempVolumeID, retryTimeout, retryInterval)
-		if err != nil {
-			for _, volumeID := range published {
-				_, _ = client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
+		manager, tempVolumeID := manager, tempVolumeID
+		group.Go(func() error {
+			volume, err := forkEnvironmentArtifactVolumeWithRetry(groupCtx, client, tempVolumeID, retryTimeout, retryInterval)
+			if err != nil {
+				return fmt.Errorf("publish %s environment volume: %w", manager, err)
 			}
-			return gatewaymanagedagents.EnvironmentArtifactAssets{}, fmt.Errorf("publish %s environment volume: %w", manager, err)
+			results <- publishResult{manager: manager, volumeID: volume.ID}
+			return nil
+		})
+	}
+	err := group.Wait()
+	close(results)
+	published := make([]string, 0, len(tempVolumes))
+	for result := range results {
+		assets.SetVolumeIDForManager(result.manager, result.volumeID)
+		published = append(published, result.volumeID)
+	}
+	if err != nil {
+		for _, volumeID := range published {
+			_, _ = client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
 		}
-		assets.SetVolumeIDForManager(manager, volume.ID)
-		published = append(published, volume.ID)
+		return gatewaymanagedagents.EnvironmentArtifactAssets{}, err
 	}
 	return assets, nil
 }

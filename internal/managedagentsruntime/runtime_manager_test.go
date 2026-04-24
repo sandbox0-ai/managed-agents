@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -507,6 +508,68 @@ func TestPublishEnvironmentArtifactVolumesRetriesTransientForkFailure(t *testing
 	}
 	if forkCalls != 2 {
 		t.Fatalf("fork calls = %d, want 2", forkCalls)
+	}
+}
+
+func TestPublishEnvironmentArtifactVolumesForksManagersConcurrently(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		seen      = map[string]bool{}
+		release   = make(chan struct{})
+		closeOnce sync.Once
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		const prefix = "/api/v1/sandboxvolumes/"
+		const suffix = "/fork"
+		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
+			http.Error(w, `{"error":{"code":"unexpected_request","message":"unexpected request"}}`, http.StatusBadRequest)
+			return
+		}
+		tempVolumeID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
+		mu.Lock()
+		seen[tempVolumeID] = true
+		if len(seen) == 2 {
+			closeOnce.Do(func() { close(release) })
+		}
+		mu.Unlock()
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeTestJSON(t, w, map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"id":          strings.Replace(tempVolumeID, "temp_", "published_", 1),
+				"team_id":     "team_123",
+				"user_id":     "user_123",
+				"access_mode": "ROX",
+				"created_at":  "2026-04-24T00:00:00Z",
+				"updated_at":  "2026-04-24T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	assets, err := publishEnvironmentArtifactVolumesWithRetry(ctx, client, map[string]string{
+		"npm": "temp_npm",
+		"pip": "temp_pip",
+	}, 500*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("publishEnvironmentArtifactVolumesWithRetry returned error: %v", err)
+	}
+	if assets.NPMVolumeID != "published_npm" || assets.PipVolumeID != "published_pip" {
+		t.Fatalf("artifact assets = %#v, want npm and pip published", assets)
 	}
 }
 
