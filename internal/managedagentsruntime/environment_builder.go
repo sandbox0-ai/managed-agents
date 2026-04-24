@@ -11,6 +11,7 @@ import (
 	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type environmentBuildResources struct {
@@ -21,50 +22,76 @@ type environmentBuildResources struct {
 const environmentBuildCleanupTimeout = 2 * time.Minute
 const environmentArtifactCleanupPollInterval = 100 * time.Millisecond
 const environmentArtifactCleanupGracePeriod = 2 * time.Second
+const environmentBuildStepConcurrency = 3
 
-func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
-	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
-	if err != nil {
-		return nil, err
-	}
-	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest, templateClient)
-}
-
-func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) error {
+func (m *SDKRuntimeManager) BuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifactBuildResult, error) {
 	_ = credential
-	if !m.cfg.Enabled || environment == nil {
-		return nil
+	if environment == nil {
+		return nil, gatewaymanagedagents.ErrEnvironmentNotFound
+	}
+	if !m.cfg.Enabled {
+		return nil, errors.New("managed-agent runtime is disabled")
 	}
 	if m.repo == nil {
-		return errors.New("managed-agent repository is required")
+		return nil, errors.New("managed-agent repository is required")
 	}
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
-		return errors.New("team id is required")
+		return nil, errors.New("team id is required")
 	}
 	if _, err := m.runtimeSandboxToken(); err != nil {
-		return nil
+		return nil, err
 	}
 	templateClient, err := m.templateClient(ctx, gatewaymanagedagents.RequestCredential{}, teamID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	templateRequest, err := m.templateRequestForEnvironment(environment)
 	if err != nil {
-		return fmt.Errorf("prepare environment template: %w", err)
+		return nil, fmt.Errorf("prepare environment template: %w", err)
 	}
 	if err := m.ensureManagedTemplate(ctx, templateClient, templateRequest); err != nil {
-		return fmt.Errorf("ensure managed template: %w", err)
+		return nil, fmt.Errorf("ensure managed template: %w", err)
 	}
-	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, &gatewaymanagedagents.SessionRecord{
-		TeamID:        teamID,
-		EnvironmentID: environment.ID,
-	}, environment)
+	client, err := m.runtimeSandboxClient()
 	if err != nil {
-		return fmt.Errorf("resolve environment artifact: %w", err)
+		return nil, err
 	}
-	_, err = m.ensureEnvironmentArtifactReady(ctx, gatewaymanagedagents.RequestCredential{}, artifact, environment, templateRequest, templateClient)
-	return err
+	var (
+		lastErr error
+		logs    strings.Builder
+	)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if attempt > 1 {
+			logs.WriteString("\n\nretrying environment artifact build\n")
+		}
+		assets, buildLog, buildErr := m.buildEnvironmentArtifactAttempt(ctx, client, environment, templateRequest, templateClient)
+		logs.WriteString(buildLog)
+		if buildErr == nil {
+			return &gatewaymanagedagents.EnvironmentArtifactBuildResult{Assets: assets, BuildLog: logs.String()}, nil
+		}
+		lastErr = buildErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("environment artifact build failed")
+	}
+	return nil, lastErr
+}
+
+func (m *SDKRuntimeManager) CleanupEnvironmentArtifactAssets(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, assets gatewaymanagedagents.EnvironmentArtifactAssets) error {
+	_ = credential
+	_ = teamID
+	if !m.cfg.Enabled || len(assets.VolumeIDs()) == 0 {
+		return nil
+	}
+	if _, err := m.runtimeSandboxToken(); err != nil {
+		return err
+	}
+	client, err := m.runtimeSandboxClient()
+	if err != nil {
+		return err
+	}
+	return m.deleteEnvironmentArtifactAssets(ctx, client, "", assets)
 }
 
 func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID, environmentID string) error {
@@ -96,14 +123,8 @@ func (m *SDKRuntimeManager) CleanupEnvironmentArtifacts(ctx context.Context, cre
 	}
 	var cleanupErrs []error
 	for _, artifact := range artifacts {
-		for _, volumeID := range artifact.Assets.VolumeIDs() {
-			if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-				if isSandboxNotFound(err) {
-					continue
-				}
-				m.logger.Warn("delete environment artifact volume failed", zap.Error(err), zap.String("artifact_id", artifact.ID), zap.String("volume_id", volumeID))
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete environment artifact volume %s: %w", volumeID, err))
-			}
+		if err := m.deleteEnvironmentArtifactAssets(ctx, client, artifact.ID, artifact.Assets); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
 		}
 	}
 	if err := errors.Join(cleanupErrs...); err != nil {
@@ -160,194 +181,6 @@ func (m *SDKRuntimeManager) waitForEnvironmentArtifactsToSettle(ctx context.Cont
 	}
 }
 
-func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifact, error) {
-	if session == nil {
-		return nil, gatewaymanagedagents.ErrSessionNotFound
-	}
-	if artifactID := strings.TrimSpace(session.EnvironmentArtifactID); artifactID != "" {
-		return m.repo.GetEnvironmentArtifact(ctx, session.TeamID, artifactID)
-	}
-	if environment == nil {
-		return nil, gatewaymanagedagents.ErrEnvironmentArtifactNotFound
-	}
-	compatibility := gatewaymanagedagents.DefaultEnvironmentArtifactCompatibility()
-	digest, err := gatewaymanagedagents.EnvironmentArtifactDigest(environment.Config, compatibility)
-	if err != nil {
-		return nil, err
-	}
-	artifact, err := m.repo.GetEnvironmentArtifactByDigest(ctx, session.TeamID, session.EnvironmentID, digest)
-	if err == nil {
-		return artifact, nil
-	}
-	if err != gatewaymanagedagents.ErrEnvironmentArtifactNotFound {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	artifact = &gatewaymanagedagents.EnvironmentArtifact{
-		ID:             gatewaymanagedagents.NewID("envart"),
-		TeamID:         session.TeamID,
-		EnvironmentID:  session.EnvironmentID,
-		Digest:         digest,
-		Status:         gatewaymanagedagents.EnvironmentArtifactStatusPending,
-		ConfigSnapshot: gatewaymanagedagents.EnvironmentConfigSnapshotForArtifact(environment.Config),
-		Compatibility:  compatibility,
-		Assets:         gatewaymanagedagents.EnvironmentArtifactAssets{},
-		BuildLog:       "",
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := m.repo.CreateEnvironmentArtifact(ctx, artifact); err != nil {
-		return m.repo.GetEnvironmentArtifactByDigest(ctx, session.TeamID, session.EnvironmentID, digest)
-	}
-	return artifact, nil
-}
-
-func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
-	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_ready", "",
-		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
-		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
-		zap.String("environment_artifact_id", environmentArtifactIDForLog(artifact)),
-	)
-	defer func() { op.End(err) }()
-	if artifact == nil {
-		return nil, gatewaymanagedagents.ErrEnvironmentArtifactNotFound
-	}
-	deadline := time.Now().UTC().Add(m.cfg.SandboxRequestTimeout)
-	for {
-		phaseStarted := time.Now()
-		switch strings.TrimSpace(artifact.Status) {
-		case gatewaymanagedagents.EnvironmentArtifactStatusReady:
-			op.ObservePhase("artifact_already_ready", time.Since(phaseStarted), nil,
-				zap.String("environment_artifact_id", artifact.ID),
-			)
-			return artifact, nil
-		case gatewaymanagedagents.EnvironmentArtifactStatusArchived:
-			return nil, fmt.Errorf("environment artifact %s is archived", artifact.ID)
-		case gatewaymanagedagents.EnvironmentArtifactStatusPending, gatewaymanagedagents.EnvironmentArtifactStatusFailed:
-			acquired, err := m.repo.BeginEnvironmentArtifactBuild(ctx, artifact.TeamID, artifact.ID, time.Now().UTC())
-			if err != nil {
-				op.ObservePhase("begin_artifact_build", time.Since(phaseStarted), err,
-					zap.String("environment_artifact_status", artifact.Status),
-				)
-				return nil, err
-			}
-			op.ObservePhase("begin_artifact_build", time.Since(phaseStarted), nil,
-				zap.Bool("acquired", acquired),
-				zap.String("environment_artifact_status", artifact.Status),
-			)
-			if acquired {
-				return m.buildEnvironmentArtifact(ctx, credential, artifact, environment, templateRequest, templateClient)
-			}
-		case gatewaymanagedagents.EnvironmentArtifactStatusBuilding:
-			if time.Now().UTC().After(deadline) {
-				return nil, fmt.Errorf("timed out waiting for environment artifact %s to build", artifact.ID)
-			}
-			op.ObservePhase("wait_artifact_building", time.Since(phaseStarted), nil,
-				zap.String("environment_artifact_id", artifact.ID),
-			)
-			time.Sleep(250 * time.Millisecond)
-		default:
-			return nil, fmt.Errorf("unsupported environment artifact status %q", artifact.Status)
-		}
-		phaseStarted = time.Now()
-		refreshed, err := m.repo.GetEnvironmentArtifact(ctx, artifact.TeamID, artifact.ID)
-		if err != nil {
-			op.ObservePhase("refresh_artifact_status", time.Since(phaseStarted), err,
-				zap.String("environment_artifact_id", artifact.ID),
-			)
-			return nil, err
-		}
-		op.ObservePhase("refresh_artifact_status", time.Since(phaseStarted), nil,
-			zap.String("environment_artifact_id", artifact.ID),
-			zap.String("environment_artifact_status", refreshed.Status),
-		)
-		artifact = refreshed
-	}
-}
-
-func (m *SDKRuntimeManager) buildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (built *gatewaymanagedagents.EnvironmentArtifact, err error) {
-	_ = credential
-	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_build", "",
-		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
-		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
-		zap.String("environment_artifact_id", environmentArtifactIDForLog(artifact)),
-	)
-	defer func() { op.End(err) }()
-	phaseStarted := time.Now()
-	client, err := m.runtimeSandboxClient()
-	if err != nil {
-		op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), err)
-		return nil, err
-	}
-	op.ObservePhase("create_sandbox_client", time.Since(phaseStarted), nil)
-	var (
-		lastErr error
-		logs    strings.Builder
-	)
-	for attempt := 1; attempt <= 2; attempt++ {
-		if attempt > 1 {
-			logs.WriteString("\n\nretrying environment artifact build\n")
-		}
-		phaseStarted = time.Now()
-		assets, buildLog, buildErr := m.buildEnvironmentArtifactAttempt(ctx, client, environment, templateRequest, templateClient)
-		logs.WriteString(buildLog)
-		op.ObservePhase("build_attempt", time.Since(phaseStarted), buildErr,
-			zap.Int("attempt", attempt),
-		)
-		if buildErr == nil {
-			artifact.Status = gatewaymanagedagents.EnvironmentArtifactStatusReady
-			artifact.Assets = assets
-			artifact.BuildLog = logs.String()
-			artifact.FailureReason = nil
-			artifact.UpdatedAt = time.Now().UTC()
-			phaseStarted = time.Now()
-			if err := m.repo.UpdateEnvironmentArtifact(ctx, artifact); err != nil {
-				op.ObservePhase("mark_artifact_ready", time.Since(phaseStarted), err)
-				return nil, err
-			}
-			op.ObservePhase("mark_artifact_ready", time.Since(phaseStarted), nil,
-				zap.Int("asset_volume_count", len(artifact.Assets.VolumeIDs())),
-			)
-			m.collectGarbageEnvironmentArtifacts(ctx, client, artifact)
-			return artifact, nil
-		}
-		lastErr = buildErr
-	}
-	reason := lastErr.Error()
-	artifact.Status = gatewaymanagedagents.EnvironmentArtifactStatusFailed
-	artifact.BuildLog = logs.String()
-	artifact.FailureReason = &reason
-	artifact.UpdatedAt = time.Now().UTC()
-	phaseStarted = time.Now()
-	if err := m.repo.UpdateEnvironmentArtifact(ctx, artifact); err != nil {
-		op.ObservePhase("mark_artifact_failed", time.Since(phaseStarted), err)
-		return nil, err
-	}
-	op.ObservePhase("mark_artifact_failed", time.Since(phaseStarted), nil)
-	return nil, lastErr
-}
-
-func environmentArtifactTeamIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
-	if artifact == nil {
-		return ""
-	}
-	return artifact.TeamID
-}
-
-func environmentArtifactEnvironmentIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
-	if artifact == nil {
-		return ""
-	}
-	return artifact.EnvironmentID
-}
-
-func environmentArtifactIDForLog(artifact *gatewaymanagedagents.EnvironmentArtifact) string {
-	if artifact == nil {
-		return ""
-	}
-	return artifact.ID
-}
-
 func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context, client *sandbox0sdk.Client, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (gatewaymanagedagents.EnvironmentArtifactAssets, string, error) {
 	steps := environmentBuildSteps(environment)
 	if len(steps) == 0 {
@@ -387,17 +220,35 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 	builderSandbox := client.Sandbox(sandbox.ID)
 	defer m.cleanupEnvironmentBuildResources(ctx, client, builderSandbox, resources)
 
+	type stepResult struct {
+		output string
+	}
+	results := make([]stepResult, len(steps))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(environmentBuildStepConcurrency)
+	for index, step := range steps {
+		index, step := index, step
+		group.Go(func() error {
+			output, err := runEnvironmentBuildStep(groupCtx, builderSandbox, step)
+			results[index] = stepResult{output: output}
+			if err != nil {
+				return fmt.Errorf("%s build failed: %w", step.manager, err)
+			}
+			return nil
+		})
+	}
+	buildErr := group.Wait()
 	var buildLog strings.Builder
-	for _, step := range steps {
-		output, err := runEnvironmentBuildStep(ctx, builderSandbox, step)
+	for index, step := range steps {
+		output := results[index].output
 		buildLog.WriteString("== " + step.manager + " ==\n")
 		buildLog.WriteString(output)
 		if !strings.HasSuffix(output, "\n") {
 			buildLog.WriteString("\n")
 		}
-		if err != nil {
-			return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), fmt.Errorf("%s build failed: %w", step.manager, err)
-		}
+	}
+	if buildErr != nil {
+		return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), buildErr
 	}
 
 	assets, err := publishEnvironmentArtifactVolumes(ctx, client, resources.managerVolumeIDs)
@@ -484,17 +335,7 @@ func (m *SDKRuntimeManager) collectGarbageEnvironmentArtifacts(ctx context.Conte
 		return
 	}
 	for _, artifact := range items {
-		deleteFailed := false
-		for _, volumeID := range artifact.Assets.VolumeIDs() {
-			if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
-				if isSandboxNotFound(err) {
-					continue
-				}
-				deleteFailed = true
-				m.logger.Warn("delete environment artifact volume failed", zap.Error(err), zap.String("artifact_id", artifact.ID), zap.String("volume_id", volumeID))
-			}
-		}
-		if deleteFailed {
+		if err := m.deleteEnvironmentArtifactAssets(ctx, client, artifact.ID, artifact.Assets); err != nil {
 			continue
 		}
 		now := time.Now().UTC()
@@ -505,6 +346,20 @@ func (m *SDKRuntimeManager) collectGarbageEnvironmentArtifacts(ctx context.Conte
 			m.logger.Warn("archive garbage-collected environment artifact failed", zap.Error(err), zap.String("artifact_id", artifact.ID))
 		}
 	}
+}
+
+func (m *SDKRuntimeManager) deleteEnvironmentArtifactAssets(ctx context.Context, client *sandbox0sdk.Client, artifactID string, assets gatewaymanagedagents.EnvironmentArtifactAssets) error {
+	var deleteErrs []error
+	for _, volumeID := range assets.VolumeIDs() {
+		if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+			if isSandboxNotFound(err) {
+				continue
+			}
+			m.logger.Warn("delete environment artifact volume failed", zap.Error(err), zap.String("artifact_id", artifactID), zap.String("volume_id", volumeID))
+			deleteErrs = append(deleteErrs, fmt.Errorf("delete environment artifact volume %s: %w", volumeID, err))
+		}
+	}
+	return errors.Join(deleteErrs...)
 }
 
 type environmentBuildStep struct {

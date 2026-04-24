@@ -233,14 +233,32 @@ func (s *Service) CreateEnvironment(ctx context.Context, principal Principal, cr
 	}
 	now := time.Now().UTC()
 	environment := buildEnvironmentObject(NewID("env"), req, now, nil)
-	if err := s.repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
-		return nil, err
-	}
-	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, &environment)
+	prepared, err := s.prepareReadyEnvironmentArtifact(ctx, credential, principal.TeamID, &environment)
 	if err != nil {
 		return nil, err
 	}
-	s.prebuildEnvironmentArtifact(ctx, credential, principal.TeamID, &environment, artifact)
+	persisted := false
+	defer func() {
+		if !persisted && prepared != nil && prepared.cleanup != nil {
+			prepared.cleanup(context.WithoutCancel(ctx))
+		}
+	}()
+	if err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		exists, err := s.repo.EnvironmentNameExists(ctx, principal.TeamID, req.Name, "")
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrEnvironmentNameConflict
+		}
+		if err := s.repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+			return err
+		}
+		return prepared.persist(ctx)
+	}); err != nil {
+		return nil, err
+	}
+	persisted = true
 	return &environment, nil
 }
 
@@ -301,14 +319,25 @@ func (s *Service) UpdateEnvironment(ctx context.Context, principal Principal, cr
 	}
 	now := time.Now().UTC()
 	environment.UpdatedAt = nowRFC3339(now)
-	if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, parseTimestampPointer(environment.ArchivedAt), now); err != nil {
-		return nil, err
-	}
-	artifact, err := s.ensureEnvironmentArtifactRecord(ctx, principal.TeamID, environment)
+	prepared, err := s.prepareReadyEnvironmentArtifact(ctx, credential, principal.TeamID, environment)
 	if err != nil {
 		return nil, err
 	}
-	s.prebuildEnvironmentArtifact(ctx, credential, principal.TeamID, environment, artifact)
+	persisted := false
+	defer func() {
+		if !persisted && prepared != nil && prepared.cleanup != nil {
+			prepared.cleanup(context.WithoutCancel(ctx))
+		}
+	}()
+	if err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		if err := s.repo.UpdateEnvironment(ctx, principal.TeamID, environmentID, environment, parseTimestampPointer(environment.ArchivedAt), now); err != nil {
+			return err
+		}
+		return prepared.persist(ctx)
+	}); err != nil {
+		return nil, err
+	}
+	persisted = true
 	return environment, nil
 }
 

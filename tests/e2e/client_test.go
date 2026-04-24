@@ -24,7 +24,7 @@ func newClient(cfg testConfig) *apiClient {
 		baseURL: cfg.BaseURL,
 		token:   cfg.Token,
 		beta:    cfg.Beta,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 10 * time.Minute},
 	}
 }
 

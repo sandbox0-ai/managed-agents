@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -118,23 +117,6 @@ func (r *Repository) UpdateEnvironmentArtifact(ctx context.Context, artifact *En
 		return ErrEnvironmentArtifactNotFound
 	}
 	return nil
-}
-
-func (r *Repository) BeginEnvironmentArtifactBuild(ctx context.Context, teamID, artifactID string, now time.Time) (bool, error) {
-	result, err := r.db(ctx).Exec(ctx, `
-		UPDATE managed_agent_environment_artifacts
-		SET status = $3,
-			build_log = '',
-			failure_reason = NULL,
-			updated_at = $4
-		WHERE team_id = $1
-			AND id = $2
-			AND status IN ('pending', 'failed')
-	`, strings.TrimSpace(teamID), strings.TrimSpace(artifactID), EnvironmentArtifactStatusBuilding, now.UTC())
-	if err != nil {
-		return false, fmt.Errorf("mark managed-agent environment artifact building: %w", err)
-	}
-	return result.RowsAffected() > 0, nil
 }
 
 func (r *Repository) GetEnvironmentArtifact(ctx context.Context, teamID, artifactID string) (*EnvironmentArtifact, error) {
