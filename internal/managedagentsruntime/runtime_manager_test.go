@@ -454,6 +454,62 @@ func TestBuildEnvironmentArtifactAttemptSkipsPackageVolumesWhenNoPackages(t *tes
 	}
 }
 
+func TestPublishEnvironmentArtifactVolumesRetriesTransientForkFailure(t *testing.T) {
+	forkCalls := 0
+	unexpectedRequest := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxvolumes/temp_pip/fork" {
+			unexpectedRequest = r.Method + " " + r.URL.Path
+			http.Error(w, `{"error":{"code":"unexpected_request","message":"unexpected request"}}`, http.StatusBadRequest)
+			return
+		}
+		forkCalls++
+		if forkCalls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			writeTestJSON(t, w, map[string]any{
+				"error": map[string]any{
+					"code":    "upstream_unavailable",
+					"message": "upstream service unavailable",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeTestJSON(t, w, map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"id":          "published_pip",
+				"team_id":     "team_123",
+				"user_id":     "user_123",
+				"access_mode": "ROX",
+				"created_at":  "2026-04-24T00:00:00Z",
+				"updated_at":  "2026-04-24T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	assets, err := publishEnvironmentArtifactVolumesWithRetry(context.Background(), client, map[string]string{"pip": "temp_pip"}, 5*time.Second, time.Millisecond)
+	if err != nil {
+		if unexpectedRequest != "" {
+			t.Fatalf("unexpected request = %s", unexpectedRequest)
+		}
+		t.Fatalf("publishEnvironmentArtifactVolumesWithRetry returned error: %v", err)
+	}
+	if got := assets.PipVolumeID; got != "published_pip" {
+		t.Fatalf("pip volume id = %q, want published_pip", got)
+	}
+	if forkCalls != 2 {
+		t.Fatalf("fork calls = %d, want 2", forkCalls)
+	}
+}
+
 func testCredentialBinding(ref, sourceRef string) apispec.CredentialBinding {
 	return apispec.CredentialBinding{
 		Ref:       ref,

@@ -82,7 +82,7 @@ func TestCreateEnvironmentPackageBuildFailureDoesNotPersist(t *testing.T) {
 			"networking": map[string]any{"type": "unrestricted"},
 			"packages": map[string]any{
 				"type": "packages",
-				"pip":  []string{"not a valid requirement ;"},
+				"pip":  []string{"definitely-not-a-real-managed-agents-package==0.0.1"},
 			},
 		},
 		"metadata": map[string]string{"e2e": "managed-agents"},

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +25,8 @@ const environmentBuildCleanupTimeout = 2 * time.Minute
 const environmentArtifactCleanupPollInterval = 100 * time.Millisecond
 const environmentArtifactCleanupGracePeriod = 2 * time.Second
 const environmentBuildStepConcurrency = 3
+const environmentArtifactPublishRetryTimeout = 2 * time.Minute
+const environmentArtifactPublishRetryInterval = 2 * time.Second
 
 func (m *SDKRuntimeManager) BuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifactBuildResult, error) {
 	_ = credential
@@ -251,6 +255,11 @@ func (m *SDKRuntimeManager) buildEnvironmentArtifactAttempt(ctx context.Context,
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), buildErr
 	}
 
+	if _, err := client.DeleteSandbox(ctx, sandbox.ID); err != nil {
+		return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), fmt.Errorf("delete environment builder sandbox before publishing volumes: %w", err)
+	}
+	builderSandbox = nil
+
 	assets, err := publishEnvironmentArtifactVolumes(ctx, client, resources.managerVolumeIDs)
 	if err != nil {
 		return gatewaymanagedagents.EnvironmentArtifactAssets{}, buildLog.String(), err
@@ -303,6 +312,10 @@ func (m *SDKRuntimeManager) cleanupEnvironmentBuildResources(ctx context.Context
 }
 
 func publishEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.Client, tempVolumes map[string]string) (gatewaymanagedagents.EnvironmentArtifactAssets, error) {
+	return publishEnvironmentArtifactVolumesWithRetry(ctx, client, tempVolumes, environmentArtifactPublishRetryTimeout, environmentArtifactPublishRetryInterval)
+}
+
+func publishEnvironmentArtifactVolumesWithRetry(ctx context.Context, client *sandbox0sdk.Client, tempVolumes map[string]string, retryTimeout, retryInterval time.Duration) (gatewaymanagedagents.EnvironmentArtifactAssets, error) {
 	assets := gatewaymanagedagents.EnvironmentArtifactAssets{}
 	published := make([]string, 0, len(tempVolumes))
 	for _, manager := range gatewaymanagedagents.ManagedEnvironmentPackageManagers() {
@@ -310,9 +323,7 @@ func publishEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.
 		if tempVolumeID == "" {
 			continue
 		}
-		volume, err := client.ForkVolume(ctx, tempVolumeID, &apispec.ForkVolumeRequest{
-			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
-		})
+		volume, err := forkEnvironmentArtifactVolumeWithRetry(ctx, client, tempVolumeID, retryTimeout, retryInterval)
 		if err != nil {
 			for _, volumeID := range published {
 				_, _ = client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
@@ -323,6 +334,55 @@ func publishEnvironmentArtifactVolumes(ctx context.Context, client *sandbox0sdk.
 		published = append(published, volume.ID)
 	}
 	return assets, nil
+}
+
+func forkEnvironmentArtifactVolumeWithRetry(ctx context.Context, client *sandbox0sdk.Client, tempVolumeID string, retryTimeout, retryInterval time.Duration) (*apispec.SandboxVolume, error) {
+	if retryTimeout <= 0 {
+		retryTimeout = environmentArtifactPublishRetryTimeout
+	}
+	if retryInterval <= 0 {
+		retryInterval = environmentArtifactPublishRetryInterval
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, retryTimeout)
+	defer cancel()
+	var lastErr error
+	for {
+		volume, err := client.ForkVolume(waitCtx, tempVolumeID, &apispec.ForkVolumeRequest{
+			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeROX),
+		})
+		if err == nil {
+			return volume, nil
+		}
+		lastErr = err
+		if !isTransientEnvironmentArtifactPublishError(err) {
+			return nil, err
+		}
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("%w after retrying for %s", lastErr, retryTimeout)
+			}
+			return nil, waitCtx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isTransientEnvironmentArtifactPublishError(err error) bool {
+	var apiErr *sandbox0sdk.APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *SDKRuntimeManager) collectGarbageEnvironmentArtifacts(ctx context.Context, client *sandbox0sdk.Client, current *gatewaymanagedagents.EnvironmentArtifact) {
@@ -428,7 +488,7 @@ func environmentArtifactMounts(environment *gatewaymanagedagents.Environment, ar
 }
 
 func runEnvironmentBuildStep(ctx context.Context, sandbox *sandbox0sdk.Sandbox, step environmentBuildStep) (string, error) {
-	result, err := sandbox.Cmd(
+	stream, err := sandbox.CmdStream(
 		ctx,
 		"environment-build",
 		sandbox0sdk.WithCommand([]string{"sh", "-lc", step.script}),
@@ -436,9 +496,41 @@ func runEnvironmentBuildStep(ctx context.Context, sandbox *sandbox0sdk.Sandbox, 
 		sandbox0sdk.WithCmdEnvVars(step.envVars),
 	)
 	if err != nil {
-		return result.OutputRaw, err
+		return "", err
 	}
-	return result.OutputRaw, nil
+	defer stream.Close()
+
+	stopClose := make(chan struct{})
+	defer close(stopClose)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stream.Close()
+		case <-stopClose:
+		}
+	}()
+
+	var output strings.Builder
+	for {
+		message, err := stream.Recv()
+		if err == nil {
+			output.WriteString(message.Data)
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		return output.String(), err
+	}
+
+	done, ok := stream.Result()
+	if !ok || done.ExitCode == nil {
+		return output.String(), errors.New("environment build command did not report exit code")
+	}
+	if *done.ExitCode != 0 {
+		return output.String(), fmt.Errorf("environment build command exited with code %d", *done.ExitCode)
+	}
+	return output.String(), nil
 }
 
 func buildAptScript(packages []string) string {
