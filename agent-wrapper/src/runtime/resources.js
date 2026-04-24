@@ -34,7 +34,7 @@ async function materializeGitHubRepository(resource) {
 }
 
 async function cloneRepository(repositoryURL, mountPath, checkout) {
-  const args = ['clone'];
+  const args = ['clone', '--depth=1'];
   const branch = String(checkout?.branch ?? '').trim();
   if (branch) {
     args.push('--branch', branch, '--single-branch');

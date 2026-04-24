@@ -3,6 +3,7 @@ package managedagentsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -451,6 +452,19 @@ func TestBuildEnvironmentArtifactAttemptSkipsPackageVolumesWhenNoPackages(t *tes
 	}
 	if buildLog != "no environment packages requested; no package volumes created\n" {
 		t.Fatalf("build log = %q", buildLog)
+	}
+}
+
+func TestEnsureEnvironmentArtifactReadyDoesNotBuildOnSessionColdPath(t *testing.T) {
+	mgr := &SDKRuntimeManager{}
+	artifact := &gatewaymanagedagents.EnvironmentArtifact{
+		ID:     "envart_pending",
+		Status: gatewaymanagedagents.EnvironmentArtifactStatusPending,
+	}
+
+	_, err := mgr.ensureEnvironmentArtifactReady(context.Background(), gatewaymanagedagents.RequestCredential{}, artifact, &gatewaymanagedagents.Environment{}, nil, nil, false)
+	if !errors.Is(err, gatewaymanagedagents.ErrEnvironmentArtifactBuilding) {
+		t.Fatalf("ensureEnvironmentArtifactReady error = %v, want ErrEnvironmentArtifactBuilding", err)
 	}
 }
 

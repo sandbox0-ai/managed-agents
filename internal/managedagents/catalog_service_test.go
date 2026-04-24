@@ -859,7 +859,7 @@ func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 		WorkspaceVolumeID: "vol_workspace",
 		ControlToken:      "ctl_123",
 		RuntimeGeneration: 1,
-	}}
+	}, bootstrapCh: make(chan struct{}, 1)}
 	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
 	credential := RequestCredential{Token: "token_123"}
@@ -882,6 +882,7 @@ func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	waitTestCall(t, runtime.bootstrapCh)
 	if len(runtime.ensureCalls) != 1 {
 		t.Fatalf("EnsureRuntime calls = %d, want 1", len(runtime.ensureCalls))
 	}
@@ -908,10 +909,72 @@ func TestCreateSessionBootstrapsRuntime(t *testing.T) {
 	}
 }
 
-func TestCreateSessionRollsBackSessionWhenRuntimeEnsureFails(t *testing.T) {
+func TestSendEventsWaitsForAsyncCreateBootstrap(t *testing.T) {
+	repo := newTestRepository(t)
+	releaseBootstrap := make(chan struct{})
+	runtime := &createSessionRuntimeManager{runtime: &RuntimeRecord{
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_create_race",
+		WrapperURL:        "https://wrapper.example.test",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+	}, bootstrapCh: make(chan struct{}, 1), releaseBoot: releaseBootstrap}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	credential := RequestCredential{Token: "token_123"}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	environment := buildEnvironmentObject("env_123", CreateEnvironmentRequest{Name: "python", Config: defaultEnvironmentConfig()}, now, nil)
+	if err := repo.CreateEnvironment(ctx, principal.TeamID, environment, nil, now); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	agent := buildAgentObject("agent_123", 1, "claude", CreateAgentRequest{Name: "Claude Agent", Model: "claude-sonnet-4-5"}, now, nil)
+	if err := repo.CreateAgent(ctx, principal.TeamID, "claude", 1, agent, now); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	session, err := service.CreateSession(ctx, principal, credential, CreateSessionParams{
+		Agent:         "agent_123",
+		EnvironmentID: environment.ID,
+	}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	waitTestCall(t, runtime.bootstrapCh)
+
+	sendDone := make(chan error, 1)
+	go func() {
+		_, sendErr := service.SendEvents(ctx, principal, credential, session.ID, SendEventsParams{Events: []InputEvent{{
+			Type:    "user.message",
+			Content: []UserContentBlock{{Type: "text", Text: "hello"}},
+		}}}, "http://gateway.test")
+		sendDone <- sendErr
+	}()
+
+	select {
+	case err := <-sendDone:
+		t.Fatalf("SendEvents finished before async bootstrap lock released: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseBootstrap)
+	if err := <-sendDone; err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(runtime.bootstrapReqs) != 1 {
+		t.Fatalf("bootstrap calls = %d, want only async create bootstrap", len(runtime.bootstrapReqs))
+	}
+	if len(runtime.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtime.startRunReqs))
+	}
+}
+
+func TestCreateSessionReturnsSessionWhenAsyncRuntimeEnsureFails(t *testing.T) {
 	repo := newTestRepository(t)
 	ensureErr := errors.New("ensure runtime failed")
-	runtime := &createSessionRuntimeManager{ensureErr: ensureErr}
+	runtime := &createSessionRuntimeManager{ensureErr: ensureErr, ensureCh: make(chan struct{}, 1)}
 	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
 	ctx := context.Background()
@@ -926,25 +989,26 @@ func TestCreateSessionRollsBackSessionWhenRuntimeEnsureFails(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
-	_, err := service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, CreateSessionParams{
+	session, err := service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, CreateSessionParams{
 		Agent:         "agent_123",
 		EnvironmentID: environment.ID,
 	}, "http://gateway.test")
-	if !errors.Is(err, ensureErr) {
-		t.Fatalf("CreateSession error = %v, want %v", err, ensureErr)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
 	}
+	waitTestCall(t, runtime.ensureCh)
 	sessions, _, err := repo.ListSessions(ctx, principal.TeamID, SessionListOptions{Limit: 10, IncludeArchived: true})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(sessions) != 0 {
-		t.Fatalf("sessions len = %d, want rollback to leave none", len(sessions))
+	if len(sessions) != 1 || sessions[0].ID != session.ID {
+		t.Fatalf("sessions = %#v, want async bootstrap failure to leave created session", sessions)
 	}
 }
 
 func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 	repo := newTestRepository(t)
-	runtime := &createSessionRuntimeManager{}
+	runtime := &createSessionRuntimeManager{bootstrapCh: make(chan struct{}, 1)}
 	service := NewService(repo, runtime, nil)
 	principal := Principal{TeamID: "team_123", UserID: "user_123"}
 	ctx := context.Background()
@@ -978,6 +1042,7 @@ func TestCreateSessionUsesLLMVaultEngineAsRuntimeVendor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	waitTestCall(t, runtime.bootstrapCh)
 	if len(runtime.ensureCalls) != 1 || runtime.ensureCalls[0].Vendor != ManagedAgentsEngineCodex {
 		t.Fatalf("EnsureRuntime vendor calls = %#v, want codex", runtime.ensureCalls)
 	}
@@ -1711,12 +1776,17 @@ type createSessionRuntimeManager struct {
 	bootstrapErr  error
 	ensureCalls   []ensureRuntimeCall
 	bootstrapReqs []*WrapperSessionBootstrapRequest
+	startRunReqs  []*WrapperRunRequest
 	callOrder     []string
+	ensureCh      chan struct{}
+	bootstrapCh   chan struct{}
+	releaseBoot   <-chan struct{}
 }
 
 func (m *createSessionRuntimeManager) EnsureRuntime(_ context.Context, _ Principal, credential RequestCredential, session *SessionRecord, _ map[string]any, gatewayBaseURL string) (*RuntimeRecord, error) {
 	m.ensureCalls = append(m.ensureCalls, ensureRuntimeCall{Credential: credential, SessionID: session.ID, Vendor: session.Vendor, GatewayBaseURL: gatewayBaseURL})
 	m.callOrder = append(m.callOrder, "ensure")
+	signalTestCall(m.ensureCh)
 	if m.ensureErr != nil {
 		return nil, m.ensureErr
 	}
@@ -1737,10 +1807,15 @@ func (m *createSessionRuntimeManager) EnsureRuntime(_ context.Context, _ Princip
 func (m *createSessionRuntimeManager) BootstrapSession(_ context.Context, _ RequestCredential, _ *RuntimeRecord, req *WrapperSessionBootstrapRequest) error {
 	m.bootstrapReqs = append(m.bootstrapReqs, req)
 	m.callOrder = append(m.callOrder, "bootstrap")
+	signalTestCall(m.bootstrapCh)
+	if m.releaseBoot != nil {
+		<-m.releaseBoot
+	}
 	return m.bootstrapErr
 }
 
-func (m *createSessionRuntimeManager) StartRun(context.Context, RequestCredential, *RuntimeRecord, *WrapperRunRequest) error {
+func (m *createSessionRuntimeManager) StartRun(_ context.Context, _ RequestCredential, _ *RuntimeRecord, req *WrapperRunRequest) error {
+	m.startRunReqs = append(m.startRunReqs, req)
 	return nil
 }
 
@@ -1758,6 +1833,25 @@ func (m *createSessionRuntimeManager) DeleteWrapperSession(context.Context, Requ
 
 func (m *createSessionRuntimeManager) DestroyRuntime(context.Context, RequestCredential, *RuntimeRecord) error {
 	return nil
+}
+
+func signalTestCall(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func waitTestCall(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime call")
+	}
 }
 
 func (noopRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {

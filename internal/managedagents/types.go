@@ -329,6 +329,7 @@ type RuntimeRecord struct {
 	WorkspaceVolumeID string
 	ControlToken      string
 	VendorSessionID   string
+	BootstrapHash     string
 	RuntimeGeneration int64
 	ActiveRunID       *string
 	SandboxDeletedAt  *time.Time

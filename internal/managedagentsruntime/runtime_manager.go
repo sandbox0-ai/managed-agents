@@ -245,7 +245,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	}
 	op.ObservePhase("ensure_template", time.Since(phaseStarted), nil)
 	phaseStarted = time.Now()
-	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest, templateClient)
+	artifact, err := m.resolveReadyEnvironmentArtifact(ctx, credential, session, environment, templateRequest, templateClient, false)
 	if err != nil {
 		op.ObservePhase("resolve_environment_artifact", time.Since(phaseStarted), err)
 		return nil, fmt.Errorf("resolve environment artifact: %w", err)

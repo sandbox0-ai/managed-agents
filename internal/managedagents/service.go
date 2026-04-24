@@ -2,7 +2,9 @@ package managedagents
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,7 +40,8 @@ const (
 	runtimeWebhookLeaseDuration = 2 * time.Minute
 	runtimeWebhookPollInterval  = 100 * time.Millisecond
 	runtimeWebhookMaxAttempts   = 5
-	failedCreateCleanupTimeout  = 2 * time.Minute
+	runtimeBootstrapFreshness   = 2 * time.Minute
+	sessionBootstrapTimeout     = 2 * time.Minute
 )
 
 // Service coordinates session truth and runtime orchestration.
@@ -211,62 +214,72 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 				zap.String("session_id", record.ID),
 				zap.Int("resource_secret_count", len(resourceSecrets)),
 			)
-			phaseStarted = time.Now()
-			runtime, runtimeErr := s.runtime.EnsureRuntime(ctx, principal, credential, record, nil, gatewayBaseURL)
-			if runtimeErr != nil {
-				op.ObservePhase("ensure_runtime", time.Since(phaseStarted), runtimeErr,
-					zap.String("session_id", record.ID),
-				)
-				s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-				return runtimeErr
-			}
-			op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
-				zap.String("session_id", record.ID),
-				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-			)
-			if runtime != nil {
-				phaseStarted = time.Now()
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
-					op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
-						zap.String("session_id", record.ID),
-						zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-					)
-					s.cleanupFailedCreateRuntime(ctx, credential, record.ID, runtime)
-					return err
-				}
-				op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
-					zap.String("session_id", record.ID),
-					zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-				)
-			}
-			created = record.toAPI(now)
 			return nil
 		})
 	}); err != nil {
 		return nil, err
 	}
+	created = record.toAPI(now)
+	s.startAsyncSessionBootstrap(ctx, principal, credential, record, gatewayBaseURL)
+	op.ObservePhase("schedule_async_bootstrap", 0, nil,
+		zap.String("session_id", record.ID),
+	)
 	return created, nil
 }
 
-func (s *Service) cleanupFailedCreateRuntime(ctx context.Context, credential RequestCredential, sessionID string, runtime *RuntimeRecord) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedCreateCleanupTimeout)
-	defer cancel()
-	ctx = cleanupCtx
-
-	if runtime != nil {
-		if err := s.runtime.DestroyRuntime(ctx, credential, runtime); err != nil {
-			s.logger.Warn("failed to destroy runtime after create failure", zap.Error(err), zap.String("session_id", sessionID))
-		}
-		if err := s.repo.DeleteRuntime(ctx, sessionID); err != nil {
-			s.logger.Warn("failed to delete runtime record after create failure", zap.Error(err), zap.String("session_id", sessionID))
-		}
+func (s *Service) startAsyncSessionBootstrap(parent context.Context, principal Principal, credential RequestCredential, record *SessionRecord, gatewayBaseURL string) {
+	if record == nil {
+		return
 	}
-	if err := s.repo.DeleteSessionResourceSecrets(ctx, sessionID); err != nil {
-		s.logger.Warn("failed to delete session resource secrets after create failure", zap.Error(err), zap.String("session_id", sessionID))
+	sessionID := strings.TrimSpace(record.ID)
+	if sessionID == "" {
+		return
 	}
-	if err := s.repo.MarkSessionDeleted(ctx, sessionID, time.Now().UTC()); err != nil {
-		s.logger.Warn("failed to mark session deleted after create failure", zap.Error(err), zap.String("session_id", sessionID))
-	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), sessionBootstrapTimeout)
+		defer cancel()
+		var err error
+		ctx, op := s.observability.StartOperation(ctx, "session_bootstrap_async", record.Vendor,
+			zap.String("team_id", record.TeamID),
+			zap.String("session_id", sessionID),
+		)
+		defer func() {
+			if err != nil {
+				s.logger.Warn("async managed-agent session bootstrap failed",
+					zap.Error(err),
+					zap.String("session_id", sessionID),
+				)
+			}
+			op.End(err)
+		}()
+		lockStarted := time.Now()
+		err = s.repo.WithSessionLock(ctx, sessionID, func(ctx context.Context) error {
+			op.ObservePhase("acquire_session_lock", time.Since(lockStarted), nil,
+				zap.String("session_id", sessionID),
+			)
+			phaseStarted := time.Now()
+			current, engine, loadErr := s.repo.GetSession(ctx, sessionID)
+			if loadErr != nil {
+				if errors.Is(loadErr, ErrSessionNotFound) {
+					op.ObservePhase("load_session", time.Since(phaseStarted), nil,
+						zap.Bool("session_present", false),
+					)
+					return nil
+				}
+				op.ObservePhase("load_session", time.Since(phaseStarted), loadErr)
+				return loadErr
+			}
+			op.ObservePhase("load_session", time.Since(phaseStarted), nil,
+				zap.Bool("session_present", true),
+			)
+			if current.ArchivedAt != nil {
+				op.ObservePhase("skip_archived_session", 0, nil)
+				return nil
+			}
+			_, ensureErr := s.ensureRuntimeBootstrappedLocked(ctx, principal, credential, current, engine, gatewayBaseURL, nil, op, "ensure_runtime", "bootstrap_session")
+			return ensureErr
+		})
+	}()
 }
 
 func (s *Service) ListSessions(ctx context.Context, principal Principal, opts SessionListOptions) ([]*Session, *string, error) {
@@ -350,7 +363,7 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 			// Sandbox0 treats vault updates as runtime state refreshes, not run configuration changes.
 			// Refresh bootstrap state even while a run is active so the next credential use sees the latest vault set.
 			if strings.TrimSpace(runtime.SandboxID) != "" {
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+				if err := s.bootstrapRuntimeLocked(ctx, credential, record, engine, runtime, nil, "bootstrap_session_for_update"); err != nil {
 					return nil, err
 				}
 			}
@@ -584,16 +597,10 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		if err := ensureResolvesRequiredActions(requiredActionIDs, stampedEvents); err != nil {
 			return nil, err
 		}
-		phaseStarted = time.Now()
-		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
-			op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), err,
-				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-			)
+		runtime, err = s.ensureRuntimeBootstrappedLocked(ctx, principal, credential, record, engine, gatewayBaseURL, runtime, op, "ensure_runtime_for_action_resolution", "bootstrap_session_for_action_resolution")
+		if err != nil {
 			return nil, err
 		}
-		op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), nil,
-			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-		)
 		phaseStarted = time.Now()
 		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(runtimeInputEvents)})
 		if err != nil {
@@ -658,26 +665,10 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		}
 		return stampedEvents, nil
 	}
-	phaseStarted = time.Now()
-	runtime, err = s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
+	runtime, err = s.ensureRuntimeBootstrappedLocked(ctx, principal, credential, record, engine, gatewayBaseURL, runtime, op, "ensure_runtime", "bootstrap_session")
 	if err != nil {
-		op.ObservePhase("ensure_runtime", time.Since(phaseStarted), err)
 		return nil, err
 	}
-	op.ObservePhase("ensure_runtime", time.Since(phaseStarted), nil,
-		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-	)
-	bootstrapReq := bootstrapRequestFor(record, engine, runtime)
-	phaseStarted = time.Now()
-	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapReq); err != nil {
-		op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
-			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-		)
-		return nil, err
-	}
-	op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
-		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
-	)
 	runID := NewID("srun")
 	runtime.ActiveRunID = &runID
 	runtime.UpdatedAt = processedAt
@@ -999,7 +990,7 @@ func (s *Service) applyRuntimePayloadLocked(ctx context.Context, runtime *Runtim
 			return err
 		}
 		if batch != nil {
-			if err := s.runtime.BootstrapSession(ctx, RequestCredential{}, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+			if err := s.bootstrapRuntimeLocked(ctx, RequestCredential{}, record, engine, runtime, nil, "bootstrap_session_for_queued_run"); err != nil {
 				return err
 			}
 		}
@@ -1130,6 +1121,100 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 		Engine:           cloneMap(engine),
 	}
 	return req
+}
+
+func (s *Service) ensureRuntimeBootstrappedLocked(ctx context.Context, principal Principal, credential RequestCredential, record *SessionRecord, engine map[string]any, gatewayBaseURL string, runtime *RuntimeRecord, op *Operation, ensurePhase, bootstrapPhase string) (*RuntimeRecord, error) {
+	if runtimeBootstrapCurrent(record, engine, runtime) {
+		op.ObservePhase(ensurePhase+"_skipped", 0, nil,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
+		op.ObservePhase(bootstrapPhase+"_skipped", 0, nil,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
+		return runtime, nil
+	}
+	phaseStarted := time.Now()
+	ensured, err := s.runtime.EnsureRuntime(ctx, principal, credential, record, engine, gatewayBaseURL)
+	if err != nil {
+		op.ObservePhase(ensurePhase, time.Since(phaseStarted), err)
+		return nil, err
+	}
+	op.ObservePhase(ensurePhase, time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", runtimeSandboxIDForLog(ensured)),
+	)
+	if ensured != nil {
+		runtime = ensured
+	}
+	if current, runtimeErr := s.repo.GetRuntime(ctx, record.ID); runtimeErr == nil {
+		runtime = current
+	} else if !errors.Is(runtimeErr, ErrRuntimeNotFound) {
+		return nil, runtimeErr
+	}
+	if runtime == nil {
+		return nil, ErrRuntimeNotFound
+	}
+	if runtimeBootstrapCurrent(record, engine, runtime) {
+		op.ObservePhase(bootstrapPhase+"_skipped", 0, nil,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
+		return runtime, nil
+	}
+	return runtime, s.bootstrapRuntimeLocked(ctx, credential, record, engine, runtime, op, bootstrapPhase)
+}
+
+func (s *Service) bootstrapRuntimeLocked(ctx context.Context, credential RequestCredential, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, op *Operation, phase string) error {
+	phaseStarted := time.Now()
+	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+		op.ObservePhase(phase, time.Since(phaseStarted), err,
+			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		)
+		return err
+	}
+	op.ObservePhase(phase, time.Since(phaseStarted), nil,
+		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+	)
+	return s.markRuntimeBootstrapped(ctx, runtime, bootstrapHashFor(record, engine))
+}
+
+func bootstrapHashFor(record *SessionRecord, engine map[string]any) string {
+	if record == nil {
+		return ""
+	}
+	payload := map[string]any{
+		"vendor":                  record.Vendor,
+		"environment_id":          record.EnvironmentID,
+		"environment_artifact_id": record.EnvironmentArtifactID,
+		"working_directory":       record.WorkingDirectory,
+		"agent":                   record.Agent,
+		"resources":               record.Resources,
+		"vault_ids":               record.VaultIDs,
+		"engine":                  engine,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+func runtimeBootstrapCurrent(record *SessionRecord, engine map[string]any, runtime *RuntimeRecord) bool {
+	if runtime == nil || strings.TrimSpace(runtime.BootstrapHash) == "" {
+		return false
+	}
+	if runtime.UpdatedAt.IsZero() || time.Since(runtime.UpdatedAt) > runtimeBootstrapFreshness {
+		return false
+	}
+	return runtime.BootstrapHash == bootstrapHashFor(record, engine)
+}
+
+func (s *Service) markRuntimeBootstrapped(ctx context.Context, runtime *RuntimeRecord, bootstrapHash string) error {
+	if runtime == nil {
+		return nil
+	}
+	runtime.BootstrapHash = strings.TrimSpace(bootstrapHash)
+	runtime.UpdatedAt = time.Now().UTC()
+	return s.repo.UpsertRuntime(ctx, runtime)
 }
 
 func runtimeSandboxIDForLog(runtime *RuntimeRecord) string {

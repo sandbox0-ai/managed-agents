@@ -10,6 +10,7 @@ import (
 )
 
 type recordingRuntimeManager struct {
+	ensureRuntime   *RuntimeRecord
 	resolveResponse *WrapperResolveActionsResponse
 	bootstrapReqs   []*WrapperSessionBootstrapRequest
 	startRunReqs    []*WrapperRunRequest
@@ -18,7 +19,17 @@ type recordingRuntimeManager struct {
 	destroyErr      error
 }
 
-func (m *recordingRuntimeManager) EnsureRuntime(context.Context, Principal, RequestCredential, *SessionRecord, map[string]any, string) (*RuntimeRecord, error) {
+func (m *recordingRuntimeManager) EnsureRuntime(_ context.Context, _ Principal, _ RequestCredential, session *SessionRecord, _ map[string]any, _ string) (*RuntimeRecord, error) {
+	if m.ensureRuntime != nil {
+		cloned := *m.ensureRuntime
+		if cloned.SessionID == "" {
+			cloned.SessionID = session.ID
+		}
+		if cloned.Vendor == "" {
+			cloned.Vendor = session.Vendor
+		}
+		return &cloned, nil
+	}
 	return nil, nil
 }
 
@@ -151,6 +162,60 @@ func TestSendEventsRejectsArchivedSession(t *testing.T) {
 	_, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{Type: "user.message", Content: []UserContentBlock{{Type: "text", Text: "hello"}}}}}, "http://gateway.test")
 	if !errors.Is(err, ErrSessionArchived) {
 		t.Fatalf("SendEvents error = %v, want ErrSessionArchived", err)
+	}
+}
+
+func TestSendEventsSkipsBootstrapWhenRuntimeHashMatches(t *testing.T) {
+	repo := newTestRepository(t)
+	now := time.Now().UTC()
+	record := &SessionRecord{
+		ID:               "sesn_bootstrap_hash_123",
+		TeamID:           "team_123",
+		CreatedByUserID:  "user_123",
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "idle",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	engine := map[string]any{}
+	if err := repo.CreateSession(context.Background(), record, engine); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	runtime := &RuntimeRecord{
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_bootstrap_hash_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		BootstrapHash:     bootstrapHashFor(record, engine),
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if err := repo.UpsertRuntime(context.Background(), runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	runtimeManager := &recordingRuntimeManager{ensureRuntime: runtime}
+	service := NewService(repo, runtimeManager, nil)
+
+	_, err := service.SendEvents(context.Background(), Principal{TeamID: record.TeamID, UserID: record.CreatedByUserID}, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{
+		Type:    "user.message",
+		Content: []UserContentBlock{{Type: "text", Text: "hello"}},
+	}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(runtimeManager.bootstrapReqs) != 0 {
+		t.Fatalf("bootstrap calls = %d, want 0", len(runtimeManager.bootstrapReqs))
+	}
+	if len(runtimeManager.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtimeManager.startRunReqs))
 	}
 }
 

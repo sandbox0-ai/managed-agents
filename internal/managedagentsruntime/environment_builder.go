@@ -22,12 +22,12 @@ const environmentBuildCleanupTimeout = 2 * time.Minute
 const environmentArtifactCleanupPollInterval = 100 * time.Millisecond
 const environmentArtifactCleanupGracePeriod = 2 * time.Second
 
-func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (*gatewaymanagedagents.EnvironmentArtifact, error) {
+func (m *SDKRuntimeManager) resolveReadyEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, session *gatewaymanagedagents.SessionRecord, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient, allowBuild bool) (*gatewaymanagedagents.EnvironmentArtifact, error) {
 	artifact, err := m.lookupPinnedEnvironmentArtifact(ctx, session, environment)
 	if err != nil {
 		return nil, err
 	}
-	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest, templateClient)
+	return m.ensureEnvironmentArtifactReady(ctx, credential, artifact, environment, templateRequest, templateClient, allowBuild)
 }
 
 func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) error {
@@ -63,7 +63,7 @@ func (m *SDKRuntimeManager) PrebuildEnvironmentArtifact(ctx context.Context, cre
 	if err != nil {
 		return fmt.Errorf("resolve environment artifact: %w", err)
 	}
-	_, err = m.ensureEnvironmentArtifactReady(ctx, gatewaymanagedagents.RequestCredential{}, artifact, environment, templateRequest, templateClient)
+	_, err = m.ensureEnvironmentArtifactReady(ctx, gatewaymanagedagents.RequestCredential{}, artifact, environment, templateRequest, templateClient, true)
 	return err
 }
 
@@ -202,7 +202,7 @@ func (m *SDKRuntimeManager) lookupPinnedEnvironmentArtifact(ctx context.Context,
 	return artifact, nil
 }
 
-func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
+func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, credential gatewaymanagedagents.RequestCredential, artifact *gatewaymanagedagents.EnvironmentArtifact, environment *gatewaymanagedagents.Environment, templateRequest *managedTemplateRequest, templateClient templateClient, allowBuild bool) (ready *gatewaymanagedagents.EnvironmentArtifact, err error) {
 	ctx, op := m.observability.StartOperation(ctx, "environment_artifact_ready", "",
 		zap.String("team_id", environmentArtifactTeamIDForLog(artifact)),
 		zap.String("environment_id", environmentArtifactEnvironmentIDForLog(artifact)),
@@ -224,6 +224,9 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 		case gatewaymanagedagents.EnvironmentArtifactStatusArchived:
 			return nil, fmt.Errorf("environment artifact %s is archived", artifact.ID)
 		case gatewaymanagedagents.EnvironmentArtifactStatusPending, gatewaymanagedagents.EnvironmentArtifactStatusFailed:
+			if !allowBuild {
+				return nil, fmt.Errorf("%w: %s", gatewaymanagedagents.ErrEnvironmentArtifactBuilding, artifact.ID)
+			}
 			acquired, err := m.repo.BeginEnvironmentArtifactBuild(ctx, artifact.TeamID, artifact.ID, time.Now().UTC())
 			if err != nil {
 				op.ObservePhase("begin_artifact_build", time.Since(phaseStarted), err,
@@ -239,6 +242,9 @@ func (m *SDKRuntimeManager) ensureEnvironmentArtifactReady(ctx context.Context, 
 				return m.buildEnvironmentArtifact(ctx, credential, artifact, environment, templateRequest, templateClient)
 			}
 		case gatewaymanagedagents.EnvironmentArtifactStatusBuilding:
+			if !allowBuild {
+				return nil, fmt.Errorf("%w: %s", gatewaymanagedagents.ErrEnvironmentArtifactBuilding, artifact.ID)
+			}
 			if time.Now().UTC().After(deadline) {
 				return nil, fmt.Errorf("timed out waiting for environment artifact %s to build", artifact.ID)
 			}
