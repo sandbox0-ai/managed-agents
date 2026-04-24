@@ -47,7 +47,7 @@ type managedProjectedHeader struct {
 	valueTemplate string
 }
 
-const volumeFileOperationAttempts = 3
+const volumeFileOperationAttempts = 5
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
 	_ = credential
@@ -253,7 +253,12 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 				return fmt.Errorf("resolve team asset store: %w", err)
 			}
 		}
-		content, err := client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+		var content []byte
+		err = retryVolumeFileOperation(ctx, func() error {
+			var readErr error
+			content, readErr = client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+			return readErr
+		})
 		if err != nil {
 			return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
 		}
@@ -370,7 +375,12 @@ func (m *SDKRuntimeManager) materializeStoredSkillBundle(ctx context.Context, cl
 		return errors.New("skill bundle asset source is incomplete")
 	}
 
-	bundleContent, err := client.ReadVolumeFile(ctx, assetVolumeID, bundlePath)
+	var bundleContent []byte
+	err := retryVolumeFileOperation(ctx, func() error {
+		var readErr error
+		bundleContent, readErr = client.ReadVolumeFile(ctx, assetVolumeID, bundlePath)
+		return readErr
+	})
 	if err != nil {
 		return fmt.Errorf("read skill bundle: %w", err)
 	}

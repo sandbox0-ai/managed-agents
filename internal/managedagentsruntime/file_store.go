@@ -74,10 +74,16 @@ func (s *VolumeFileStore) PutObject(ctx context.Context, credential gatewaymanag
 	if strings.TrimSpace(req.Path) == "" {
 		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("asset-store path is required")
 	}
-	if _, err := client.MkdirVolumeFile(ctx, req.VolumeID, path.Dir(req.Path), true); err != nil {
+	if err := retryVolumeFileOperation(ctx, func() error {
+		_, err := client.MkdirVolumeFile(ctx, req.VolumeID, path.Dir(req.Path), true)
+		return err
+	}); err != nil {
 		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("create asset-store directory: %w", err)
 	}
-	if _, err := client.WriteVolumeFile(ctx, req.VolumeID, req.Path, content); err != nil {
+	if err := retryVolumeFileOperation(ctx, func() error {
+		_, err := client.WriteVolumeFile(ctx, req.VolumeID, req.Path, content)
+		return err
+	}); err != nil {
 		return gatewaymanagedagents.AssetStoreObject{}, fmt.Errorf("write asset-store content: %w", err)
 	}
 	return gatewaymanagedagents.AssetStoreObject{
@@ -95,8 +101,12 @@ func (s *VolumeFileStore) ReadObject(ctx context.Context, credential gatewaymana
 	if err != nil {
 		return nil, err
 	}
-	content, err := client.ReadVolumeFile(ctx, req.VolumeID, req.Path)
-	if err != nil {
+	var content []byte
+	if err := retryVolumeFileOperation(ctx, func() error {
+		var readErr error
+		content, readErr = client.ReadVolumeFile(ctx, req.VolumeID, req.Path)
+		return readErr
+	}); err != nil {
 		return nil, fmt.Errorf("read asset-store content: %w", err)
 	}
 	return content, nil
@@ -110,7 +120,13 @@ func (s *VolumeFileStore) DeleteObject(ctx context.Context, credential gatewayma
 	if err != nil {
 		return err
 	}
-	if _, err := client.DeleteVolumeFile(ctx, req.VolumeID, req.Path); err != nil {
+	if err := retryVolumeFileOperation(ctx, func() error {
+		_, err := client.DeleteVolumeFile(ctx, req.VolumeID, req.Path)
+		if isSandboxNotFound(err) {
+			return nil
+		}
+		return err
+	}); err != nil {
 		if isSandboxNotFound(err) {
 			return nil
 		}
