@@ -10,13 +10,6 @@ type uploadedSkillFile struct {
 	Content []byte
 }
 
-type storedSkillFile struct {
-	Path    string `json:"path"`
-	Content []byte `json:"content"`
-}
-
-type StoredSkillFile = storedSkillFile
-
 type storedSkillBundle struct {
 	Path      string `json:"path"`
 	SHA256    string `json:"sha256"`
@@ -60,7 +53,6 @@ type ListSkillVersionsResponse struct {
 
 type StoredSkillVersion struct {
 	Snapshot SkillVersion
-	Files    []storedSkillFile
 	Bundle   storedSkillBundle
 }
 
@@ -108,18 +100,4 @@ func normalizeNullableString(value *string) *string {
 		return nil
 	}
 	return &trimmed
-}
-
-func buildStoredSkillFiles(parsed *parsedSkillUpload) []storedSkillFile {
-	if parsed == nil || len(parsed.Files) == 0 {
-		return []storedSkillFile{}
-	}
-	files := make([]storedSkillFile, 0, len(parsed.Files))
-	for _, file := range parsed.Files {
-		files = append(files, storedSkillFile{
-			Path:    strings.TrimSpace(file.Path),
-			Content: append([]byte(nil), file.Content...),
-		})
-	}
-	return files
 }

@@ -658,48 +658,6 @@ func TestManagedLLMCredentialBindingUsesMiniMaxVaultToken(t *testing.T) {
 	}
 }
 
-func TestNormalizedStoredSkillRelativePathPreservesTopLevelDirectory(t *testing.T) {
-	got := normalizedStoredSkillRelativePath("demo-skill", "demo-skill/SKILL.md")
-	if got != "demo-skill/SKILL.md" {
-		t.Fatalf("relative path = %q, want demo-skill/SKILL.md", got)
-	}
-}
-
-func TestNormalizedStoredSkillRelativePathPrefixesDirectoryWhenUploadWasFlat(t *testing.T) {
-	got := normalizedStoredSkillRelativePath("demo-skill", "SKILL.md")
-	if got != "demo-skill/SKILL.md" {
-		t.Fatalf("relative path = %q, want demo-skill/SKILL.md", got)
-	}
-}
-
-func TestSkillFileTargetPathPlacesFilesUnderProjectSkillsDirectory(t *testing.T) {
-	got := skillFileTargetPath("/workspace", "/workspace", "demo-skill", "docs/guide.md")
-	if got != "/.claude/skills/demo-skill/docs/guide.md" {
-		t.Fatalf("target path = %q", got)
-	}
-}
-
-func TestSkillFileTargetPathUsesWorkspaceRelativeVolumePath(t *testing.T) {
-	got := skillFileTargetPath("/workspace", "/workspace/project", "demo-skill", "SKILL.md")
-	if got != "/project/.claude/skills/demo-skill/SKILL.md" {
-		t.Fatalf("target path = %q", got)
-	}
-}
-
-func TestSkillFileTargetPathMatchesAgentSDKProjectSkillDirectory(t *testing.T) {
-	got := skillFileTargetPath("/workspace", "/workspace/project", "demo-skill", "demo-skill/SKILL.md")
-	if got != "/project/.claude/skills/demo-skill/SKILL.md" {
-		t.Fatalf("target path = %q, want Claude/Codex project skill path", got)
-	}
-}
-
-func TestSkillFileTargetPathRejectsWorkingDirectoryOutsideWorkspaceMount(t *testing.T) {
-	got := skillFileTargetPath("/workspace", "/tmp/project", "demo-skill", "SKILL.md")
-	if got != "" {
-		t.Fatalf("target path = %q, want empty", got)
-	}
-}
-
 func TestWorkspaceMountedPathToVolumePathRejectsSiblingPrefix(t *testing.T) {
 	got := workspaceMountedPathToVolumePath("/workspace", "/workspace-other/.claude")
 	if got != "" {

@@ -243,28 +243,19 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 		if err != nil {
 			return fmt.Errorf("resolve file resource %s: %w", fileID, err)
 		}
-		content := record.Content
-		switch {
-		case strings.TrimSpace(record.StorePath) != "":
-			if teamStore == nil {
-				regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
-				if err != nil {
-					return fmt.Errorf("resolve team asset store region: %w", err)
-				}
-				teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
-				if err != nil {
-					return fmt.Errorf("resolve team asset store: %w", err)
-				}
-			}
-			content, err = client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+		if teamStore == nil {
+			regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
 			if err != nil {
-				return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
+				return fmt.Errorf("resolve team asset store region: %w", err)
 			}
-		case strings.TrimSpace(record.FileStoreVolumeID) != "" && strings.TrimSpace(record.FileStorePath) != "":
-			content, err = client.ReadVolumeFile(ctx, record.FileStoreVolumeID, record.FileStorePath)
+			teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
 			if err != nil {
-				return fmt.Errorf("read file-store resource %s: %w", fileID, err)
+				return fmt.Errorf("resolve team asset store: %w", err)
 			}
+		}
+		content, err := client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
+		if err != nil {
+			return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
 		}
 		parent := path.Dir(mountPath)
 		if parent != "." && parent != "/" {
@@ -342,24 +333,18 @@ func (m *SDKRuntimeManager) materializeAgentSkills(ctx context.Context, client *
 			if directory == "" {
 				return nil, fmt.Errorf("custom skill %s@%s is missing directory", skillID, version)
 			}
-			if strings.TrimSpace(stored.Bundle.Path) != "" {
-				if teamStore == nil {
-					regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
-					if err != nil {
-						return nil, fmt.Errorf("resolve team asset store region: %w", err)
-					}
-					teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
-					if err != nil {
-						return nil, fmt.Errorf("resolve team asset store: %w", err)
-					}
+			if teamStore == nil {
+				regionID, err := m.repo.ResolveRuntimeRegionID(ctx, teamID)
+				if err != nil {
+					return nil, fmt.Errorf("resolve team asset store region: %w", err)
 				}
-				if err := m.materializeStoredSkillBundle(ctx, client, sandboxID, workspaceVolumeID, teamStore.VolumeID, stored.Snapshot.ID, stored.Bundle.Path, workingDirectory, directory); err != nil {
-					return nil, fmt.Errorf("materialize custom skill %s@%s bundle: %w", skillID, version, err)
+				teamStore, err = m.repo.GetTeamAssetStore(ctx, teamID, regionID)
+				if err != nil {
+					return nil, fmt.Errorf("resolve team asset store: %w", err)
 				}
-			} else {
-				if err := writeStoredSkillFiles(ctx, client, workspaceVolumeID, m.cfg.WorkspaceMountPath, workingDirectory, directory, stored.Files); err != nil {
-					return nil, fmt.Errorf("materialize custom skill %s@%s: %w", skillID, version, err)
-				}
+			}
+			if err := m.materializeStoredSkillBundle(ctx, client, sandboxID, workspaceVolumeID, teamStore.VolumeID, stored.Snapshot.ID, stored.Bundle.Path, workingDirectory, directory); err != nil {
+				return nil, fmt.Errorf("materialize custom skill %s@%s bundle: %w", skillID, version, err)
 			}
 			preloadSet[directory] = struct{}{}
 		default:
@@ -1021,33 +1006,6 @@ func managedLLMCredentialBinding(sessionID, vendor string, credential *managedLL
 	}, nil
 }
 
-func writeStoredSkillFiles(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, workspaceMountPath, workingDirectory, directory string, files []gatewaymanagedagents.StoredSkillFile) error {
-	for _, file := range files {
-		targetPath := skillFileTargetPath(workspaceMountPath, workingDirectory, directory, file.Path)
-		if targetPath == "" {
-			return errors.New("stored skill file path is invalid")
-		}
-		parent := path.Dir(targetPath)
-		if parent != "." && parent != "/" {
-			err := retryVolumeFileOperation(ctx, func() error {
-				_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
-				return err
-			})
-			if err != nil {
-				return fmt.Errorf("mkdir skill path %s: %w", parent, err)
-			}
-		}
-		err := retryVolumeFileOperation(ctx, func() error {
-			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, targetPath, file.Content)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("write skill file %s: %w", targetPath, err)
-		}
-	}
-	return nil
-}
-
 func skillDirectoryName(stored *gatewaymanagedagents.StoredSkillVersion, fallback string) string {
 	if stored != nil {
 		if directory := sanitizeName(stored.Snapshot.Directory); directory != "" {
@@ -1055,22 +1013,6 @@ func skillDirectoryName(stored *gatewaymanagedagents.StoredSkillVersion, fallbac
 		}
 	}
 	return sanitizeName(fallback)
-}
-
-func skillFileTargetPath(workspaceMountPath, workingDirectory, directory, storedPath string) string {
-	containerBase := cleanMountPath(path.Join(strings.TrimSpace(workingDirectory), ".claude", "skills"))
-	if containerBase == "" {
-		return ""
-	}
-	volumeBase := workspaceMountedPathToVolumePath(workspaceMountPath, containerBase)
-	if volumeBase == "" {
-		return ""
-	}
-	relative := normalizedStoredSkillRelativePath(directory, storedPath)
-	if relative == "" {
-		return ""
-	}
-	return cleanMountPath(path.Join(volumeBase, relative))
 }
 
 func skillBundleWorkspaceVolumePath(skillVersionID string) string {
@@ -1116,18 +1058,6 @@ func workspaceVolumePathToMountedPath(workspaceMountPath, volumePath string) str
 		return targetPath
 	}
 	return cleanMountPath(path.Join(mountPath, strings.TrimPrefix(targetPath, "/")))
-}
-
-func normalizedStoredSkillRelativePath(directory, storedPath string) string {
-	cleanDirectory := sanitizeName(directory)
-	cleanPath := path.Clean(strings.TrimSpace(strings.TrimPrefix(storedPath, "/")))
-	if cleanDirectory == "" || cleanPath == "." || cleanPath == "" || strings.HasPrefix(cleanPath, "../") {
-		return ""
-	}
-	if cleanPath == cleanDirectory || strings.HasPrefix(cleanPath, cleanDirectory+"/") {
-		return cleanPath
-	}
-	return path.Join(cleanDirectory, cleanPath)
 }
 
 func skillBundleUnpackCommand(bundleContainerPath, skillsContainerPath, directory string) []string {
