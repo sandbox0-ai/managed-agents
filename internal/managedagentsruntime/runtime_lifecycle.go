@@ -80,6 +80,17 @@ func (m *SDKRuntimeManager) ReconcileRuntimeSandboxes(ctx context.Context) error
 			continue
 		}
 		if isSandboxNotFound(err) {
+			opCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
+			cleanupErr := m.cleanupRuntimeSandboxResources(opCtx, client, runtime, false)
+			cancel()
+			if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
+				m.logger.Warn("cleanup lost runtime sandbox resources during reconcile failed",
+					zap.Error(cleanupErr),
+					zap.String("session_id", runtimeSessionID(runtime)),
+					zap.String("sandbox_id", sandboxID),
+				)
+				continue
+			}
 			if markErr := m.markRuntimeSandboxLost(ctx, runtime, "sandbox not found during runtime reconcile"); markErr != nil {
 				m.logger.Warn("mark runtime sandbox lost during reconcile failed",
 					zap.Error(markErr),
@@ -109,6 +120,26 @@ func (m *SDKRuntimeManager) RefreshRunningRuntimeTTLs(ctx context.Context) error
 		cancel()
 		if err != nil {
 			if isSandboxNotFound(err) {
+				cleanupClient, clientErr := m.sandboxClientForRuntime(ctx, runtime)
+				if clientErr == nil {
+					cleanupCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
+					cleanupErr := m.cleanupRuntimeSandboxResources(cleanupCtx, cleanupClient, runtime, false)
+					cancel()
+					if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
+						m.logger.Warn("cleanup lost runtime sandbox resources after ttl refresh failed",
+							zap.Error(cleanupErr),
+							zap.String("session_id", runtimeSessionID(runtime)),
+							zap.String("sandbox_id", runtimeSandboxID(runtime)),
+						)
+						continue
+					}
+				} else {
+					m.logger.Warn("create sandbox client for ttl loss cleanup failed",
+						zap.Error(clientErr),
+						zap.String("session_id", runtimeSessionID(runtime)),
+						zap.String("sandbox_id", runtimeSandboxID(runtime)),
+					)
+				}
 				if markErr := m.markRuntimeSandboxLost(ctx, runtime, "sandbox not found during ttl refresh"); markErr != nil {
 					m.logger.Warn("mark runtime sandbox lost after ttl refresh failed",
 						zap.Error(markErr),

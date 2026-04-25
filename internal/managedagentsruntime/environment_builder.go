@@ -27,6 +27,7 @@ const environmentArtifactCleanupGracePeriod = 2 * time.Second
 const environmentBuildStepConcurrency = 3
 const environmentArtifactPublishRetryTimeout = 2 * time.Minute
 const environmentArtifactPublishRetryInterval = 2 * time.Second
+const managedEnvironmentBasePATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 func (m *SDKRuntimeManager) BuildEnvironmentArtifact(ctx context.Context, credential gatewaymanagedagents.RequestCredential, teamID string, environment *gatewaymanagedagents.Environment) (*gatewaymanagedagents.EnvironmentArtifactBuildResult, error) {
 	_ = credential
@@ -396,7 +397,7 @@ func isTransientEnvironmentArtifactPublishError(err error) bool {
 		return true
 	}
 	switch apiErr.StatusCode {
-	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	default:
 		return false
@@ -446,6 +447,64 @@ type environmentBuildStep struct {
 	envVars map[string]string
 }
 
+func managedEnvironmentRuntimeEnvVars(controlToken string, environment *gatewaymanagedagents.Environment) map[string]string {
+	env := map[string]string{
+		"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
+	}
+	if environment == nil {
+		return env
+	}
+	managers := gatewaymanagedagents.ConfiguredEnvironmentPackageManagers(environment.Config)
+	if len(managers) == 0 {
+		return env
+	}
+
+	pathEntries := make([]string, 0, 8)
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			pathEntries = append(pathEntries, path)
+		}
+	}
+	for _, manager := range managers {
+		switch manager {
+		case "apt":
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/local/sbin")
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/local/bin")
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/sbin")
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/bin")
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/sbin")
+			addPath(gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/bin")
+			env["LD_LIBRARY_PATH"] = strings.Join([]string{
+				gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/local/lib",
+				gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/usr/lib",
+				gatewaymanagedagents.ManagedEnvironmentAptMountPath + "/rootfs/lib",
+			}, ":")
+		case "cargo":
+			addPath(gatewaymanagedagents.ManagedEnvironmentCargoMountPath + "/root/bin")
+			env["CARGO_HOME"] = gatewaymanagedagents.ManagedEnvironmentCargoMountPath + "/home"
+		case "gem":
+			addPath(gatewaymanagedagents.ManagedEnvironmentGemMountPath + "/bin")
+			env["GEM_HOME"] = gatewaymanagedagents.ManagedEnvironmentGemMountPath + "/home"
+			env["GEM_PATH"] = gatewaymanagedagents.ManagedEnvironmentGemMountPath + "/home"
+		case "go":
+			addPath(gatewaymanagedagents.ManagedEnvironmentGoMountPath + "/bin")
+			env["GOMODCACHE"] = gatewaymanagedagents.ManagedEnvironmentGoMountPath + "/pkg/mod"
+		case "npm":
+			addPath(gatewaymanagedagents.ManagedEnvironmentNPMMountPath + "/bin")
+			env["NODE_PATH"] = gatewaymanagedagents.ManagedEnvironmentNPMMountPath + "/lib/node_modules"
+		case "pip":
+			addPath(gatewaymanagedagents.ManagedEnvironmentPipMountPath + "/venv/bin")
+			env["VIRTUAL_ENV"] = gatewaymanagedagents.ManagedEnvironmentPipMountPath + "/venv"
+		}
+	}
+	if len(pathEntries) > 0 {
+		pathEntries = append(pathEntries, strings.Split(managedEnvironmentBasePATH, ":")...)
+		env["PATH"] = strings.Join(pathEntries, ":")
+	}
+	return env
+}
+
 func environmentBuildSteps(environment *gatewaymanagedagents.Environment) []environmentBuildStep {
 	if environment == nil {
 		return nil
@@ -484,6 +543,7 @@ func stepManagers(steps []environmentBuildStep) []string {
 }
 
 type environmentArtifactMount struct {
+	manager   string
 	volumeID  string
 	mountPath string
 }
@@ -500,9 +560,43 @@ func environmentArtifactMounts(environment *gatewaymanagedagents.Environment, ar
 		if strings.TrimSpace(volumeID) == "" || strings.TrimSpace(mountPath) == "" {
 			return nil, fmt.Errorf("environment artifact %s is missing %s volume", artifact.ID, manager)
 		}
-		mounts = append(mounts, environmentArtifactMount{volumeID: volumeID, mountPath: mountPath})
+		mounts = append(mounts, environmentArtifactMount{manager: manager, volumeID: volumeID, mountPath: mountPath})
 	}
 	return mounts, nil
+}
+
+func forkSessionEnvironmentVolumes(ctx context.Context, client *sandbox0sdk.Client, mounts []environmentArtifactMount) ([]environmentArtifactMount, map[string]string, error) {
+	if len(mounts) == 0 {
+		return nil, nil, nil
+	}
+	sessionMounts := make([]environmentArtifactMount, 0, len(mounts))
+	volumeIDs := make(map[string]string, len(mounts))
+	for _, mount := range mounts {
+		manager := strings.TrimSpace(mount.manager)
+		sourceVolumeID := strings.TrimSpace(mount.volumeID)
+		mountPath := strings.TrimSpace(mount.mountPath)
+		if manager == "" || sourceVolumeID == "" || mountPath == "" {
+			return nil, nil, fmt.Errorf("environment artifact mount is incomplete")
+		}
+		volume, err := client.ForkVolume(ctx, sourceVolumeID, &apispec.ForkVolumeRequest{
+			AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+		})
+		if err != nil {
+			for _, created := range sessionMounts {
+				if strings.TrimSpace(created.volumeID) != "" {
+					_, _ = client.DeleteVolumeWithOptions(ctx, created.volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true})
+				}
+			}
+			return nil, nil, fmt.Errorf("fork %s environment volume: %w", manager, err)
+		}
+		sessionMounts = append(sessionMounts, environmentArtifactMount{
+			manager:   manager,
+			volumeID:  volume.ID,
+			mountPath: mountPath,
+		})
+		volumeIDs[manager] = volume.ID
+	}
+	return sessionMounts, volumeIDs, nil
 }
 
 func runEnvironmentBuildStep(ctx context.Context, sandbox *sandbox0sdk.Sandbox, step environmentBuildStep) (string, error) {
