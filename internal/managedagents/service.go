@@ -234,7 +234,8 @@ func (s *Service) CreateSession(ctx context.Context, principal Principal, creden
 			)
 			if runtime != nil {
 				phaseStarted = time.Now()
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, nil, runtime)); err != nil {
+				_, err := s.bootstrapRuntimeSession(ctx, credential, record, nil, runtime)
+				if err != nil {
 					op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
 						zap.String("session_id", record.ID),
 						zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
@@ -358,7 +359,7 @@ func (s *Service) updateSessionLocked(ctx context.Context, principal Principal, 
 			// Sandbox0 treats vault updates as runtime state refreshes, not run configuration changes.
 			// Refresh bootstrap state even while a run is active so the next credential use sees the latest vault set.
 			if strings.TrimSpace(runtime.SandboxID) != "" {
-				if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+				if _, err := s.bootstrapRuntimeSession(ctx, credential, record, engine, runtime); err != nil {
 					return nil, err
 				}
 			}
@@ -593,7 +594,8 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 			return nil, err
 		}
 		phaseStarted = time.Now()
-		if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+		bootstrapped, err := s.bootstrapRuntimeSession(ctx, credential, record, engine, runtime)
+		if err != nil {
 			op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), err,
 				zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 			)
@@ -601,6 +603,7 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 		}
 		op.ObservePhase("bootstrap_session_for_action_resolution", time.Since(phaseStarted), nil,
 			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+			zap.Bool("skipped", !bootstrapped),
 		)
 		phaseStarted = time.Now()
 		resolution, err := s.runtime.ResolveActions(ctx, credential, runtime, &WrapperResolveActionsRequest{SessionID: sessionID, Events: inputEventsFromMaps(runtimeInputEvents)})
@@ -677,7 +680,8 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	)
 	bootstrapReq := bootstrapRequestFor(record, engine, runtime)
 	phaseStarted = time.Now()
-	if err := s.runtime.BootstrapSession(ctx, credential, runtime, bootstrapReq); err != nil {
+	bootstrapped, err := s.bootstrapRuntimeSessionWithRequest(ctx, credential, record, engine, runtime, bootstrapReq)
+	if err != nil {
 		op.ObservePhase("bootstrap_session", time.Since(phaseStarted), err,
 			zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
 		)
@@ -685,6 +689,7 @@ func (s *Service) sendEventsLocked(ctx context.Context, principal Principal, cre
 	}
 	op.ObservePhase("bootstrap_session", time.Since(phaseStarted), nil,
 		zap.String("sandbox_id", runtimeSandboxIDForLog(runtime)),
+		zap.Bool("skipped", !bootstrapped),
 	)
 	runID := NewID("srun")
 	runtime.ActiveRunID = &runID
@@ -1007,7 +1012,7 @@ func (s *Service) applyRuntimePayloadLocked(ctx context.Context, runtime *Runtim
 			return err
 		}
 		if batch != nil {
-			if err := s.runtime.BootstrapSession(ctx, RequestCredential{}, runtime, bootstrapRequestFor(record, engine, runtime)); err != nil {
+			if _, err := s.bootstrapRuntimeSession(ctx, RequestCredential{}, record, engine, runtime); err != nil {
 				return err
 			}
 		}
@@ -1138,6 +1143,33 @@ func bootstrapRequestFor(record *SessionRecord, engine map[string]any, runtime *
 		Engine:           cloneMap(engine),
 	}
 	return req
+}
+
+func (s *Service) bootstrapRuntimeSession(ctx context.Context, credential RequestCredential, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord) (bool, error) {
+	return s.bootstrapRuntimeSessionWithRequest(ctx, credential, record, engine, runtime, bootstrapRequestFor(record, engine, runtime))
+}
+
+func (s *Service) bootstrapRuntimeSessionWithRequest(ctx context.Context, credential RequestCredential, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, req *WrapperSessionBootstrapRequest) (bool, error) {
+	current, digest, err := runtimeBootstrapCurrent(record, engine, runtime)
+	if err != nil {
+		return false, err
+	}
+	if current {
+		return false, nil
+	}
+	if err := s.runtime.BootstrapSession(ctx, credential, runtime, req); err != nil {
+		return false, err
+	}
+	syncedAt := time.Now().UTC()
+	runtime.BootstrapStateDigest = digest
+	runtime.BootstrapSyncedAt = &syncedAt
+	runtime.UpdatedAt = syncedAt
+	if strings.TrimSpace(runtime.RegionID) != "" && strings.TrimSpace(runtime.WorkspaceVolumeID) != "" {
+		if err := s.repo.UpsertRuntime(ctx, runtime); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func runtimeSandboxIDForLog(runtime *RuntimeRecord) string {

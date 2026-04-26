@@ -30,6 +30,7 @@ var (
 	ErrFileNotFound                = errors.New("managed-agent file not found")
 	ErrSkillNotFound               = errors.New("managed-agent skill not found")
 	ErrSkillVersionNotFound        = errors.New("managed-agent skill version not found")
+	ErrWorkspaceBaseNotFound       = errors.New("managed-agent workspace base not found")
 	ErrResourceNotFound            = errors.New("managed-agent session resource not found")
 	ErrEventNotFound               = errors.New("managed-agent event not found")
 	ErrSessionRunning              = errors.New("managed-agent session is running")
@@ -632,8 +633,9 @@ func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
 func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*RuntimeRecord, error) {
 	runtime, err := scanRuntime(r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
+			COALESCE(workspace_base_digest, ''), COALESCE(workspace_base_volume_id, ''),
 			COALESCE(environment_volume_ids, '{}'::jsonb), callback_token, COALESCE(vendor_session_id, ''), runtime_generation,
-			active_run_id, sandbox_deleted_at, created_at, updated_at
+			active_run_id, sandbox_deleted_at, COALESCE(bootstrap_state_digest, ''), bootstrap_synced_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE session_id = $1
 	`, strings.TrimSpace(sessionID)))
@@ -649,8 +651,9 @@ func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*Runtime
 func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string) (*RuntimeRecord, error) {
 	runtime, err := scanRuntime(r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
+			COALESCE(workspace_base_digest, ''), COALESCE(workspace_base_volume_id, ''),
 			COALESCE(environment_volume_ids, '{}'::jsonb), callback_token, COALESCE(vendor_session_id, ''), runtime_generation,
-			active_run_id, sandbox_deleted_at, created_at, updated_at
+			active_run_id, sandbox_deleted_at, COALESCE(bootstrap_state_digest, ''), bootstrap_synced_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE sandbox_id = $1
 	`, strings.TrimSpace(sandboxID)))
@@ -669,8 +672,9 @@ func (r *Repository) ListRunningRuntimes(ctx context.Context, limit int) ([]*Run
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			COALESCE(r.workspace_base_digest, ''), COALESCE(r.workspace_base_volume_id, ''),
 			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
-			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			r.active_run_id, r.sandbox_deleted_at, COALESCE(r.bootstrap_state_digest, ''), r.bootstrap_synced_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -693,8 +697,9 @@ func (r *Repository) ListIdleRuntimesForSandboxDeletion(ctx context.Context, cut
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			COALESCE(r.workspace_base_digest, ''), COALESCE(r.workspace_base_volume_id, ''),
 			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
-			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			r.active_run_id, r.sandbox_deleted_at, COALESCE(r.bootstrap_state_digest, ''), r.bootstrap_synced_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -718,8 +723,9 @@ func (r *Repository) ListRuntimesWithSandboxes(ctx context.Context, limit int) (
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
+			COALESCE(r.workspace_base_digest, ''), COALESCE(r.workspace_base_volume_id, ''),
 			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
-			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			r.active_run_id, r.sandbox_deleted_at, COALESCE(r.bootstrap_state_digest, ''), r.bootstrap_synced_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -742,6 +748,8 @@ func (r *Repository) MarkRuntimeSandboxDeleted(ctx context.Context, sessionID, s
 			wrapper_url = '',
 			callback_token = '',
 			environment_volume_ids = '{}'::jsonb,
+			bootstrap_state_digest = '',
+			bootstrap_synced_at = NULL,
 			sandbox_deleted_at = $3,
 			updated_at = $3
 		WHERE session_id = $1
@@ -764,9 +772,10 @@ func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) 
 	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_runtimes (
 			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id, environment_volume_ids,
-			callback_token, vendor_session_id, runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
+			workspace_base_digest, workspace_base_volume_id, callback_token, vendor_session_id, runtime_generation, active_run_id,
+			sandbox_deleted_at, bootstrap_state_digest, bootstrap_synced_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (session_id) DO UPDATE SET
 			vendor = EXCLUDED.vendor,
 			region_id = EXCLUDED.region_id,
@@ -774,15 +783,19 @@ func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) 
 			wrapper_url = EXCLUDED.wrapper_url,
 			workspace_volume_id = EXCLUDED.workspace_volume_id,
 			environment_volume_ids = EXCLUDED.environment_volume_ids,
+			workspace_base_digest = EXCLUDED.workspace_base_digest,
+			workspace_base_volume_id = EXCLUDED.workspace_base_volume_id,
 			callback_token = EXCLUDED.callback_token,
 			vendor_session_id = EXCLUDED.vendor_session_id,
 			runtime_generation = EXCLUDED.runtime_generation,
 			active_run_id = EXCLUDED.active_run_id,
 			sandbox_deleted_at = EXCLUDED.sandbox_deleted_at,
+			bootstrap_state_digest = EXCLUDED.bootstrap_state_digest,
+			bootstrap_synced_at = EXCLUDED.bootstrap_synced_at,
 			updated_at = EXCLUDED.updated_at
 	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, nullableString(runtime.SandboxID), runtime.WrapperURL, runtime.WorkspaceVolumeID,
-		string(environmentVolumeIDsJSON), runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.SandboxDeletedAt,
-		runtime.CreatedAt, runtime.UpdatedAt)
+		string(environmentVolumeIDsJSON), runtime.WorkspaceBaseDigest, runtime.WorkspaceBaseVolumeID, runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration,
+		runtime.ActiveRunID, runtime.SandboxDeletedAt, runtime.BootstrapStateDigest, runtime.BootstrapSyncedAt, runtime.CreatedAt, runtime.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert managed-agent runtime: %w", err)
 	}
@@ -800,7 +813,8 @@ func scanRuntime(scanner runtimeScanner) (*RuntimeRecord, error) {
 	)
 	if err := scanner.Scan(
 		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-		&environmentVolumeIDsJSON, &runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt,
+		&runtime.WorkspaceBaseDigest, &runtime.WorkspaceBaseVolumeID, &environmentVolumeIDsJSON, &runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration,
+		&runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.BootstrapStateDigest, &runtime.BootstrapSyncedAt,
 		&runtime.CreatedAt, &runtime.UpdatedAt,
 	); err != nil {
 		return nil, err
