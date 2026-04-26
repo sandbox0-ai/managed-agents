@@ -369,6 +369,35 @@ func TestServiceCreateAgentAllowsCustomMetadata(t *testing.T) {
 	}
 }
 
+func TestServiceCreateAgentDoesNotBlockOnWorkspaceBaseFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	runtime := &failingWorkspaceBaseRuntime{called: make(chan Agent, 1)}
+	service := NewService(repo, runtime, nil)
+	principal := Principal{TeamID: "team_123"}
+
+	created, err := service.CreateAgent(context.Background(), principal, CreateAgentRequest{
+		Name:  "Claude Agent",
+		Model: "claude-sonnet-4-5",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("CreateAgent returned empty agent id")
+	}
+	if _, _, err := repo.GetAgent(context.Background(), principal.TeamID, created.ID, 0); err != nil {
+		t.Fatalf("GetAgent after workspace base failure: %v", err)
+	}
+	select {
+	case prepared := <-runtime.called:
+		if prepared.ID != created.ID {
+			t.Fatalf("prepared agent id = %q, want %q", prepared.ID, created.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workspace base preparation was not attempted")
+	}
+}
+
 func TestServiceUpdateVaultRejectsManagedMetadataWithoutRole(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, noopRuntimeManager{}, nil)
@@ -1690,6 +1719,18 @@ func TestListAgentVersionsSupportsCursorPagination(t *testing.T) {
 }
 
 type noopRuntimeManager struct{}
+
+type failingWorkspaceBaseRuntime struct {
+	noopRuntimeManager
+	called chan Agent
+}
+
+func (m *failingWorkspaceBaseRuntime) PrepareWorkspaceBase(_ context.Context, _ string, agent Agent, _ string) (*WorkspaceBaseRecord, error) {
+	if m.called != nil {
+		m.called <- agent
+	}
+	return nil, errors.New("workspace base preparation failed")
+}
 
 func createTestSession(ctx context.Context, service *Service, principal Principal, params CreateSessionParams) (*Session, error) {
 	return service.CreateSession(ctx, principal, RequestCredential{Token: "token_123"}, params, "http://gateway.test")

@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type validatedSessionResource struct {
@@ -22,6 +24,8 @@ type validatedSessionResource struct {
 type WorkspaceBasePreparer interface {
 	PrepareWorkspaceBase(ctx context.Context, teamID string, agent Agent, workingDirectory string) (*WorkspaceBaseRecord, error)
 }
+
+const workspaceBasePreparationTimeout = 2 * time.Minute
 
 func (s *Service) CreateAgent(ctx context.Context, principal Principal, req CreateAgentRequest) (*Agent, error) {
 	if strings.TrimSpace(principal.TeamID) == "" {
@@ -78,14 +82,10 @@ func (s *Service) CreateAgent(ctx context.Context, principal Principal, req Crea
 	req.Metadata = metadata
 	now := time.Now().UTC()
 	agent := buildAgentObject(NewID("agent"), 1, vendor, req, now, nil)
-	if preparer, ok := s.runtime.(WorkspaceBasePreparer); ok {
-		if _, err := preparer.PrepareWorkspaceBase(ctx, principal.TeamID, agent, "/workspace"); err != nil {
-			return nil, err
-		}
-	}
 	if err := s.repo.CreateAgent(ctx, principal.TeamID, vendor, 1, agent, now); err != nil {
 		return nil, err
 	}
+	s.prepareWorkspaceBaseAsync(ctx, principal.TeamID, agent)
 	return &agent, nil
 }
 
@@ -181,15 +181,31 @@ func (s *Service) UpdateAgent(ctx context.Context, principal Principal, agentID 
 	updatedAt := time.Now().UTC()
 	agent.Version = version
 	agent.UpdatedAt = nowRFC3339(updatedAt)
-	if preparer, ok := s.runtime.(WorkspaceBasePreparer); ok {
-		if _, err := preparer.PrepareWorkspaceBase(ctx, principal.TeamID, *agent, "/workspace"); err != nil {
-			return nil, err
-		}
-	}
 	if err := s.repo.UpdateAgent(ctx, principal.TeamID, agentID, vendor, req.Version, version, agent, parseTimestampPointer(agent.ArchivedAt), updatedAt); err != nil {
 		return nil, err
 	}
+	s.prepareWorkspaceBaseAsync(ctx, principal.TeamID, *agent)
 	return agent, nil
+}
+
+func (s *Service) prepareWorkspaceBaseAsync(ctx context.Context, teamID string, agent Agent) {
+	preparer, ok := s.runtime.(WorkspaceBasePreparer)
+	if !ok {
+		return
+	}
+	teamID = strings.TrimSpace(teamID)
+	go func() {
+		prepareCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceBasePreparationTimeout)
+		defer cancel()
+		if _, err := preparer.PrepareWorkspaceBase(prepareCtx, teamID, agent, "/workspace"); err != nil {
+			s.logger.Warn("prepare workspace base failed",
+				zap.Error(err),
+				zap.String("team_id", teamID),
+				zap.String("agent_id", agent.ID),
+				zap.Int("agent_version", agent.Version),
+			)
+		}
+	}()
 }
 
 func (s *Service) ArchiveAgent(ctx context.Context, principal Principal, agentID string) (*Agent, error) {
