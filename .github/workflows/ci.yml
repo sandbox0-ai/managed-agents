@@ -62,7 +62,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: managed-agents/agent-wrapper/package-lock.json
+          cache-dependency-path: |
+            managed-agents/agent-wrapper/package-lock.json
+            managed-agents/app-gateway/package-lock.json
 
       - name: Set up Helm
         uses: azure/setup-helm@v4

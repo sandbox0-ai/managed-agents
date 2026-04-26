@@ -136,3 +136,112 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}
+{{- if .Values.appGateway.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "app-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "app-gateway") | nindent 4 }}
+spec:
+  replicas: {{ .Values.appGateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "managed-agents.componentSelectorLabels" (list . "app-gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "managed-agents.componentSelectorLabels" (list . "app-gateway") | nindent 8 }}
+        {{- with .Values.appGateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.appGateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app-gateway
+          image: "{{ .Values.appGateway.image.repository }}:{{ .Values.appGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.appGateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.appGateway.service.targetPort }}
+          env:
+            - name: APP_GATEWAY_HTTP_ADDR
+              value: {{ .Values.appGateway.env.httpAddr | quote }}
+            - name: APP_GATEWAY_STATE_DIR
+              value: {{ .Values.appGateway.env.stateDir | quote }}
+            - name: APP_GATEWAY_PUBLIC_RELAY_URL
+              value: {{ include "managed-agents.appGatewayPublicRelayURL" . | quote }}
+            - name: APP_GATEWAY_LOCAL_RELAY_URL
+              value: {{ include "managed-agents.appGatewayLocalRelayURL" . | quote }}
+            - name: MANAGED_AGENT_BASE_URL
+              value: {{ default (include "managed-agents.agentGatewayBaseURL" .) .Values.appGateway.env.managedAgentBaseURL | quote }}
+            {{- if .Values.appGateway.secretKeys.authToken.enabled }}
+            - name: {{ .Values.appGateway.secretKeys.authToken.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appGateway.secretKeys.authToken.secretName }}
+                  key: {{ .Values.appGateway.secretKeys.authToken.key }}
+            {{- end }}
+            {{- if .Values.appGateway.secretKeys.managedAgentAPIKey.enabled }}
+            - name: {{ .Values.appGateway.secretKeys.managedAgentAPIKey.envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appGateway.secretKeys.managedAgentAPIKey.secretName }}
+                  key: {{ .Values.appGateway.secretKeys.managedAgentAPIKey.key }}
+            {{- end }}
+            {{- with .Values.appGateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.appGateway.envFromSecrets .Values.appGateway.envFromConfigMaps }}
+          envFrom:
+            {{- range .Values.appGateway.envFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+            {{- range .Values.appGateway.envFromConfigMaps }}
+            - configMapRef:
+                name: {{ . }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: app-gateway-state
+              mountPath: {{ .Values.appGateway.env.stateDir | quote }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.appGateway.resources | nindent 12 }}
+      volumes:
+        - name: app-gateway-state
+          {{- if or .Values.appGateway.persistence.enabled .Values.appGateway.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ include "managed-agents.appGatewayStateClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.appGateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.appGateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.appGateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

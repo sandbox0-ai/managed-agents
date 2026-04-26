@@ -1,0 +1,17 @@
+{{- if and .Values.appGateway.enabled .Values.appGateway.persistence.enabled (not .Values.appGateway.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "managed-agents.appGatewayStateClaimName" . }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "app-gateway-state") | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.appGateway.persistence.size | quote }}
+  {{- with .Values.appGateway.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

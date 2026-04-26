@@ -33,3 +33,39 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 {{- end }}
+{{- if and .Values.appGateway.enabled .Values.appGateway.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "app-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "app-gateway") | nindent 4 }}
+  {{- with .Values.appGateway.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.appGateway.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    {{- range .Values.appGateway.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "managed-agents.componentFullname" (list $ "app-gateway") }}
+                port:
+                  number: {{ $.Values.appGateway.service.port }}
+          {{- end }}
+    {{- end }}
+  {{- with .Values.appGateway.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -6,6 +6,58 @@ Expand the chart name.
 {{- end -}}
 
 {{/*
+Agent Gateway service URL reachable from App Gateway.
+*/}}
+{{- define "managed-agents.agentGatewayBaseURL" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v" (include "managed-agents.componentFullname" (list . "agent-gateway")) .Release.Namespace .Values.agentGateway.service.port -}}
+{{- end -}}
+
+{{/*
+Local Remodex relay websocket URL for the App Gateway bridge side.
+*/}}
+{{- define "managed-agents.appGatewayLocalRelayURL" -}}
+{{- if .Values.appGateway.env.localRelayURL -}}
+{{- .Values.appGateway.env.localRelayURL -}}
+{{- else -}}
+{{- printf "ws://127.0.0.1:%v/relay" .Values.appGateway.service.targetPort -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+App Gateway state PVC name.
+*/}}
+{{- define "managed-agents.appGatewayStateClaimName" -}}
+{{- if .Values.appGateway.persistence.existingClaim -}}
+{{- .Values.appGateway.persistence.existingClaim -}}
+{{- else -}}
+{{- include "managed-agents.componentFullname" (list . "app-gateway-state") -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Public Remodex relay websocket URL for App Gateway.
+*/}}
+{{- define "managed-agents.appGatewayPublicRelayURL" -}}
+{{- if .Values.appGateway.env.publicRelayURL -}}
+{{- .Values.appGateway.env.publicRelayURL -}}
+{{- else -}}
+{{- $ingressHost := "" -}}
+{{- with .Values.appGateway.ingress.hosts -}}
+{{- with index . 0 -}}
+{{- $ingressHost = .host -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.appGateway.ingress.enabled $ingressHost -}}
+{{- $scheme := "ws" -}}
+{{- if .Values.appGateway.ingress.tls -}}
+{{- $scheme = "wss" -}}
+{{- end -}}
+{{- printf "%s://%s/relay" $scheme $ingressHost -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Create the release-scoped base name.
 */}}
 {{- define "managed-agents.fullname" -}}

@@ -14,3 +14,20 @@ spec:
       port: {{ .Values.agentGateway.service.port }}
       targetPort: http
 {{- end }}
+{{- if and .Values.appGateway.enabled .Values.appGateway.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "managed-agents.componentFullname" (list . "app-gateway") }}
+  labels:
+    {{- include "managed-agents.componentLabels" (list . "app-gateway") | nindent 4 }}
+spec:
+  type: {{ .Values.appGateway.service.type }}
+  selector:
+    {{- include "managed-agents.componentSelectorLabels" (list . "app-gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.appGateway.service.port }}
+      targetPort: http
+{{- end }}

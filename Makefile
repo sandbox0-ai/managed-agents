@@ -9,6 +9,7 @@ CHART_DIR ?= ./chart
 
 IMAGE_REPOSITORY ?= sandbox0ai/managed-agents
 GATEWAY_TAG ?= gateway-testenv
+APP_GATEWAY_TAG ?= app-gateway-testenv
 WRAPPER_TAG ?= wrapper-testenv
 WRAPPER_BASE_TAG ?= wrapper-base-$(WRAPPER_TAG)
 FAKE_WRAPPER_IMAGE ?= managed-agents/fake-wrapper:e2e
@@ -36,10 +37,12 @@ HELM_SET_ARGS := \
 	--set-string agentGateway.ingress.hosts[0].paths[0].path=/ \
 	--set-string agentGateway.ingress.hosts[0].paths[0].pathType=Prefix \
 	--set-string agentGateway.ingress.tls[0].secretName=$(INGRESS_TLS_SECRET_NAME) \
-	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST)
-.PHONY: verify verify-format verify-tidy generate verify-generated verify-sdk-compat-coverage test-unit test-integration test-wrapper test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
+	--set-string agentGateway.ingress.tls[0].hosts[0]=$(INGRESS_HOST) \
+	--set-string appGateway.image.repository=$(IMAGE_REPOSITORY) \
+	--set-string appGateway.image.tag=$(APP_GATEWAY_TAG)
+.PHONY: verify verify-format verify-tidy generate verify-generated verify-sdk-compat-coverage test-unit test-integration test-wrapper test-app-gateway test-e2e test-sdk-compat test-live-engines docker-build-gateway docker-build-app-gateway docker-build-wrapper-base docker-build-wrapper docker-build-fake-wrapper helm-lint helm-template helm-upgrade
 
-verify: verify-format verify-tidy verify-generated verify-sdk-compat-coverage test-unit test-wrapper helm-lint helm-template
+verify: verify-format verify-tidy verify-generated verify-sdk-compat-coverage test-unit test-wrapper test-app-gateway helm-lint helm-template
 
 verify-format:
 	@files="$$(git ls-files '*.go')"; \
@@ -84,6 +87,9 @@ test-integration:
 test-wrapper:
 	cd agent-wrapper && $(NPM) ci && $(NPM) test -- --test-reporter=spec
 
+test-app-gateway:
+	cd app-gateway && $(NPM) ci && $(NPM) test
+
 test-e2e:
 	GOTOOLCHAIN=go1.25.0+auto $(GO) test -count=1 -v ./tests/e2e/... -timeout=20m
 
@@ -100,6 +106,12 @@ docker-build-gateway:
 		-f Dockerfile \
 		--build-context sdk-go=$(SDK_GO_DIR) \
 		.
+
+docker-build-app-gateway:
+	$(DOCKER) build \
+		-t $(IMAGE_REPOSITORY):$(APP_GATEWAY_TAG) \
+		-f app-gateway/Dockerfile \
+		app-gateway
 
 docker-build-wrapper-base:
 	DOCKER_BUILDKIT=1 $(DOCKER) build \

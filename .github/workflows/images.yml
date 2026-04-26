@@ -125,6 +125,13 @@ jobs:
             context: ./agent-wrapper
             target: ""
             needs_sdk_go: false
+          - image_name: app-gateway
+            tag_prefix: app-gateway-
+            latest_tag: app-gateway-latest
+            dockerfile: ./app-gateway/Dockerfile
+            context: ./app-gateway
+            target: ""
+            needs_sdk_go: false
 
     steps:
       - name: Checkout managed-agents

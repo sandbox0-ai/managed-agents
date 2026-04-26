@@ -1,0 +1,18 @@
+{
+  "name": "@sandbox0/managed-agents-app-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "App protocol gateway for Sandbox0 Managed Agents.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.86.1",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {}
+}

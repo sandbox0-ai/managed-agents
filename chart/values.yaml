@@ -80,3 +80,65 @@ agentGateway:
       envName: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY
       secretName: managed-agents-runtime
       key: MANAGED_AGENT_SANDBOX0_ADMIN_API_KEY
+
+appGateway:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: sandbox0ai/managed-agents
+    tag: app-gateway-latest
+    pullPolicy: IfNotPresent
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 80
+    targetPort: 8787
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: app-gateway.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  persistence:
+    enabled: false
+    existingClaim: ""
+    size: 1Gi
+    storageClassName: ""
+  env:
+    httpAddr: :8787
+    stateDir: /var/lib/app-gateway
+    # Defaults to appGateway ingress URL when ingress is enabled, otherwise empty.
+    publicRelayURL: ""
+    # Defaults to the in-pod HTTP listener converted to ws://127.0.0.1:{port}/relay.
+    localRelayURL: ""
+    # Defaults to the release-local agent-gateway service URL.
+    managedAgentBaseURL: ""
+  extraEnv: []
+  envFromSecrets: []
+  envFromConfigMaps: []
+  secretKeys:
+    authToken:
+      enabled: false
+      envName: APP_GATEWAY_AUTH_TOKEN
+      secretName: managed-agents-app-gateway
+      key: APP_GATEWAY_AUTH_TOKEN
+    managedAgentAPIKey:
+      enabled: false
+      envName: MANAGED_AGENT_API_KEY
+      secretName: managed-agents-app-gateway
+      key: MANAGED_AGENT_API_KEY
