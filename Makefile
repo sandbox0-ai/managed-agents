@@ -12,7 +12,6 @@ GATEWAY_TAG ?= gateway-testenv
 WRAPPER_TAG ?= wrapper-testenv
 WRAPPER_BASE_TAG ?= wrapper-base-$(WRAPPER_TAG)
 FAKE_WRAPPER_IMAGE ?= managed-agents/fake-wrapper:e2e
-SDK_GO_DIR ?= ../sdk-go
 
 SANDBOX0_BASE_URL ?= https://api.sandbox0.ai
 SANDBOX0_AUTH_BASE_URL ?= $(SANDBOX0_BASE_URL)
@@ -94,11 +93,9 @@ test-live-engines:
 	cd tests/live-engines && $(NPM) ci && $(NPM) test
 
 docker-build-gateway:
-	@test -f "$(SDK_GO_DIR)/go.mod" || { echo "SDK_GO_DIR must point to sdk-go checkout"; exit 1; }
 	DOCKER_BUILDKIT=1 $(DOCKER) buildx build --load \
 		-t $(IMAGE_REPOSITORY):$(GATEWAY_TAG) \
 		-f Dockerfile \
-		--build-context sdk-go=$(SDK_GO_DIR) \
 		.
 
 docker-build-wrapper-base:

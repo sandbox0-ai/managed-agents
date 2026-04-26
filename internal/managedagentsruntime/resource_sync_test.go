@@ -1,10 +1,14 @@
 package managedagentsruntime
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
 	gatewaymanagedagents "github.com/sandbox0-ai/managed-agent/internal/managedagents"
+	sandbox0sdk "github.com/sandbox0-ai/sdk-go"
 	apispec "github.com/sandbox0-ai/sdk-go/pkg/apispec"
 )
 
@@ -687,4 +691,176 @@ func TestMaterializeAgentSkillsRejectsAnthropicPrebuiltSkill(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("error = %v, want pre-built skill rejection", err)
 	}
+}
+
+func TestCloneFileResourceEntriesUsesBatchCowClone(t *testing.T) {
+	client := &recordingVolumeFileCloneClient{}
+	entries := []apispec.CloneVolumeFileEntry{
+		{
+			SourceVolumeID: "vol_assets",
+			SourcePath:     "/managed-agents-assets/files/file_1/content",
+			TargetPath:     "/mnt/session/uploads/file_1",
+			Overwrite:      apispec.NewOptBool(true),
+			CreateParents:  apispec.NewOptBool(true),
+		},
+		{
+			SourceVolumeID: "vol_assets",
+			SourcePath:     "/managed-agents-assets/files/file_2/content",
+			TargetPath:     "/workspace/input.txt",
+			Overwrite:      apispec.NewOptBool(true),
+			CreateParents:  apispec.NewOptBool(true),
+		},
+	}
+
+	if err := cloneFileResourceEntries(t.Context(), client, "vol_workspace", entries); err != nil {
+		t.Fatalf("cloneFileResourceEntries: %v", err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("CloneVolumeFiles calls = %d, want 1", client.calls)
+	}
+	if client.volumeID != "vol_workspace" {
+		t.Fatalf("target volume = %q, want vol_workspace", client.volumeID)
+	}
+	mode, ok := client.request.Mode.Get()
+	if !ok || mode != apispec.CloneVolumeFilesRequestModeCowOrCopy {
+		t.Fatalf("clone mode = %q set=%v, want cow_or_copy", mode, ok)
+	}
+	atomic, ok := client.request.Atomic.Get()
+	if !ok || !atomic {
+		t.Fatalf("atomic = %v set=%v, want true", atomic, ok)
+	}
+	if len(client.request.Entries) != len(entries) {
+		t.Fatalf("entries = %d, want %d", len(client.request.Entries), len(entries))
+	}
+	for i, entry := range client.request.Entries {
+		if entry.SourceVolumeID != entries[i].SourceVolumeID || entry.SourcePath != entries[i].SourcePath || entry.TargetPath != entries[i].TargetPath {
+			t.Fatalf("entry[%d] = %#v, want %#v", i, entry, entries[i])
+		}
+		overwrite, overwriteSet := entry.Overwrite.Get()
+		createParents, createParentsSet := entry.CreateParents.Get()
+		if !overwriteSet || !overwrite || !createParentsSet || !createParents {
+			t.Fatalf("entry[%d] overwrite=%v/%v create_parents=%v/%v, want both true", i, overwrite, overwriteSet, createParents, createParentsSet)
+		}
+	}
+}
+
+func TestCloneFileResourceEntriesRetriesTransientFailures(t *testing.T) {
+	client := &recordingVolumeFileCloneClient{failures: 2}
+	err := cloneFileResourceEntries(t.Context(), client, "vol_workspace", []apispec.CloneVolumeFileEntry{{
+		SourceVolumeID: "vol_assets",
+		SourcePath:     "/file.txt",
+		TargetPath:     "/file.txt",
+	}})
+	if err != nil {
+		t.Fatalf("cloneFileResourceEntries: %v", err)
+	}
+	if client.calls != 3 {
+		t.Fatalf("CloneVolumeFiles calls = %d, want 3", client.calls)
+	}
+}
+
+func TestCloneFileResourceEntriesFallsBackToCopyWhenCloneEndpointIsMissing(t *testing.T) {
+	client := &recordingVolumeFileCloneClient{
+		cloneErr: &sandbox0sdk.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "not found"},
+		content: map[string][]byte{
+			"vol_assets:/file.txt": []byte("file content"),
+		},
+	}
+	err := cloneFileResourceEntries(t.Context(), client, "vol_workspace", []apispec.CloneVolumeFileEntry{{
+		SourceVolumeID: "vol_assets",
+		SourcePath:     "/file.txt",
+		TargetPath:     "/nested/file.txt",
+	}})
+	if err != nil {
+		t.Fatalf("cloneFileResourceEntries: %v", err)
+	}
+	if client.calls != volumeFileOperationAttempts {
+		t.Fatalf("CloneVolumeFiles calls = %d, want %d", client.calls, volumeFileOperationAttempts)
+	}
+	if len(client.reads) != 1 || client.reads[0] != "vol_assets:/file.txt" {
+		t.Fatalf("reads = %#v", client.reads)
+	}
+	if len(client.mkdirs) != 1 || client.mkdirs[0] != "vol_workspace:/nested" {
+		t.Fatalf("mkdirs = %#v", client.mkdirs)
+	}
+	if got := string(client.writes["vol_workspace:/nested/file.txt"]); got != "file content" {
+		t.Fatalf("written content = %q", got)
+	}
+}
+
+func TestCloneFileResourceEntriesDoesNotFallbackForSpecificCloneNotFound(t *testing.T) {
+	client := &recordingVolumeFileCloneClient{
+		cloneErr: &sandbox0sdk.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "source path not found"},
+	}
+	err := cloneFileResourceEntries(t.Context(), client, "vol_workspace", []apispec.CloneVolumeFileEntry{{
+		SourceVolumeID: "vol_assets",
+		SourcePath:     "/missing.txt",
+		TargetPath:     "/missing.txt",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "source path not found") {
+		t.Fatalf("error = %v, want clone source not found error", err)
+	}
+	if len(client.reads) != 0 || len(client.writes) != 0 {
+		t.Fatalf("fallback reads=%#v writes=%#v, want none", client.reads, client.writes)
+	}
+}
+
+type recordingVolumeFileCloneClient struct {
+	calls    int
+	failures int
+	cloneErr error
+	volumeID string
+	request  apispec.CloneVolumeFilesRequest
+	content  map[string][]byte
+	reads    []string
+	mkdirs   []string
+	writes   map[string][]byte
+}
+
+func (c *recordingVolumeFileCloneClient) CloneVolumeFiles(_ context.Context, volumeID string, request apispec.CloneVolumeFilesRequest) ([]apispec.CloneVolumeFileResult, error) {
+	c.calls++
+	c.volumeID = volumeID
+	c.request = request
+	if c.cloneErr != nil {
+		return nil, c.cloneErr
+	}
+	if c.calls <= c.failures {
+		return nil, errors.New("temporary clone failure")
+	}
+	results := make([]apispec.CloneVolumeFileResult, 0, len(request.Entries))
+	for _, entry := range request.Entries {
+		results = append(results, apispec.CloneVolumeFileResult{
+			SourceVolumeID: entry.SourceVolumeID,
+			SourcePath:     entry.SourcePath,
+			TargetPath:     entry.TargetPath,
+			Mode:           apispec.CloneVolumeFileResultModeCow,
+		})
+	}
+	return results, nil
+}
+
+func (c *recordingVolumeFileCloneClient) ReadVolumeFile(_ context.Context, volumeID, filePath string) ([]byte, error) {
+	key := volumeID + ":" + filePath
+	c.reads = append(c.reads, key)
+	content, ok := c.content[key]
+	if !ok {
+		return nil, errors.New("missing fake content")
+	}
+	return content, nil
+}
+
+func (c *recordingVolumeFileCloneClient) MkdirVolumeFile(_ context.Context, volumeID, filePath string, recursive bool) (*apispec.SuccessCreatedResponse, error) {
+	if !recursive {
+		return nil, errors.New("recursive mkdir required")
+	}
+	c.mkdirs = append(c.mkdirs, volumeID+":"+filePath)
+	return &apispec.SuccessCreatedResponse{}, nil
+}
+
+func (c *recordingVolumeFileCloneClient) WriteVolumeFile(_ context.Context, volumeID, filePath string, data []byte) (*apispec.SuccessWrittenResponse, error) {
+	if c.writes == nil {
+		c.writes = make(map[string][]byte)
+	}
+	c.writes[volumeID+":"+filePath] = append([]byte(nil), data...)
+	return &apispec.SuccessWrittenResponse{}, nil
 }
