@@ -291,27 +291,61 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		zap.String("environment_artifact_status", artifact.Status),
 	)
 	workspaceVolumeID := ""
+	workspaceBaseDigest := ""
+	workspaceBaseVolumeID := ""
 	createdWorkspaceVolume := false
 	createdEnvironmentVolumeIDs := map[string]string{}
 	if existingRuntime != nil {
 		workspaceVolumeID = strings.TrimSpace(existingRuntime.WorkspaceVolumeID)
+		workspaceBaseDigest = strings.TrimSpace(existingRuntime.WorkspaceBaseDigest)
+		workspaceBaseVolumeID = strings.TrimSpace(existingRuntime.WorkspaceBaseVolumeID)
 	}
 	if workspaceVolumeID == "" {
 		phaseStarted = time.Now()
-		workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
+		resolvedBaseDigest, workspaceBase, err := m.workspaceBaseForSession(ctx, session)
 		if err != nil {
-			op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), err)
-			return nil, fmt.Errorf("create workspace volume: %w", err)
+			op.ObservePhase("resolve_workspace_base_volume", time.Since(phaseStarted), err)
+			return nil, err
 		}
-		workspaceVolumeID = workspaceVolume.ID
-		createdWorkspaceVolume = true
-		op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), nil,
-			zap.String("workspace_volume_id", workspaceVolumeID),
-		)
+		if workspaceBase != nil {
+			workspaceBaseDigest = strings.TrimSpace(resolvedBaseDigest)
+			workspaceBaseVolumeID = strings.TrimSpace(workspaceBase.VolumeID)
+			workspaceVolume, err := client.ForkVolume(ctx, workspaceBaseVolumeID, &apispec.ForkVolumeRequest{
+				AccessMode: apispec.NewOptVolumeAccessMode(apispec.VolumeAccessModeRWO),
+			})
+			if err != nil {
+				op.ObservePhase("fork_workspace_base_volume", time.Since(phaseStarted), err,
+					zap.String("workspace_base_digest", workspaceBaseDigest),
+					zap.String("workspace_base_volume_id", workspaceBaseVolumeID),
+				)
+				return nil, fmt.Errorf("fork workspace base volume: %w", err)
+			}
+			workspaceVolumeID = workspaceVolume.ID
+			createdWorkspaceVolume = true
+			op.ObservePhase("fork_workspace_base_volume", time.Since(phaseStarted), nil,
+				zap.String("workspace_volume_id", workspaceVolumeID),
+				zap.String("workspace_base_digest", workspaceBaseDigest),
+				zap.String("workspace_base_volume_id", workspaceBaseVolumeID),
+			)
+		} else {
+			workspaceVolume, err := client.CreateVolume(ctx, apispec.CreateSandboxVolumeRequest{})
+			if err != nil {
+				op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), err)
+				return nil, fmt.Errorf("create workspace volume: %w", err)
+			}
+			workspaceVolumeID = workspaceVolume.ID
+			workspaceBaseVolumeID = ""
+			createdWorkspaceVolume = true
+			op.ObservePhase("create_workspace_volume", time.Since(phaseStarted), nil,
+				zap.String("workspace_volume_id", workspaceVolumeID),
+				zap.String("resolved_workspace_base_digest", strings.TrimSpace(resolvedBaseDigest)),
+			)
+		}
 	} else {
 		op.AddFields(zap.String("workspace_volume_id", workspaceVolumeID))
 		op.ObservePhase("reuse_workspace_volume", 0, nil,
 			zap.String("workspace_volume_id", workspaceVolumeID),
+			zap.String("workspace_base_digest", workspaceBaseDigest),
 		)
 	}
 	sandboxID := ""
@@ -430,19 +464,21 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		}
 	}
 	runtime = &gatewaymanagedagents.RuntimeRecord{
-		SessionID:            session.ID,
-		Vendor:               session.Vendor,
-		RegionID:             regionID,
-		SandboxID:            sandboxID,
-		WrapperURL:           publicURL,
-		WorkspaceVolumeID:    workspaceVolumeID,
-		EnvironmentVolumeIDs: environmentVolumeIDs,
-		ControlToken:         controlToken,
-		VendorSessionID:      vendorSessionID,
-		RuntimeGeneration:    runtimeGeneration,
-		ActiveRunID:          activeRunID,
-		CreatedAt:            createdAt,
-		UpdatedAt:            now,
+		SessionID:             session.ID,
+		Vendor:                session.Vendor,
+		RegionID:              regionID,
+		SandboxID:             sandboxID,
+		WrapperURL:            publicURL,
+		WorkspaceVolumeID:     workspaceVolumeID,
+		WorkspaceBaseDigest:   workspaceBaseDigest,
+		WorkspaceBaseVolumeID: workspaceBaseVolumeID,
+		EnvironmentVolumeIDs:  environmentVolumeIDs,
+		ControlToken:          controlToken,
+		VendorSessionID:       vendorSessionID,
+		RuntimeGeneration:     runtimeGeneration,
+		ActiveRunID:           activeRunID,
+		CreatedAt:             createdAt,
+		UpdatedAt:             now,
 	}
 	op.AddFields(
 		zap.String("runtime_region_id", regionID),

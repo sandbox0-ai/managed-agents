@@ -124,14 +124,22 @@ func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential g
 		zap.Int("bootstrap_event_count", len(bootstrapEvents)),
 	)
 	phaseStarted = time.Now()
-	skillNames, err := m.materializeAgentSkills(ctx, client, runtime.SandboxID, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
+	skillNames, skippedSkillMaterialization, err := m.agentSkillNamesFromWorkspaceBase(ctx, record.TeamID, req.WorkingDirectory, req.Agent, runtime.WorkspaceBaseDigest)
 	if err != nil {
-		op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), err)
+		op.ObservePhase("resolve_workspace_base_skills", time.Since(phaseStarted), err)
 		return err
+	}
+	if !skippedSkillMaterialization {
+		skillNames, err = m.materializeAgentSkills(ctx, client, runtime.SandboxID, runtime.WorkspaceVolumeID, record.TeamID, req.WorkingDirectory, req.Vendor, req.Engine, req.Agent)
+		if err != nil {
+			op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), err)
+			return err
+		}
 	}
 	req.SkillNames = skillNames
 	op.ObservePhase("materialize_agent_skills", time.Since(phaseStarted), nil,
 		zap.Int("skill_count", len(skillNames)),
+		zap.Bool("skipped", skippedSkillMaterialization),
 	)
 	var llmCredential *managedLLMCredential
 	phaseStarted = time.Now()
