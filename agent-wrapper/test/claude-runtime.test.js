@@ -234,6 +234,49 @@ test('ClaudeRuntime starts SDK runs with documented skill context options', asyn
   assert.equal(callbackPayloads.at(-1).events.at(-1).type, 'session.status_idle');
 });
 
+test('ClaudeRuntime keeps Claude SDK tool_result stream as the single builtin result', async () => {
+  const runtime = new ClaudeRuntime({
+    queryFn: ({ prompt, options }) => sdkToolResultStream(prompt, options),
+  });
+  let currentSession = {
+    session_id: 'sesn_tool_result_single',
+    working_directory: '/workspace',
+    agent: {
+      tools: [{ type: 'agent_toolset_20260401' }],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const callbackPayloads = [];
+
+  await runtime.startRun(currentSession, {
+    run_id: 'run_tool_result_single',
+    input_events: [{ type: 'user.message', content: 'run a command' }],
+  }, {
+    send: async (_session, payload) => callbackPayloads.push(payload),
+  }, {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  });
+
+  const events = callbackPayloads.flatMap((payload) => payload.events);
+  const toolResults = events.filter((event) => event.type === 'agent.tool_result');
+  assert.equal(events.filter((event) => event.type === 'agent.tool_use').length, 1);
+  assert.equal(toolResults.length, 1);
+  assert.deepEqual(toolResults[0], {
+    type: 'agent.tool_result',
+    tool_use_id: 'toolu_single_1',
+    content: [{ type: 'text', text: 'hello from stdout' }],
+    is_error: false,
+  });
+});
+
 test('ClaudeRuntime can prestart a resident SDK query before the first run', async () => {
   const sdkCalls = [];
   const prompts = [];
@@ -666,6 +709,37 @@ async function* sdkResultStream({ sessionID = 'vendor_sesn_sdk_options', skills 
     stop_reason: 'end_turn',
     usage: {},
   };
+}
+
+async function* sdkToolResultStream(prompt, options) {
+  for await (const message of prompt) {
+    assert.equal(message.message.content[0].text, 'run a command');
+    await options.hooks.PreToolUse[0].hooks[0]({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'printf hello' },
+      tool_use_id: 'toolu_single_1',
+    });
+    yield {
+      type: 'user',
+      session_id: 'vendor_sesn_tool_result_single',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_single_1',
+          content: 'hello from stdout',
+          is_error: false,
+        }],
+      },
+    };
+    yield {
+      type: 'result',
+      subtype: 'success',
+      session_id: 'vendor_sesn_tool_result_single',
+      stop_reason: 'end_turn',
+      usage: {},
+    };
+  }
 }
 
 async function* sdkResidentResultStream(prompt, prompts, sessionID) {

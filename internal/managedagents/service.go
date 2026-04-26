@@ -753,6 +753,9 @@ func (s *Service) HandleSandboxWebhook(ctx context.Context, rawBody []byte, sign
 	if sandboxID == "" {
 		return errors.New("webhook sandbox_id is required")
 	}
+	if eventType != "agent.event" && !sandboxWebhookEventMarksRuntimeLost(eventType) {
+		return nil
+	}
 	phaseStarted := time.Now()
 	runtime, err := s.repo.GetRuntimeBySandboxID(ctx, sandboxID)
 	if err != nil {

@@ -465,6 +465,20 @@ func TestHandleSandboxWebhookPreservesDeletedRequiresActionRun(t *testing.T) {
 	}
 }
 
+func TestHandleSandboxWebhookIgnoresEarlyLifecycleEventsWithoutRuntime(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, &recordingRuntimeManager{}, nil)
+	body, _ := json.Marshal(map[string]any{
+		"event_id":   "evt_hook_lifecycle_early",
+		"event_type": "sandbox.ready",
+		"sandbox_id": "sbx_lifecycle_early",
+	})
+
+	if err := service.HandleSandboxWebhook(context.Background(), body, "not-verifiable-yet"); err != nil {
+		t.Fatalf("HandleSandboxWebhook err = %v, want nil", err)
+	}
+}
+
 func TestProcessNextRuntimeWebhookJobDoesNotLogIdlePolls(t *testing.T) {
 	repo := newTestRepository(t)
 	logCore, logs := observer.New(zap.InfoLevel)
