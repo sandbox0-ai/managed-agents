@@ -30,18 +30,19 @@ func TestRuntimeSandboxDeletionKeepsRebuildState(t *testing.T) {
 	}
 	activeRunID := "srun_requires_action"
 	runtime := &RuntimeRecord{
-		SessionID:         session.ID,
-		Vendor:            session.Vendor,
-		RegionID:          "default",
-		SandboxID:         "sbx_123",
-		WrapperURL:        "https://wrapper.test",
-		WorkspaceVolumeID: "vol_workspace",
-		ControlToken:      "ctl_123",
-		VendorSessionID:   "vendor_session",
-		RuntimeGeneration: 3,
-		ActiveRunID:       &activeRunID,
-		CreatedAt:         old,
-		UpdatedAt:         old,
+		SessionID:            session.ID,
+		Vendor:               session.Vendor,
+		RegionID:             "default",
+		SandboxID:            "sbx_123",
+		WrapperURL:           "https://wrapper.test",
+		WorkspaceVolumeID:    "vol_workspace",
+		EnvironmentVolumeIDs: map[string]string{"npm": "vol_npm_session"},
+		ControlToken:         "ctl_123",
+		VendorSessionID:      "vendor_session",
+		RuntimeGeneration:    3,
+		ActiveRunID:          &activeRunID,
+		CreatedAt:            old,
+		UpdatedAt:            old,
 	}
 	if err := repo.UpsertRuntime(ctx, runtime); err != nil {
 		t.Fatalf("UpsertRuntime: %v", err)
@@ -69,11 +70,59 @@ func TestRuntimeSandboxDeletionKeepsRebuildState(t *testing.T) {
 	if stored.WorkspaceVolumeID != "vol_workspace" || stored.VendorSessionID != "vendor_session" {
 		t.Fatalf("runtime rebuild fields = volume:%q vendor_session:%q, want preserved", stored.WorkspaceVolumeID, stored.VendorSessionID)
 	}
+	if len(stored.EnvironmentVolumeIDs) != 0 {
+		t.Fatalf("environment volume ids = %#v, want cleared after sandbox deletion", stored.EnvironmentVolumeIDs)
+	}
 	if stored.ActiveRunID == nil || *stored.ActiveRunID != activeRunID {
 		t.Fatalf("active_run_id = %v, want %q preserved", stored.ActiveRunID, activeRunID)
 	}
 	if stored.SandboxDeletedAt == nil || !stored.SandboxDeletedAt.Equal(deletedAt) {
 		t.Fatalf("sandbox_deleted_at = %v, want %v", stored.SandboxDeletedAt, deletedAt)
+	}
+}
+
+func TestUpsertRuntimePersistsEnvironmentVolumeIDs(t *testing.T) {
+	repo := newTestRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	session := &SessionRecord{
+		ID:               "sesn_environment_volumes",
+		TeamID:           "team_123",
+		Vendor:           ManagedAgentsEngineClaude,
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Metadata:         map[string]string{},
+		Agent:            map[string]any{"type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{},
+		Status:           "running",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.CreateSession(ctx, session, nil); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := repo.UpsertRuntime(ctx, &RuntimeRecord{
+		SessionID:            session.ID,
+		Vendor:               session.Vendor,
+		RegionID:             "default",
+		SandboxID:            "sbx_environment_volumes",
+		WrapperURL:           "https://wrapper.test",
+		WorkspaceVolumeID:    "vol_workspace",
+		EnvironmentVolumeIDs: map[string]string{"npm": "vol_npm_session", "pip": "vol_pip_session"},
+		ControlToken:         "ctl_123",
+		RuntimeGeneration:    1,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	stored, err := repo.GetRuntime(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if stored.EnvironmentVolumeIDs["npm"] != "vol_npm_session" || stored.EnvironmentVolumeIDs["pip"] != "vol_pip_session" {
+		t.Fatalf("environment volume ids = %#v, want npm and pip session volumes", stored.EnvironmentVolumeIDs)
 	}
 }
 

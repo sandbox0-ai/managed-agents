@@ -150,6 +150,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 					zap.String("sandbox_id", runtime.SandboxID),
 				)
 				if isSandboxNotFound(err) {
+					cleanupClient, clientErr := m.sandboxClientForRuntime(ctx, runtime)
+					if clientErr != nil {
+						return nil, clientErr
+					}
+					cleanupCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
+					cleanupErr := m.cleanupRuntimeSandboxResources(cleanupCtx, cleanupClient, runtime, false)
+					cancel()
+					if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
+						return nil, cleanupErr
+					}
 					reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while configuring lifecycle")
 					if markErr != nil {
 						return nil, markErr
@@ -172,6 +182,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 				)
 				if ensureErr != nil {
 					if isSandboxNotFound(ensureErr) {
+						cleanupClient, clientErr := m.sandboxClientForRuntime(ctx, runtime)
+						if clientErr != nil {
+							return nil, clientErr
+						}
+						cleanupCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
+						cleanupErr := m.cleanupRuntimeSandboxResources(cleanupCtx, cleanupClient, runtime, false)
+						cancel()
+						if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
+							return nil, cleanupErr
+						}
 						reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while ensuring wrapper endpoint")
 						if markErr != nil {
 							return nil, markErr
@@ -272,6 +292,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	)
 	workspaceVolumeID := ""
 	createdWorkspaceVolume := false
+	createdEnvironmentVolumeIDs := map[string]string{}
 	if existingRuntime != nil {
 		workspaceVolumeID = strings.TrimSpace(existingRuntime.WorkspaceVolumeID)
 	}
@@ -315,6 +336,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 				}
 			}
 		}
+		for manager, volumeID := range createdEnvironmentVolumeIDs {
+			if strings.TrimSpace(volumeID) == "" {
+				continue
+			}
+			if _, err := client.DeleteVolumeWithOptions(cleanupCtx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+				if !isSandboxNotFound(err) {
+					m.logger.Warn("delete session environment volume after runtime claim failed", zap.Error(err), zap.String("manager", manager), zap.String("volume_id", volumeID))
+				}
+			}
+		}
 	}()
 	controlToken := gatewaymanagedagents.NewID("ctl")
 	claimOpts := []sandbox0sdk.SandboxOption{
@@ -323,9 +354,7 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		sandbox0sdk.WithSandboxHardTTL(0),
 		sandbox0sdk.WithSandboxAutoResume(true),
 		sandbox0sdk.WithSandboxWebhook(m.runtimeWebhookURL(gatewayBaseURL), controlToken),
-		sandbox0sdk.WithSandboxEnvVars(map[string]string{
-			"AGENT_WRAPPER_CONTROL_TOKEN": controlToken,
-		}),
+		sandbox0sdk.WithSandboxEnvVars(managedEnvironmentRuntimeEnvVars(controlToken, environment)),
 	}
 	phaseStarted = time.Now()
 	packageMounts, err := environmentArtifactMounts(environment, artifact)
@@ -336,7 +365,19 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 	op.ObservePhase("prepare_environment_artifact_mounts", time.Since(phaseStarted), nil,
 		zap.Int("package_mount_count", len(packageMounts)),
 	)
-	for _, mount := range packageMounts {
+	phaseStarted = time.Now()
+	sessionPackageMounts, environmentVolumeIDs, err := forkSessionEnvironmentVolumes(ctx, client, packageMounts)
+	if err != nil {
+		op.ObservePhase("fork_session_environment_volumes", time.Since(phaseStarted), err,
+			zap.Int("package_mount_count", len(packageMounts)),
+		)
+		return nil, err
+	}
+	createdEnvironmentVolumeIDs = environmentVolumeIDs
+	op.ObservePhase("fork_session_environment_volumes", time.Since(phaseStarted), nil,
+		zap.Int("package_mount_count", len(sessionPackageMounts)),
+	)
+	for _, mount := range sessionPackageMounts {
 		claimOpts = append(claimOpts, sandbox0sdk.WithSandboxBootstrapMount(mount.volumeID, mount.mountPath))
 	}
 	claimOpts = append(claimOpts, sandbox0sdk.WithSandboxNetworkPolicy(m.runtimeNetworkPolicy(environment, engine, session.Agent)))
@@ -389,18 +430,19 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 		}
 	}
 	runtime = &gatewaymanagedagents.RuntimeRecord{
-		SessionID:         session.ID,
-		Vendor:            session.Vendor,
-		RegionID:          regionID,
-		SandboxID:         sandboxID,
-		WrapperURL:        publicURL,
-		WorkspaceVolumeID: workspaceVolumeID,
-		ControlToken:      controlToken,
-		VendorSessionID:   vendorSessionID,
-		RuntimeGeneration: runtimeGeneration,
-		ActiveRunID:       activeRunID,
-		CreatedAt:         createdAt,
-		UpdatedAt:         now,
+		SessionID:            session.ID,
+		Vendor:               session.Vendor,
+		RegionID:             regionID,
+		SandboxID:            sandboxID,
+		WrapperURL:           publicURL,
+		WorkspaceVolumeID:    workspaceVolumeID,
+		EnvironmentVolumeIDs: environmentVolumeIDs,
+		ControlToken:         controlToken,
+		VendorSessionID:      vendorSessionID,
+		RuntimeGeneration:    runtimeGeneration,
+		ActiveRunID:          activeRunID,
+		CreatedAt:            createdAt,
+		UpdatedAt:            now,
 	}
 	op.AddFields(
 		zap.String("runtime_region_id", regionID),
@@ -567,6 +609,18 @@ func (m *SDKRuntimeManager) cleanupRuntimeSandboxResources(ctx context.Context, 
 		if _, err := client.DeleteSandbox(ctx, runtime.SandboxID); err != nil {
 			if !isSandboxNotFound(err) {
 				m.logger.Warn("delete sandbox failed", zap.Error(err), zap.String("sandbox_id", runtime.SandboxID))
+				return err
+			}
+		}
+	}
+	for manager, volumeID := range runtime.EnvironmentVolumeIDs {
+		volumeID = strings.TrimSpace(volumeID)
+		if volumeID == "" {
+			continue
+		}
+		if _, err := client.DeleteVolumeWithOptions(ctx, volumeID, &sandbox0sdk.DeleteVolumeOptions{Force: true}); err != nil {
+			if !isSandboxNotFound(err) {
+				m.logger.Warn("delete session environment volume failed", zap.Error(err), zap.String("manager", manager), zap.String("volume_id", volumeID))
 				return err
 			}
 		}

@@ -630,43 +630,37 @@ func (r *Repository) listRegionIDs(ctx context.Context) ([]string, error) {
 }
 
 func (r *Repository) GetRuntime(ctx context.Context, sessionID string) (*RuntimeRecord, error) {
-	var runtime RuntimeRecord
-	err := r.db(ctx).QueryRow(ctx, `
+	runtime, err := scanRuntime(r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
-			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
+			COALESCE(environment_volume_ids, '{}'::jsonb), callback_token, COALESCE(vendor_session_id, ''), runtime_generation,
+			active_run_id, sandbox_deleted_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE session_id = $1
-	`, strings.TrimSpace(sessionID)).Scan(
-		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
-	)
+	`, strings.TrimSpace(sessionID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrRuntimeNotFound
 		}
 		return nil, fmt.Errorf("query managed-agent runtime: %w", err)
 	}
-	return &runtime, nil
+	return runtime, nil
 }
 
 func (r *Repository) GetRuntimeBySandboxID(ctx context.Context, sandboxID string) (*RuntimeRecord, error) {
-	var runtime RuntimeRecord
-	err := r.db(ctx).QueryRow(ctx, `
+	runtime, err := scanRuntime(r.db(ctx).QueryRow(ctx, `
 		SELECT session_id, vendor, region_id, COALESCE(sandbox_id, ''), COALESCE(wrapper_url, ''), workspace_volume_id,
-			callback_token, COALESCE(vendor_session_id, ''), runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
+			COALESCE(environment_volume_ids, '{}'::jsonb), callback_token, COALESCE(vendor_session_id, ''), runtime_generation,
+			active_run_id, sandbox_deleted_at, created_at, updated_at
 		FROM managed_agent_session_runtimes
 		WHERE sandbox_id = $1
-	`, strings.TrimSpace(sandboxID)).Scan(
-		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-		&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
-	)
+	`, strings.TrimSpace(sandboxID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrRuntimeNotFound
 		}
 		return nil, fmt.Errorf("query managed-agent runtime by sandbox: %w", err)
 	}
-	return &runtime, nil
+	return runtime, nil
 }
 
 func (r *Repository) ListRunningRuntimes(ctx context.Context, limit int) ([]*RuntimeRecord, error) {
@@ -675,7 +669,8 @@ func (r *Repository) ListRunningRuntimes(ctx context.Context, limit int) ([]*Run
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
-			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
+			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -698,7 +693,8 @@ func (r *Repository) ListIdleRuntimesForSandboxDeletion(ctx context.Context, cut
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
-			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
+			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -722,7 +718,8 @@ func (r *Repository) ListRuntimesWithSandboxes(ctx context.Context, limit int) (
 	}
 	rows, err := r.db(ctx).Query(ctx, `
 		SELECT r.session_id, r.vendor, r.region_id, COALESCE(r.sandbox_id, ''), COALESCE(r.wrapper_url, ''), r.workspace_volume_id,
-			r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation, r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
+			COALESCE(r.environment_volume_ids, '{}'::jsonb), r.callback_token, COALESCE(r.vendor_session_id, ''), r.runtime_generation,
+			r.active_run_id, r.sandbox_deleted_at, r.created_at, r.updated_at
 		FROM managed_agent_session_runtimes r
 		JOIN managed_agent_sessions s ON s.id = r.session_id
 		WHERE s.deleted_at IS NULL
@@ -744,6 +741,7 @@ func (r *Repository) MarkRuntimeSandboxDeleted(ctx context.Context, sessionID, s
 		SET sandbox_id = NULL,
 			wrapper_url = '',
 			callback_token = '',
+			environment_volume_ids = '{}'::jsonb,
 			sandbox_deleted_at = $3,
 			updated_at = $3
 		WHERE session_id = $1
@@ -759,18 +757,23 @@ func (r *Repository) MarkRuntimeSandboxDeleted(ctx context.Context, sessionID, s
 }
 
 func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) error {
-	_, err := r.db(ctx).Exec(ctx, `
+	environmentVolumeIDsJSON, err := marshalRuntimeEnvironmentVolumeIDs(runtime.EnvironmentVolumeIDs)
+	if err != nil {
+		return err
+	}
+	_, err = r.db(ctx).Exec(ctx, `
 		INSERT INTO managed_agent_session_runtimes (
-			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id,
+			session_id, vendor, region_id, sandbox_id, wrapper_url, workspace_volume_id, environment_volume_ids,
 			callback_token, vendor_session_id, runtime_generation, active_run_id, sandbox_deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (session_id) DO UPDATE SET
 			vendor = EXCLUDED.vendor,
 			region_id = EXCLUDED.region_id,
 			sandbox_id = EXCLUDED.sandbox_id,
 			wrapper_url = EXCLUDED.wrapper_url,
 			workspace_volume_id = EXCLUDED.workspace_volume_id,
+			environment_volume_ids = EXCLUDED.environment_volume_ids,
 			callback_token = EXCLUDED.callback_token,
 			vendor_session_id = EXCLUDED.vendor_session_id,
 			runtime_generation = EXCLUDED.runtime_generation,
@@ -778,29 +781,86 @@ func (r *Repository) UpsertRuntime(ctx context.Context, runtime *RuntimeRecord) 
 			sandbox_deleted_at = EXCLUDED.sandbox_deleted_at,
 			updated_at = EXCLUDED.updated_at
 	`, runtime.SessionID, runtime.Vendor, runtime.RegionID, nullableString(runtime.SandboxID), runtime.WrapperURL, runtime.WorkspaceVolumeID,
-		runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.SandboxDeletedAt, runtime.CreatedAt, runtime.UpdatedAt)
+		string(environmentVolumeIDsJSON), runtime.ControlToken, nullableString(runtime.VendorSessionID), runtime.RuntimeGeneration, runtime.ActiveRunID, runtime.SandboxDeletedAt,
+		runtime.CreatedAt, runtime.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert managed-agent runtime: %w", err)
 	}
 	return nil
 }
 
+type runtimeScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRuntime(scanner runtimeScanner) (*RuntimeRecord, error) {
+	var (
+		runtime                  RuntimeRecord
+		environmentVolumeIDsJSON []byte
+	)
+	if err := scanner.Scan(
+		&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
+		&environmentVolumeIDsJSON, &runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt,
+		&runtime.CreatedAt, &runtime.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	environmentVolumeIDs, err := unmarshalRuntimeEnvironmentVolumeIDs(environmentVolumeIDsJSON)
+	if err != nil {
+		return nil, err
+	}
+	runtime.EnvironmentVolumeIDs = environmentVolumeIDs
+	return &runtime, nil
+}
+
 func scanRuntimeRows(rows pgx.Rows) ([]*RuntimeRecord, error) {
 	var runtimes []*RuntimeRecord
 	for rows.Next() {
-		var runtime RuntimeRecord
-		if err := rows.Scan(
-			&runtime.SessionID, &runtime.Vendor, &runtime.RegionID, &runtime.SandboxID, &runtime.WrapperURL, &runtime.WorkspaceVolumeID,
-			&runtime.ControlToken, &runtime.VendorSessionID, &runtime.RuntimeGeneration, &runtime.ActiveRunID, &runtime.SandboxDeletedAt, &runtime.CreatedAt, &runtime.UpdatedAt,
-		); err != nil {
+		runtime, err := scanRuntime(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan managed-agent runtime: %w", err)
 		}
-		runtimes = append(runtimes, &runtime)
+		runtimes = append(runtimes, runtime)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate managed-agent runtimes: %w", err)
 	}
 	return runtimes, nil
+}
+
+func marshalRuntimeEnvironmentVolumeIDs(values map[string]string) ([]byte, error) {
+	cleaned := make(map[string]string, len(values))
+	for manager, volumeID := range values {
+		manager = strings.TrimSpace(manager)
+		volumeID = strings.TrimSpace(volumeID)
+		if manager != "" && volumeID != "" {
+			cleaned[manager] = volumeID
+		}
+	}
+	payload, err := json.Marshal(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("marshal managed-agent runtime environment volume ids: %w", err)
+	}
+	return payload, nil
+}
+
+func unmarshalRuntimeEnvironmentVolumeIDs(payload []byte) (map[string]string, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	var values map[string]string
+	if err := json.Unmarshal(payload, &values); err != nil {
+		return nil, fmt.Errorf("unmarshal managed-agent runtime environment volume ids: %w", err)
+	}
+	cleaned := make(map[string]string, len(values))
+	for manager, volumeID := range values {
+		manager = strings.TrimSpace(manager)
+		volumeID = strings.TrimSpace(volumeID)
+		if manager != "" && volumeID != "" {
+			cleaned[manager] = volumeID
+		}
+	}
+	return cleaned, nil
 }
 
 func (r *Repository) CreateRuntimeWebhookJob(ctx context.Context, job *runtimeWebhookJob) (bool, error) {

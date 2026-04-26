@@ -82,6 +82,61 @@ func TestSandboxTTLSecondsUsesRuntimeDefault(t *testing.T) {
 	}
 }
 
+func TestManagedEnvironmentRuntimeEnvVarsAddsConfiguredPackageManagers(t *testing.T) {
+	environment := &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{
+			Type: "packages",
+			Go:   []string{"github.com/acme/tool"},
+			NPM:  []string{"tsx"},
+			Pip:  []string{"ruff"},
+		},
+	}}
+	env := managedEnvironmentRuntimeEnvVars("ctl_123", environment)
+	if env["AGENT_WRAPPER_CONTROL_TOKEN"] != "ctl_123" {
+		t.Fatalf("AGENT_WRAPPER_CONTROL_TOKEN = %q, want ctl_123", env["AGENT_WRAPPER_CONTROL_TOKEN"])
+	}
+	for _, want := range []string{
+		gatewaymanagedagents.ManagedEnvironmentNPMMountPath + "/bin",
+		gatewaymanagedagents.ManagedEnvironmentPipMountPath + "/venv/bin",
+		gatewaymanagedagents.ManagedEnvironmentGoMountPath + "/bin",
+		"/usr/bin",
+	} {
+		if !containsPathEntry(env["PATH"], want) {
+			t.Fatalf("PATH = %q, missing %s", env["PATH"], want)
+		}
+	}
+	if env["NODE_PATH"] != gatewaymanagedagents.ManagedEnvironmentNPMMountPath+"/lib/node_modules" {
+		t.Fatalf("NODE_PATH = %q", env["NODE_PATH"])
+	}
+	if env["VIRTUAL_ENV"] != gatewaymanagedagents.ManagedEnvironmentPipMountPath+"/venv" {
+		t.Fatalf("VIRTUAL_ENV = %q", env["VIRTUAL_ENV"])
+	}
+	if _, ok := env["GEM_HOME"]; ok {
+		t.Fatalf("GEM_HOME should be unset when gem packages are not configured: %#v", env)
+	}
+}
+
+func TestManagedEnvironmentRuntimeEnvVarsKeepsBaseEnvForEmptyPackages(t *testing.T) {
+	env := managedEnvironmentRuntimeEnvVars("ctl_123", &gatewaymanagedagents.Environment{Config: gatewaymanagedagents.CloudConfig{
+		Packages: gatewaymanagedagents.EnvironmentPackages{Type: "packages"},
+	}})
+	if env["AGENT_WRAPPER_CONTROL_TOKEN"] != "ctl_123" {
+		t.Fatalf("AGENT_WRAPPER_CONTROL_TOKEN = %q, want ctl_123", env["AGENT_WRAPPER_CONTROL_TOKEN"])
+	}
+	if _, ok := env["PATH"]; ok {
+		t.Fatalf("PATH should be unset without configured package managers: %#v", env)
+	}
+}
+
+func containsPathEntry(pathValue, want string) bool {
+	for _, item := range strings.Split(pathValue, ":") {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSandboxNotFoundRecognizesAPIError(t *testing.T) {
 	if !isSandboxNotFound(&sandbox0sdk.APIError{StatusCode: http.StatusNotFound}) {
 		t.Fatal("isSandboxNotFound returned false for sandbox0 404")
@@ -343,6 +398,12 @@ func TestCleanupRuntimeSandboxResourcesClearsCredentialReferencesBeforeDeletingS
 				t.Fatal("sandbox deleted before network policy credential references were cleared")
 			}
 			writeTestJSON(t, w, map[string]any{"success": true, "data": map[string]any{"message": "deleted"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/sandboxvolumes/vol_npm_session":
+			calls = append(calls, "delete-env-volume")
+			if !policyCleared {
+				t.Fatal("environment volume deleted before network policy credential references were cleared")
+			}
+			writeTestJSON(t, w, map[string]any{"success": true, "data": map[string]any{"message": "deleted"}})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -355,14 +416,15 @@ func TestCleanupRuntimeSandboxResourcesClearsCredentialReferencesBeforeDeletingS
 		t.Fatalf("newSandboxClient returned error: %v", err)
 	}
 	runtime := &gatewaymanagedagents.RuntimeRecord{
-		SessionID: sessionID,
-		SandboxID: sandboxID,
+		SessionID:            sessionID,
+		SandboxID:            sandboxID,
+		EnvironmentVolumeIDs: map[string]string{"npm": "vol_npm_session"},
 	}
 	if err := mgr.cleanupRuntimeSandboxResources(context.Background(), client, runtime, false); err != nil {
 		t.Fatalf("cleanupRuntimeSandboxResources returned error: %v", err)
 	}
 	got := strings.Join(calls, ",")
-	want := "get-network,put-network,list-sources,delete-source,delete-sandbox"
+	want := "get-network,put-network,list-sources,delete-source,delete-sandbox,delete-env-volume"
 	if got != want {
 		t.Fatalf("calls = %s, want %s", got, want)
 	}
@@ -511,6 +573,53 @@ func TestPublishEnvironmentArtifactVolumesRetriesTransientForkFailure(t *testing
 	}
 }
 
+func TestPublishEnvironmentArtifactVolumesRetriesActiveMountConflict(t *testing.T) {
+	forkCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		forkCalls++
+		if forkCalls == 1 {
+			w.WriteHeader(http.StatusConflict)
+			writeTestJSON(t, w, map[string]any{
+				"error": map[string]any{
+					"code":    "conflict",
+					"message": "volume has active ctld mounts",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeTestJSON(t, w, map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"id":          "published_npm",
+				"team_id":     "team_123",
+				"user_id":     "user_123",
+				"access_mode": "ROX",
+				"created_at":  "2026-04-24T00:00:00Z",
+				"updated_at":  "2026-04-24T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	assets, err := publishEnvironmentArtifactVolumesWithRetry(context.Background(), client, map[string]string{"npm": "temp_npm"}, 5*time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("publishEnvironmentArtifactVolumesWithRetry returned error: %v", err)
+	}
+	if got := assets.NPMVolumeID; got != "published_npm" {
+		t.Fatalf("npm volume id = %q, want published_npm", got)
+	}
+	if forkCalls != 2 {
+		t.Fatalf("fork calls = %d, want 2", forkCalls)
+	}
+}
+
 func TestPublishEnvironmentArtifactVolumesForksManagersConcurrently(t *testing.T) {
 	var (
 		mu        sync.Mutex
@@ -570,6 +679,58 @@ func TestPublishEnvironmentArtifactVolumesForksManagersConcurrently(t *testing.T
 	}
 	if assets.NPMVolumeID != "published_npm" || assets.PipVolumeID != "published_pip" {
 		t.Fatalf("artifact assets = %#v, want npm and pip published", assets)
+	}
+}
+
+func TestForkSessionEnvironmentVolumesUsesRWOAccessMode(t *testing.T) {
+	var seenRequests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxvolumes/artifact_npm/fork" {
+			http.Error(w, `{"error":{"code":"unexpected_request","message":"unexpected request"}}`, http.StatusBadRequest)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode fork payload: %v", err)
+		}
+		seenRequests = append(seenRequests, payload)
+		w.WriteHeader(http.StatusCreated)
+		writeTestJSON(t, w, map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"id":          "session_npm",
+				"team_id":     "team_123",
+				"user_id":     "user_123",
+				"access_mode": "RWO",
+				"created_at":  "2026-04-24T00:00:00Z",
+				"updated_at":  "2026-04-24T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{cfg: Config{SandboxBaseURL: server.URL, SandboxRequestTimeout: 5 * time.Second}}
+	client, err := mgr.newSandboxClient("token_123", "team_123")
+	if err != nil {
+		t.Fatalf("newSandboxClient returned error: %v", err)
+	}
+	mounts, volumeIDs, err := forkSessionEnvironmentVolumes(context.Background(), client, []environmentArtifactMount{{
+		manager:   "npm",
+		volumeID:  "artifact_npm",
+		mountPath: gatewaymanagedagents.ManagedEnvironmentNPMMountPath,
+	}})
+	if err != nil {
+		t.Fatalf("forkSessionEnvironmentVolumes returned error: %v", err)
+	}
+	if len(seenRequests) != 1 || seenRequests[0]["access_mode"] != "RWO" {
+		t.Fatalf("fork requests = %#v, want RWO access mode", seenRequests)
+	}
+	if len(mounts) != 1 || mounts[0].volumeID != "session_npm" || mounts[0].mountPath != gatewaymanagedagents.ManagedEnvironmentNPMMountPath {
+		t.Fatalf("session mounts = %#v, want session npm mount", mounts)
+	}
+	if volumeIDs["npm"] != "session_npm" {
+		t.Fatalf("volumeIDs = %#v, want npm session volume", volumeIDs)
 	}
 }
 
