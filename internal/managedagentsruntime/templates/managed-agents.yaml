@@ -35,5 +35,5 @@ spec:
   network:
     mode: block-all
   pool:
-    minIdle: 1
-    maxIdle: 2
+    minIdle: 3
+    maxIdle: 6
