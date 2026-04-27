@@ -2,16 +2,12 @@
 
 FROM golang:1.25-bookworm AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /workspace/managed-agent
 
 COPY . .
-COPY --from=sdk-go / /workspace/sdk-go
-
-RUN test -f /workspace/sdk-go/go.mod
-RUN go mod edit -replace github.com/sandbox0-ai/sdk-go=/workspace/sdk-go
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 	go build -trimpath -ldflags="-s -w" -o /out/agent-gateway ./cmd/agent-gateway
 

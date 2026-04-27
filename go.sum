@@ -154,8 +154,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/sandbox0-ai/sandbox0 v0.2.3-0.20260416203535-6ec68b557939 h1:KJBOxgOdMealRFWNEQ6Bj/kNZi/FkmESCvkv+iQtd8A=
 github.com/sandbox0-ai/sandbox0 v0.2.3-0.20260416203535-6ec68b557939/go.mod h1:KMN9N00JsvvNnbEXRhlpfFcTm+7/vwCJ9TJrY7vwQMI=
-github.com/sandbox0-ai/sdk-go v0.3.0 h1:/iUYGbZIj5+RtK7TrxbyzkkeMMebI48U6Wkvjdj3MJ0=
-github.com/sandbox0-ai/sdk-go v0.3.0/go.mod h1:aF/r6jQLiVTuFP3628yokTxOUoZESEDB50txzDrOgq4=
+github.com/sandbox0-ai/sdk-go v0.3.1 h1:hV1UOViqWBoyoHzHI2TUGJVA1qZp+Uasas6W1xm2P6w=
+github.com/sandbox0-ai/sdk-go v0.3.1/go.mod h1:aF/r6jQLiVTuFP3628yokTxOUoZESEDB50txzDrOgq4=
 github.com/segmentio/asm v1.2.1 h1:DTNbBqs57ioxAD4PrArqftgypG4/qNpXoJx8TVXxPR0=
 github.com/segmentio/asm v1.2.1/go.mod h1:BqMnlJP91P8d+4ibuonYZw9mfnzI9HfxselHZr5aAcs=
 github.com/sethvargo/go-retry v0.3.0 h1:EEt31A35QhrcRZtrYFDTBg91cqZVnFL2navjDrah2SE=
