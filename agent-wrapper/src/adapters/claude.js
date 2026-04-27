@@ -694,38 +694,6 @@ export class ClaudeRuntime extends AgentRuntime {
             };
           }],
         }],
-        PostToolUse: [{
-          hooks: [async (input) => {
-            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
-            if (isCustomToolInput(customTools, input)) {
-              return { continue: true };
-            }
-            const currentSession = sessionStore.getSession() ?? currentRunSession;
-            await callbackClient.send(currentSession, {
-              session_id: currentSession.session_id,
-              run_id: run.run_id,
-              vendor_session_id: currentSession.vendor_session_id,
-              events: [buildToolResultEvent(input, toolResultContent(input.tool_response), false)],
-            });
-            return { continue: true };
-          }],
-        }],
-        PostToolUseFailure: [{
-          hooks: [async (input) => {
-            const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
-            if (isCustomToolInput(customTools, input)) {
-              return { continue: true };
-            }
-            const currentSession = sessionStore.getSession() ?? currentRunSession;
-            await callbackClient.send(currentSession, {
-              session_id: currentSession.session_id,
-              run_id: run.run_id,
-              vendor_session_id: currentSession.vendor_session_id,
-              events: [buildToolResultEvent(input, toolResultContent(input.error ?? 'tool execution failed'), true)],
-            });
-            return { continue: true };
-          }],
-        }],
         PostCompact: [{
           hooks: [async () => {
             const { session: currentRunSession, run, callbackClient, sessionStore } = activeRun();
@@ -1235,25 +1203,6 @@ function sdkPermissionDecision(decision, input, eventID) {
     message: typeof decision?.message === 'string' && decision.message.trim() ? decision.message.trim() : 'Denied by user',
     toolUseID: String(decision?.toolUseID ?? eventID ?? ''),
     interrupt: decision?.interrupt !== false,
-  };
-}
-
-function buildToolResultEvent(input, content, isError) {
-  const mcp = mcpToolMetadata(input);
-  if (mcp) {
-    return {
-      type: 'agent.mcp_tool_result',
-      id: newEventID('evt'),
-      mcp_tool_use_id: String(input.tool_use_id ?? ''),
-      content,
-      is_error: isError || undefined,
-    };
-  }
-  return {
-    type: 'agent.tool_result',
-    tool_use_id: String(input.tool_use_id ?? ''),
-    content,
-    is_error: isError || undefined,
   };
 }
 
