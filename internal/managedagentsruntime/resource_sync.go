@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"path"
 	"sort"
@@ -52,9 +51,7 @@ const volumeFileOperationAttempts = 3
 
 type volumeFileResourceClient interface {
 	CloneVolumeFiles(ctx context.Context, volumeID string, request apispec.CloneVolumeFilesRequest) ([]apispec.CloneVolumeFileResult, error)
-	ReadVolumeFile(ctx context.Context, volumeID, path string) ([]byte, error)
 	MkdirVolumeFile(ctx context.Context, volumeID, path string, recursive bool) (*apispec.SuccessCreatedResponse, error)
-	WriteVolumeFile(ctx context.Context, volumeID, path string, data []byte) (*apispec.SuccessWrittenResponse, error)
 }
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
@@ -288,6 +285,10 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 }
 
 func cloneFileResourceEntries(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID string, entries []apispec.CloneVolumeFileEntry) error {
+	return cloneVolumeFileEntries(ctx, client, workspaceVolumeID, entries)
+}
+
+func cloneVolumeFileEntries(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID string, entries []apispec.CloneVolumeFileEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -299,56 +300,10 @@ func cloneFileResourceEntries(ctx context.Context, client volumeFileResourceClie
 		})
 		return err
 	})
-	if err != nil && shouldFallbackFileResourceClone(err) {
-		return copyFileResourceEntries(ctx, client, workspaceVolumeID, entries)
-	}
 	if err != nil {
 		return err
 	}
 	return nil
-}
-
-func copyFileResourceEntries(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID string, entries []apispec.CloneVolumeFileEntry) error {
-	for _, entry := range entries {
-		var content []byte
-		err := retryVolumeFileOperation(ctx, func() error {
-			var err error
-			content, err = client.ReadVolumeFile(ctx, entry.SourceVolumeID, entry.SourcePath)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("read asset-store resource %s: %w", entry.SourcePath, err)
-		}
-		parent := path.Dir(entry.TargetPath)
-		if parent != "." && parent != "/" {
-			err := retryVolumeFileOperation(ctx, func() error {
-				_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
-				return err
-			})
-			if err != nil {
-				return fmt.Errorf("mkdir resource path %s: %w", parent, err)
-			}
-		}
-		err = retryVolumeFileOperation(ctx, func() error {
-			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, entry.TargetPath, content)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("write file resource %s to %s: %w", entry.SourcePath, entry.TargetPath, err)
-		}
-	}
-	return nil
-}
-
-func shouldFallbackFileResourceClone(err error) bool {
-	var apiErr *sandbox0sdk.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusNotFound &&
-			strings.EqualFold(apiErr.Code, "not_found") &&
-			strings.TrimSpace(apiErr.Message) == "not found"
-	}
-	message := err.Error()
-	return strings.Contains(message, "sandbox0 API error (404): not_found - not found")
 }
 
 func retryVolumeFileOperation(ctx context.Context, operation func() error) error {
@@ -443,28 +398,9 @@ func (m *SDKRuntimeManager) materializeStoredSkillBundle(ctx context.Context, cl
 		return errors.New("skill bundle asset source is incomplete")
 	}
 
-	bundleContent, err := client.ReadVolumeFile(ctx, assetVolumeID, bundlePath)
+	bundleVolumePath, err := stageSkillBundleInWorkspace(ctx, client, workspaceVolumeID, assetVolumeID, skillVersionID, bundlePath)
 	if err != nil {
-		return fmt.Errorf("read skill bundle: %w", err)
-	}
-
-	bundleVolumePath := skillBundleWorkspaceVolumePath(skillVersionID)
-	parent := path.Dir(bundleVolumePath)
-	if parent != "." && parent != "/" {
-		err := retryVolumeFileOperation(ctx, func() error {
-			_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("mkdir skill bundle path %s: %w", parent, err)
-		}
-	}
-	err = retryVolumeFileOperation(ctx, func() error {
-		_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, bundleVolumePath, bundleContent)
 		return err
-	})
-	if err != nil {
-		return fmt.Errorf("write skill bundle %s: %w", bundleVolumePath, err)
 	}
 
 	bundleContainerPath := workspaceVolumePathToMountedPath(m.cfg.WorkspaceMountPath, bundleVolumePath)
@@ -486,6 +422,20 @@ func (m *SDKRuntimeManager) materializeStoredSkillBundle(ctx context.Context, cl
 		return fmt.Errorf("unpack skill bundle: %w", err)
 	}
 	return nil
+}
+
+func stageSkillBundleInWorkspace(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID, assetVolumeID, skillVersionID, bundlePath string) (string, error) {
+	bundleVolumePath := skillBundleWorkspaceVolumePath(skillVersionID)
+	if err := cloneVolumeFileEntries(ctx, client, workspaceVolumeID, []apispec.CloneVolumeFileEntry{{
+		SourceVolumeID: assetVolumeID,
+		SourcePath:     bundlePath,
+		TargetPath:     bundleVolumePath,
+		Overwrite:      apispec.NewOptBool(true),
+		CreateParents:  apispec.NewOptBool(true),
+	}}); err != nil {
+		return "", fmt.Errorf("stage skill bundle %s to %s: %w", bundlePath, bundleVolumePath, err)
+	}
+	return bundleVolumePath, nil
 }
 
 func (m *SDKRuntimeManager) syncGitHubCredentialSources(ctx context.Context, client *sandbox0sdk.Client, sessionID string, resources []map[string]any) ([]managedCredentialBinding, error) {
