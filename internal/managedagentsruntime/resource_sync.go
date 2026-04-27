@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"path"
 	"sort"
@@ -49,13 +48,6 @@ type managedProjectedHeader struct {
 }
 
 const volumeFileOperationAttempts = 3
-
-type volumeFileResourceClient interface {
-	CloneVolumeFiles(ctx context.Context, volumeID string, request apispec.CloneVolumeFilesRequest) ([]apispec.CloneVolumeFileResult, error)
-	ReadVolumeFile(ctx context.Context, volumeID, path string) ([]byte, error)
-	MkdirVolumeFile(ctx context.Context, volumeID, path string, recursive bool) (*apispec.SuccessCreatedResponse, error)
-	WriteVolumeFile(ctx context.Context, volumeID, path string, data []byte) (*apispec.SuccessWrittenResponse, error)
-}
 
 func (m *SDKRuntimeManager) syncBootstrapState(ctx context.Context, credential gatewaymanagedagents.RequestCredential, runtime *gatewaymanagedagents.RuntimeRecord, req *gatewaymanagedagents.WrapperSessionBootstrapRequest) (err error) {
 	_ = credential
@@ -241,12 +233,11 @@ func flattenVaultCredentials(vaults []managedVaultCredentials) []gatewaymanageda
 	return credentials
 }
 
-func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID, teamID string, resources []map[string]any) error {
+func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client *sandbox0sdk.Client, workspaceVolumeID, teamID string, resources []map[string]any) error {
 	if strings.TrimSpace(workspaceVolumeID) == "" {
 		return errors.New("workspace volume is required")
 	}
 	var teamStore *gatewaymanagedagents.TeamAssetStore
-	entries := make([]apispec.CloneVolumeFileEntry, 0)
 	for _, resource := range resources {
 		if resourceType(resource) != "file" {
 			continue
@@ -270,56 +261,11 @@ func (m *SDKRuntimeManager) materializeFileResources(ctx context.Context, client
 				return fmt.Errorf("resolve team asset store: %w", err)
 			}
 		}
-		entries = append(entries, apispec.CloneVolumeFileEntry{
-			SourceVolumeID: teamStore.VolumeID,
-			SourcePath:     record.StorePath,
-			TargetPath:     mountPath,
-			Overwrite:      apispec.NewOptBool(true),
-			CreateParents:  apispec.NewOptBool(true),
-		})
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	if err := cloneFileResourceEntries(ctx, client, workspaceVolumeID, entries); err != nil {
-		return fmt.Errorf("clone file resources into workspace volume: %w", err)
-	}
-	return nil
-}
-
-func cloneFileResourceEntries(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID string, entries []apispec.CloneVolumeFileEntry) error {
-	if len(entries) == 0 {
-		return nil
-	}
-	err := retryVolumeFileOperation(ctx, func() error {
-		_, err := client.CloneVolumeFiles(ctx, workspaceVolumeID, apispec.CloneVolumeFilesRequest{
-			Mode:    apispec.NewOptCloneVolumeFilesRequestMode(apispec.CloneVolumeFilesRequestModeCowOrCopy),
-			Atomic:  apispec.NewOptBool(true),
-			Entries: entries,
-		})
-		return err
-	})
-	if err != nil && shouldFallbackFileResourceClone(err) {
-		return copyFileResourceEntries(ctx, client, workspaceVolumeID, entries)
-	}
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func copyFileResourceEntries(ctx context.Context, client volumeFileResourceClient, workspaceVolumeID string, entries []apispec.CloneVolumeFileEntry) error {
-	for _, entry := range entries {
-		var content []byte
-		err := retryVolumeFileOperation(ctx, func() error {
-			var err error
-			content, err = client.ReadVolumeFile(ctx, entry.SourceVolumeID, entry.SourcePath)
-			return err
-		})
+		content, err := client.ReadVolumeFile(ctx, teamStore.VolumeID, record.StorePath)
 		if err != nil {
-			return fmt.Errorf("read asset-store resource %s: %w", entry.SourcePath, err)
+			return fmt.Errorf("read asset-store resource %s: %w", fileID, err)
 		}
-		parent := path.Dir(entry.TargetPath)
+		parent := path.Dir(mountPath)
 		if parent != "." && parent != "/" {
 			err := retryVolumeFileOperation(ctx, func() error {
 				_, err := client.MkdirVolumeFile(ctx, workspaceVolumeID, parent, true)
@@ -330,25 +276,14 @@ func copyFileResourceEntries(ctx context.Context, client volumeFileResourceClien
 			}
 		}
 		err = retryVolumeFileOperation(ctx, func() error {
-			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, entry.TargetPath, content)
+			_, err := client.WriteVolumeFile(ctx, workspaceVolumeID, mountPath, content)
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("write file resource %s to %s: %w", entry.SourcePath, entry.TargetPath, err)
+			return fmt.Errorf("write file resource %s to %s: %w", fileID, mountPath, err)
 		}
 	}
 	return nil
-}
-
-func shouldFallbackFileResourceClone(err error) bool {
-	var apiErr *sandbox0sdk.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusNotFound &&
-			strings.EqualFold(apiErr.Code, "not_found") &&
-			strings.TrimSpace(apiErr.Message) == "not found"
-	}
-	message := err.Error()
-	return strings.Contains(message, "sandbox0 API error (404): not_found - not found")
 }
 
 func retryVolumeFileOperation(ctx context.Context, operation func() error) error {
