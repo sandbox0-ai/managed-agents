@@ -235,6 +235,103 @@ func TestRuntimeWebhookURLFallsBackToRequestBaseURL(t *testing.T) {
 	}
 }
 
+func TestStartRunDoesNotSynchronouslyRefreshRuntimeTTL(t *testing.T) {
+	seenStartRun := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs" {
+			t.Fatalf("unexpected request %s %s; StartRun should only call the wrapper", r.Method, r.URL.Path)
+		}
+		seenStartRun = true
+		if got := r.Header.Get("Authorization"); got != "Bearer ctl_123" {
+			t.Fatalf("Authorization = %q, want wrapper control token", got)
+		}
+		var payload gatewaymanagedagents.WrapperRunRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode wrapper run payload: %v", err)
+		}
+		if payload.SessionID != "sesn_123" || payload.RunID != "srun_123" {
+			t.Fatalf("payload = %#v, want session/run ids", payload)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{
+		cfg: Config{
+			SandboxBaseURL:        server.URL,
+			SandboxRequestTimeout: 5 * time.Second,
+			SandboxAdminAPIKey:    "runtime_123",
+		},
+		httpClient: server.Client(),
+		logger:     zap.NewNop(),
+	}
+	runtime := &gatewaymanagedagents.RuntimeRecord{
+		SessionID:    "sesn_123",
+		SandboxID:    "sbx_123",
+		WrapperURL:   server.URL,
+		ControlToken: "ctl_123",
+	}
+	err := mgr.StartRun(context.Background(), gatewaymanagedagents.RequestCredential{}, runtime, &gatewaymanagedagents.WrapperRunRequest{
+		SessionID: "sesn_123",
+		RunID:     "srun_123",
+	})
+	if err != nil {
+		t.Fatalf("StartRun returned error: %v", err)
+	}
+	if !seenStartRun {
+		t.Fatal("expected StartRun to call wrapper /v1/runs")
+	}
+}
+
+func TestRefreshRuntimeTTLDoesNotUpdateSandboxLifecycle(t *testing.T) {
+	sandboxID := "sbx_123"
+	seenRefresh := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sandboxes/"+sandboxID+"/refresh" {
+			t.Fatalf("unexpected request %s %s; TTL refresh should not update sandbox lifecycle", r.Method, r.URL.Path)
+		}
+		seenRefresh = true
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode refresh payload: %v", err)
+		}
+		if payload["duration"] != float64(300) {
+			t.Fatalf("refresh payload = %#v, want configured duration", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeTestJSON(t, w, map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"sandbox_id":      sandboxID,
+				"expires_at":      "2026-04-27T10:00:00Z",
+				"hard_expires_at": "0001-01-01T00:00:00Z",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	mgr := &SDKRuntimeManager{
+		cfg: Config{
+			SandboxBaseURL:        server.URL,
+			SandboxRequestTimeout: 5 * time.Second,
+			SandboxAdminAPIKey:    "runtime_123",
+			SandboxTTLSeconds:     300,
+		},
+		httpClient: server.Client(),
+		logger:     zap.NewNop(),
+	}
+	runtime := &gatewaymanagedagents.RuntimeRecord{
+		SessionID: "sesn_123",
+		SandboxID: sandboxID,
+	}
+	if err := mgr.RefreshRuntimeTTL(context.Background(), gatewaymanagedagents.RequestCredential{}, runtime); err != nil {
+		t.Fatalf("RefreshRuntimeTTL returned error: %v", err)
+	}
+	if !seenRefresh {
+		t.Fatal("expected RefreshRuntimeTTL to call sandbox refresh")
+	}
+}
+
 func TestNewSandboxClientAddsTeamHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sandboxvolumes" {

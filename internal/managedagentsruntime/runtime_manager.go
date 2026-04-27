@@ -143,13 +143,13 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 			op.ObservePhase("load_existing_runtime", time.Since(phaseStarted), nil,
 				zap.String("sandbox_id", runtime.SandboxID),
 			)
-			runtimeSandboxLost := false
 			phaseStarted = time.Now()
-			if err := m.configureRuntimeSandboxLifecycle(ctx, runtime); err != nil {
-				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), err,
-					zap.String("sandbox_id", runtime.SandboxID),
-				)
-				if isSandboxNotFound(err) {
+			ensured, ensureErr := m.ensureWrapperEndpoint(ctx, runtime)
+			op.ObservePhase("ensure_wrapper_endpoint", time.Since(phaseStarted), ensureErr,
+				zap.String("sandbox_id", runtime.SandboxID),
+			)
+			if ensureErr != nil {
+				if isSandboxNotFound(ensureErr) {
 					cleanupClient, clientErr := m.sandboxClientForRuntime(ctx, runtime)
 					if clientErr != nil {
 						return nil, clientErr
@@ -160,49 +160,16 @@ func (m *SDKRuntimeManager) EnsureRuntime(ctx context.Context, _ gatewaymanageda
 					if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
 						return nil, cleanupErr
 					}
-					reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while configuring lifecycle")
+					reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while ensuring wrapper endpoint")
 					if markErr != nil {
 						return nil, markErr
 					}
 					existingRuntime = reloaded
-					runtimeSandboxLost = true
 				} else {
-					m.logger.Warn("configure existing runtime sandbox lifecycle failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
+					return nil, ensureErr
 				}
 			} else {
-				op.ObservePhase("configure_existing_lifecycle", time.Since(phaseStarted), nil,
-					zap.String("sandbox_id", runtime.SandboxID),
-				)
-			}
-			if !runtimeSandboxLost {
-				phaseStarted = time.Now()
-				ensured, ensureErr := m.ensureWrapperEndpoint(ctx, runtime)
-				op.ObservePhase("ensure_wrapper_endpoint", time.Since(phaseStarted), ensureErr,
-					zap.String("sandbox_id", runtime.SandboxID),
-				)
-				if ensureErr != nil {
-					if isSandboxNotFound(ensureErr) {
-						cleanupClient, clientErr := m.sandboxClientForRuntime(ctx, runtime)
-						if clientErr != nil {
-							return nil, clientErr
-						}
-						cleanupCtx, cancel := context.WithTimeout(ctx, m.cfg.SandboxRequestTimeout)
-						cleanupErr := m.cleanupRuntimeSandboxResources(cleanupCtx, cleanupClient, runtime, false)
-						cancel()
-						if cleanupErr != nil && !isSandboxNotFound(cleanupErr) {
-							return nil, cleanupErr
-						}
-						reloaded, markErr := m.markRuntimeSandboxLostAndReload(ctx, runtime, "sandbox not found while ensuring wrapper endpoint")
-						if markErr != nil {
-							return nil, markErr
-						}
-						existingRuntime = reloaded
-					} else {
-						return nil, ensureErr
-					}
-				} else {
-					return ensured, nil
-				}
+				return ensured, nil
 			}
 			if existingRuntime == nil {
 				existingRuntime = runtime
@@ -552,13 +519,6 @@ func (m *SDKRuntimeManager) StartRun(ctx context.Context, credential gatewaymana
 	)
 	defer func() { op.End(err) }()
 	phaseStarted := time.Now()
-	if err := m.RefreshRuntimeTTL(ctx, credential, runtime); err != nil {
-		op.ObservePhase("refresh_runtime_ttl", time.Since(phaseStarted), err)
-		m.logger.Warn("refresh runtime ttl before run failed", zap.Error(err), zap.String("session_id", runtimeSessionID(runtime)), zap.String("sandbox_id", runtimeSandboxID(runtime)))
-	} else {
-		op.ObservePhase("refresh_runtime_ttl", time.Since(phaseStarted), nil)
-	}
-	phaseStarted = time.Now()
 	err = m.wrapperJSON(ctx, credential, runtime, http.MethodPost, "/v1/runs", req)
 	op.ObservePhase("wrapper_start_run", time.Since(phaseStarted), err)
 	return err
@@ -717,43 +677,11 @@ func (m *SDKRuntimeManager) RefreshRuntimeTTL(ctx context.Context, credential ga
 	if err != nil {
 		return err
 	}
-	if err := m.configureRuntimeSandboxLifecycleWithClient(ctx, client, runtime); err != nil {
-		m.logger.Warn("configure runtime sandbox lifecycle before ttl refresh failed",
-			zap.Error(err),
-			zap.String("session_id", runtimeSessionID(runtime)),
-			zap.String("sandbox_id", runtimeSandboxID(runtime)),
-		)
-	}
 	_, err = client.RefreshSandbox(ctx, runtime.SandboxID, &apispec.SandboxRefreshRequest{
 		Duration: apispec.NewOptInt32(int32(m.sandboxTTLSeconds())),
 	})
 	if err != nil {
 		return fmt.Errorf("refresh sandbox ttl: %w", err)
-	}
-	return nil
-}
-
-func (m *SDKRuntimeManager) configureRuntimeSandboxLifecycle(ctx context.Context, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	if runtime == nil || strings.TrimSpace(runtime.SandboxID) == "" {
-		return nil
-	}
-	client, err := m.sandboxClientForRuntime(ctx, runtime)
-	if err != nil {
-		return err
-	}
-	return m.configureRuntimeSandboxLifecycleWithClient(ctx, client, runtime)
-}
-
-func (m *SDKRuntimeManager) configureRuntimeSandboxLifecycleWithClient(ctx context.Context, client *sandbox0sdk.Client, runtime *gatewaymanagedagents.RuntimeRecord) error {
-	_, err := client.UpdateSandbox(ctx, runtime.SandboxID, apispec.SandboxUpdateRequest{
-		Config: apispec.NewOptSandboxUpdateConfig(apispec.SandboxUpdateConfig{
-			TTL:        apispec.NewOptInt32(int32(m.sandboxTTLSeconds())),
-			HardTTL:    apispec.NewOptInt32(0),
-			AutoResume: apispec.NewOptBool(true),
-		}),
-	})
-	if err != nil {
-		return fmt.Errorf("update sandbox lifecycle: %w", err)
 	}
 	return nil
 }
