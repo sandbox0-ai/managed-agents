@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
   CodexRuntime,
   codexApprovalPolicy,
@@ -13,6 +14,7 @@ import {
   codexSandbox,
   codexSandboxPolicy,
 } from '../src/adapters/codex.js';
+import { CodexAppServerClient } from '../src/adapters/codex-app-server.js';
 
 class FakeCodexClient extends EventEmitter {
   constructor({
@@ -222,6 +224,63 @@ class FakeCodexClient extends EventEmitter {
   }
 }
 
+test('CodexAppServerClient emits process and initialize observability', async () => {
+  const fakeChild = new EventEmitter();
+  fakeChild.stdin = new PassThrough();
+  fakeChild.stdout = new PassThrough();
+  fakeChild.stderr = new PassThrough();
+  fakeChild.pid = 2468;
+  fakeChild.killed = false;
+  fakeChild.exitCode = null;
+  fakeChild.kill = () => {};
+
+  const observations = [];
+  fakeChild.stdin.on('data', (chunk) => {
+    for (const line of String(chunk).trim().split('\n').filter(Boolean)) {
+      const message = JSON.parse(line);
+      if (message.method === 'initialize') {
+        fakeChild.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+      }
+    }
+  });
+
+  const client = new CodexAppServerClient({
+    command: '/usr/local/bin/codex',
+    args: ['app-server'],
+    cwd: '/workspace',
+    env: {},
+    spawnProcess: () => fakeChild,
+    observe: (msg, fields) => observations.push({ msg, ...fields }),
+  });
+
+  await client.start();
+
+  assert(observations.find((entry) => entry.msg === 'codex app-server spawn starting'));
+  const spawnReturned = observations.find((entry) => entry.msg === 'codex app-server spawn returned');
+  assert.equal(spawnReturned.pid, 2468);
+  assert.equal(typeof spawnReturned.spawn_elapsed_ms, 'number');
+
+  const stdinFirstWrite = observations.find((entry) => entry.msg === 'codex app-server stdin first write');
+  assert.equal(stdinFirstWrite.pid, 2468);
+  assert.equal(stdinFirstWrite.rpc_kind, 'request');
+  assert.equal(stdinFirstWrite.rpc_method, 'initialize');
+  assert.ok(stdinFirstWrite.input_bytes > 0);
+
+  const stdoutFirstByte = observations.find((entry) => entry.msg === 'codex app-server stdout first byte');
+  assert.equal(stdoutFirstByte.pid, 2468);
+  assert.ok(stdoutFirstByte.chunk_bytes > 0);
+
+  const stdoutFirstLine = observations.find((entry) => entry.msg === 'codex app-server stdout first line');
+  assert.equal(stdoutFirstLine.pid, 2468);
+  assert.equal(stdoutFirstLine.line_is_json, true);
+  assert.equal(stdoutFirstLine.rpc_kind, 'response');
+  assert.equal(stdoutFirstLine.rpc_has_id, true);
+
+  assert(observations.find((entry) => entry.msg === 'codex app-server initialize starting'));
+  const initializeReturned = observations.find((entry) => entry.msg === 'codex app-server initialize returned');
+  assert.equal(typeof initializeReturned.request_elapsed_ms, 'number');
+});
+
 test('CodexRuntime starts an app-server thread and maps a completed turn', async () => {
   const client = new FakeCodexClient();
   const runtime = new CodexRuntime({ clientFactory: () => client });
@@ -244,6 +303,42 @@ test('CodexRuntime starts an app-server thread and maps a completed turn', async
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'agent.message'));
   assert(callbacks.flatMap((payload) => payload.events).some((event) => event.type === 'session.status_idle' && event.stop_reason?.type === 'end_turn'));
   assert(callbacks.some((payload) => payload.usage_delta?.input_tokens === 3 && payload.usage_delta?.output_tokens === 2));
+});
+
+test('CodexRuntime emits timing logs around client, thread, turn, and first events', async () => {
+  const client = new FakeCodexClient({ eventProtocol: 'codex-event' });
+  const runtime = new CodexRuntime({ clientFactory: () => client });
+  let storedSession = codexSession();
+  const sessionStore = sessionStoreFor(() => storedSession, (next) => { storedSession = next; });
+
+  const lines = await captureConsole(async () => {
+    await runtime.startRun(storedSession, runRequest(), { send: async () => {} }, sessionStore);
+  });
+  const logs = lines.map((line) => JSON.parse(line));
+  const messages = logs.map((entry) => entry.msg);
+
+  assert(messages.includes('codex run starting'));
+  assert(messages.includes('codex app-server client starting'));
+  assert(messages.includes('codex app-server client started'));
+  assert(messages.includes('codex thread start starting'));
+  assert(messages.includes('codex thread start returned'));
+  assert(messages.includes('codex turn starting'));
+  assert(messages.includes('codex turn start returned'));
+  assert(messages.includes('codex first notification'));
+  assert(messages.includes('codex turn started notification'));
+  assert(messages.includes('codex first codex event'));
+  assert(messages.includes('codex first user-visible event'));
+
+  const firstEventLog = logs.find((entry) => entry.msg === 'codex first codex event');
+  assert.equal(firstEventLog.session_id, 'sesn_codex');
+  assert.equal(firstEventLog.run_id, 'run_codex');
+  assert.equal(firstEventLog.vendor_session_id, 'thr_codex');
+  assert.equal(firstEventLog.thread_id, 'thr_codex');
+  assert.equal(firstEventLog.turn_id, 'turn_codex');
+  assert.equal(firstEventLog.event_type, 'task_started');
+
+  const firstVisibleLog = logs.find((entry) => entry.msg === 'codex first user-visible event');
+  assert.equal(firstVisibleLog.event_type, 'agent.message');
 });
 
 test('CodexRuntime sends agent system via baseInstructions', async () => {
