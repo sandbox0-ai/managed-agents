@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
@@ -117,6 +118,58 @@ function timingFieldsForActiveRun(activeRun, extra = {}) {
   };
 }
 
+function timingFieldsForSession(session, extra = {}) {
+  return {
+    session_id: session?.session_id ?? null,
+    run_id: null,
+    vendor_session_id: session?.vendor_session_id ?? null,
+    elapsed_ms: null,
+    ...extra,
+  };
+}
+
+function byteLengthForChunk(chunk, encoding) {
+  if (chunk == null) {
+    return 0;
+  }
+  if (typeof chunk === 'string') {
+    return Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+  }
+  if (typeof chunk === 'object' && typeof chunk.byteLength === 'number') {
+    return chunk.byteLength;
+  }
+  return Buffer.byteLength(String(chunk));
+}
+
+function truthyEnvValue(value) {
+  if (typeof value !== 'string') {
+    return Boolean(value);
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized !== '' && normalized !== '0' && normalized !== 'false' && normalized !== 'no' && normalized !== 'off';
+}
+
+function summarizeClaudeCLIJSONLine(line) {
+  const trimmed = String(line ?? '').trim();
+  const summary = {
+    line_is_json: false,
+    line_type: null,
+    line_subtype: null,
+  };
+  if (trimmed === '') {
+    return summary;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    summary.line_is_json = true;
+    summary.line_type = typeof parsed?.type === 'string' ? parsed.type : null;
+    summary.line_subtype = typeof parsed?.subtype === 'string' ? parsed.subtype : null;
+    return summary;
+  } catch {
+    return summary;
+  }
+}
+
 function skillMetadataFieldsForClaudeSDKMessage(message) {
   const skills = message?.skills;
   if (!skills || typeof skills !== 'object') {
@@ -167,9 +220,10 @@ export function allowToolUseDecision(input, toolUseID) {
 }
 
 export class ClaudeRuntime extends AgentRuntime {
-  constructor({ queryFn = query } = {}) {
+  constructor({ queryFn = query, spawnProcess = spawn } = {}) {
     super('claude');
     this.queryFn = queryFn;
+    this.spawnProcess = spawnProcess;
     this.sessions = new Map();
     this.activeRuns = new Map();
     this.pendingActions = new Map();
@@ -309,13 +363,18 @@ export class ClaudeRuntime extends AgentRuntime {
   }
 
   #startSessionRuntime(sessionRuntime, session, { source } = {}) {
+    const queryStartedAtMs = Date.now();
     const options = this.#buildOptions(session, {
       getActiveRun: () => sessionRuntime.activeRun,
     });
     if (session.vendor_session_id) {
       options.resume = session.vendor_session_id;
     }
-    const queryStartedAtMs = Date.now();
+    options.spawnClaudeCodeProcess = this.#observedClaudeCodeSpawner(session, {
+      source,
+      queryStartedAtMs,
+      getActiveRun: () => sessionRuntime.activeRun,
+    });
     logInfo('claude query starting', {
       session_id: session.session_id,
       run_id: sessionRuntime.activeRun?.run?.run_id ?? null,
@@ -339,6 +398,120 @@ export class ClaudeRuntime extends AgentRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+  }
+
+  #observedClaudeCodeSpawner(session, { source, queryStartedAtMs, getActiveRun }) {
+    const logFields = (extra = {}) => {
+      const activeRun = getActiveRun?.();
+      const base = activeRun
+        ? timingFieldsForActiveRun(activeRun)
+        : timingFieldsForSession(session);
+      return {
+        ...base,
+        source: source ?? 'run',
+        resume: Boolean(session?.vendor_session_id),
+        query_elapsed_ms: elapsedMsSince(queryStartedAtMs),
+        ...extra,
+      };
+    };
+    return ({ command, args, cwd, env, signal }) => {
+      const spawnStartedAtMs = Date.now();
+      const stderrMode = truthyEnvValue(env?.DEBUG_CLAUDE_AGENT_SDK) ? 'pipe' : 'ignore';
+      logInfo('claude cli spawn starting', logFields({
+        command,
+        args_count: Array.isArray(args) ? args.length : 0,
+        cwd,
+        stderr_mode: stderrMode,
+      }));
+      const child = this.spawnProcess(command, args, {
+        cwd,
+        env,
+        signal,
+        stdio: ['pipe', 'pipe', stderrMode],
+        windowsHide: true,
+      });
+      const processStartedAtMs = Date.now();
+      logInfo('claude cli spawn returned', logFields({
+        pid: Number.isFinite(child?.pid) ? child.pid : null,
+        spawn_elapsed_ms: Math.max(0, processStartedAtMs - spawnStartedAtMs),
+        stderr_mode: stderrMode,
+      }));
+
+      let stdinFirstWriteLogged = false;
+      const stdin = child?.stdin ?? null;
+      if (stdin && typeof stdin.write === 'function') {
+        const originalWrite = stdin.write.bind(stdin);
+        stdin.write = (chunk, encoding, callback) => {
+          if (!stdinFirstWriteLogged) {
+            stdinFirstWriteLogged = true;
+            const text = typeof chunk === 'string'
+              ? chunk
+              : (Buffer.isBuffer(chunk) ? chunk.toString('utf8') : '');
+            logInfo('claude cli stdin first write', logFields({
+              pid: Number.isFinite(child?.pid) ? child.pid : null,
+              process_elapsed_ms: elapsedMsSince(processStartedAtMs),
+              input_bytes: byteLengthForChunk(chunk, encoding),
+              ...summarizeClaudeCLIJSONLine(text),
+            }));
+          }
+          return originalWrite(chunk, encoding, callback);
+        };
+      }
+
+      let stdoutFirstByteLogged = false;
+      let stdoutFirstLineLogged = false;
+      let stdoutBuffered = '';
+      const stdout = child?.stdout ?? null;
+      if (stdout && typeof stdout.on === 'function') {
+        stdout.on('data', (chunk) => {
+          if (!stdoutFirstByteLogged) {
+            stdoutFirstByteLogged = true;
+            logInfo('claude cli stdout first byte', logFields({
+              pid: Number.isFinite(child?.pid) ? child.pid : null,
+              process_elapsed_ms: elapsedMsSince(processStartedAtMs),
+              chunk_bytes: byteLengthForChunk(chunk),
+            }));
+          }
+          if (stdoutFirstLineLogged) {
+            return;
+          }
+          const chunkText = Buffer.isBuffer(chunk)
+            ? chunk.toString('utf8')
+            : String(chunk ?? '');
+          stdoutBuffered += chunkText;
+          const newlineIndex = stdoutBuffered.indexOf('\n');
+          if (newlineIndex < 0) {
+            return;
+          }
+          stdoutFirstLineLogged = true;
+          const line = stdoutBuffered.slice(0, newlineIndex);
+          logInfo('claude cli stdout first line', logFields({
+            pid: Number.isFinite(child?.pid) ? child.pid : null,
+            process_elapsed_ms: elapsedMsSince(processStartedAtMs),
+            line_bytes: Buffer.byteLength(line, 'utf8'),
+            ...summarizeClaudeCLIJSONLine(line),
+          }));
+        });
+      }
+
+      return {
+        stdin,
+        stdout,
+        get killed() {
+          return child?.killed;
+        },
+        get exitCode() {
+          return child?.exitCode;
+        },
+        get pid() {
+          return child?.pid;
+        },
+        kill: child.kill.bind(child),
+        on: child.on.bind(child),
+        once: child.once.bind(child),
+        off: child.off.bind(child),
+      };
+    };
   }
 
   async #pumpSessionRuntime(sessionRuntime) {
