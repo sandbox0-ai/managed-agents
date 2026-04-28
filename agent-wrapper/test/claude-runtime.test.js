@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
   allowToolUseDecision,
   buildToolPlan,
@@ -468,6 +470,101 @@ test('ClaudeRuntime emits timing logs around resident query startup and first st
   assert.equal(firstMessageLog.run_id, 'run_timing');
   assert.ok(['assistant', 'system'].includes(firstMessageLog.message_type));
   assert.equal(firstMessageLog.vendor_session_id, 'vendor_sesn_timing');
+});
+
+test('ClaudeRuntime emits Claude CLI process observability logs via spawnClaudeCodeProcess', async () => {
+  const fakeChild = new EventEmitter();
+  fakeChild.stdin = new PassThrough();
+  fakeChild.stdout = new PassThrough();
+  fakeChild.stderr = null;
+  fakeChild.pid = 4321;
+  fakeChild.killed = false;
+  fakeChild.exitCode = null;
+  fakeChild.kill = () => {};
+
+  let spawnCall = null;
+  const runtime = new ClaudeRuntime({
+    spawnProcess: (command, args, options) => {
+      spawnCall = { command, args, options };
+      return fakeChild;
+    },
+    queryFn: ({ options }) => {
+      const processHandle = options.spawnClaudeCodeProcess({
+        command: '/usr/local/bin/claude',
+        args: ['--output-format', 'stream-json'],
+        cwd: '/workspace',
+        env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+        signal: new AbortController().signal,
+      });
+      processHandle.stdin.write('{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n');
+      fakeChild.stdout.write('{"type":"system","subtype":"init"}\n');
+      return sdkResultStream({ sessionID: 'vendor_sesn_cli_obs' });
+    },
+  });
+  let currentSession = {
+    session_id: 'sesn_cli_obs',
+    vendor_session_id: null,
+    working_directory: '/workspace',
+    skill_names: [],
+    agent: {
+      system: 'Base prompt.',
+      tools: [],
+    },
+    engine: {
+      env: {
+        CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-config-')),
+      },
+    },
+  };
+  const sessionStore = {
+    getSession: () => currentSession,
+    persistSession: (updater) => {
+      currentSession = updater(currentSession);
+      return currentSession;
+    },
+  };
+
+  const logs = await captureStructuredLogs(async () => {
+    await runtime.startRun(currentSession, {
+      run_id: 'run_cli_obs',
+      input_events: [{ type: 'user.message', content: 'hello cli observability' }],
+    }, { send: async () => {} }, sessionStore);
+  });
+
+  assert.equal(spawnCall.command, '/usr/local/bin/claude');
+  assert.deepEqual(spawnCall.args, ['--output-format', 'stream-json']);
+  assert.equal(spawnCall.options.cwd, '/workspace');
+  assert.deepEqual(spawnCall.options.stdio, ['pipe', 'pipe', 'ignore']);
+  assert.equal(spawnCall.options.windowsHide, true);
+
+  const spawnStartingLog = logs.find((entry) => entry.msg === 'claude cli spawn starting');
+  assert.equal(spawnStartingLog.session_id, 'sesn_cli_obs');
+  assert.equal(spawnStartingLog.run_id, 'run_cli_obs');
+  assert.equal(spawnStartingLog.command, '/usr/local/bin/claude');
+  assert.equal(spawnStartingLog.args_count, 2);
+  assert.equal(spawnStartingLog.stderr_mode, 'ignore');
+
+  const spawnReturnedLog = logs.find((entry) => entry.msg === 'claude cli spawn returned');
+  assert.equal(spawnReturnedLog.pid, 4321);
+  assert.equal(typeof spawnReturnedLog.spawn_elapsed_ms, 'number');
+
+  const stdinFirstWriteLog = logs.find((entry) => entry.msg === 'claude cli stdin first write');
+  assert.equal(stdinFirstWriteLog.pid, 4321);
+  assert.equal(stdinFirstWriteLog.line_is_json, true);
+  assert.equal(stdinFirstWriteLog.line_type, 'user');
+  assert.equal(stdinFirstWriteLog.line_subtype, null);
+  assert.ok(stdinFirstWriteLog.input_bytes > 0);
+
+  const stdoutFirstByteLog = logs.find((entry) => entry.msg === 'claude cli stdout first byte');
+  assert.equal(stdoutFirstByteLog.pid, 4321);
+  assert.ok(stdoutFirstByteLog.chunk_bytes > 0);
+
+  const stdoutFirstLineLog = logs.find((entry) => entry.msg === 'claude cli stdout first line');
+  assert.equal(stdoutFirstLineLog.pid, 4321);
+  assert.equal(stdoutFirstLineLog.line_is_json, true);
+  assert.equal(stdoutFirstLineLog.line_type, 'system');
+  assert.equal(stdoutFirstLineLog.line_subtype, 'init');
+  assert.ok(stdoutFirstLineLog.line_bytes > 0);
 });
 
 test('ClaudeRuntime logs Claude SDK skill preload metadata from init events', async () => {

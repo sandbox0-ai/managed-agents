@@ -17,6 +17,32 @@ import {
   sessionErrorEventForMessage,
 } from './runtime.js';
 
+function elapsedMsSince(startedAtMs) {
+  if (typeof startedAtMs !== 'number' || !Number.isFinite(startedAtMs)) {
+    return null;
+  }
+  return Math.max(0, Date.now() - startedAtMs);
+}
+
+function codexTimingFields(session, run, startedAtMs, extra = {}) {
+  return {
+    session_id: session?.session_id ?? null,
+    run_id: run?.run_id ?? null,
+    vendor_session_id: session?.vendor_session_id ?? null,
+    elapsed_ms: elapsedMsSince(startedAtMs),
+    ...extra,
+  };
+}
+
+function codexUserVisibleEventType(payload) {
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  const event = events.find((entry) => {
+    const type = String(entry?.type ?? '');
+    return type.startsWith('agent.') || type === 'session.error' || type === 'session.status_idle';
+  });
+  return event?.type ?? null;
+}
+
 export class CodexRuntime extends AgentRuntime {
   constructor({ clientFactory } = {}) {
     super('codex');
@@ -28,14 +54,19 @@ export class CodexRuntime extends AgentRuntime {
   }
 
   async prestartSession(session) {
-    await this.#clientForSession(session);
+    await this.#clientForSession(session, { source: 'prestart' });
   }
 
   async startRun(session, run, callbackClient, sessionStore) {
+    const runStartedAtMs = Date.now();
     let currentSession = session;
     const bootstrapEvents = Array.isArray(session.bootstrap_events)
       ? session.bootstrap_events.filter((event) => event && typeof event === 'object')
       : [];
+    logInfo('codex run starting', codexTimingFields(currentSession, run, runStartedAtMs, {
+      bootstrap_event_count: bootstrapEvents.length,
+      has_client: this.clients.has(currentSession.session_id),
+    }));
     if (bootstrapEvents.length > 0) {
       await callbackClient.send(currentSession, {
         session_id: currentSession.session_id,
@@ -50,8 +81,8 @@ export class CodexRuntime extends AgentRuntime {
       }));
     }
 
-    const client = await this.#clientForSession(currentSession);
-    currentSession = await this.#ensureThread(client, currentSession, sessionStore);
+    const client = await this.#clientForSession(currentSession, { source: 'run', run, startedAtMs: runStartedAtMs });
+    currentSession = await this.#ensureThread(client, currentSession, sessionStore, { run, startedAtMs: runStartedAtMs });
     const modelRequestStartID = newEventID('span');
     await callbackClient.send(currentSession, {
       session_id: currentSession.session_id,
@@ -61,10 +92,19 @@ export class CodexRuntime extends AgentRuntime {
     });
 
     const turnRef = { threadID: currentSession.vendor_session_id, turnID: null };
-    const watcher = this.#watchTurn(client, currentSession, run, callbackClient, sessionStore, modelRequestStartID, turnRef);
+    const watcher = this.#watchTurn(client, currentSession, run, callbackClient, sessionStore, modelRequestStartID, turnRef, { startedAtMs: runStartedAtMs });
     try {
+      const turnStartStartedAtMs = Date.now();
+      logInfo('codex turn starting', codexTimingFields(currentSession, run, runStartedAtMs, {
+        thread_id: turnRef.threadID,
+      }));
       const response = await client.request('turn/start', buildTurnStartParams(currentSession, run));
       turnRef.turnID = String(response?.turn?.id ?? '');
+      logInfo('codex turn start returned', codexTimingFields(currentSession, run, runStartedAtMs, {
+        thread_id: turnRef.threadID,
+        turn_id: turnRef.turnID,
+        request_elapsed_ms: elapsedMsSince(turnStartStartedAtMs),
+      }));
       this.activeRuns.set(run.run_id, {
         client,
         sessionID: currentSession.session_id,
@@ -213,15 +253,29 @@ export class CodexRuntime extends AgentRuntime {
     return response;
   }
 
-  async #clientForSession(session) {
+  async #clientForSession(session, { source = 'run', run = null, startedAtMs = null } = {}) {
     const existing = this.clients.get(session.session_id);
     if (existing) {
+      logInfo('codex app-server client reused', codexTimingFields(session, run, startedAtMs, {
+        source,
+      }));
       return existing;
     }
     const client = this.clientFactory(session);
     if (!(client instanceof EventEmitter) && typeof client.on !== 'function') {
       throw new Error('codex client must provide EventEmitter-compatible on/off methods');
     }
+    client.on?.('observe', ({ msg, fields }) => {
+      const observed = fields && typeof fields === 'object' && !Array.isArray(fields) ? { ...fields } : {};
+      if (Object.prototype.hasOwnProperty.call(observed, 'elapsed_ms')) {
+        observed.app_server_elapsed_ms = observed.elapsed_ms;
+        delete observed.elapsed_ms;
+      }
+      logInfo(msg, codexTimingFields(session, run, startedAtMs, {
+        source,
+        ...observed,
+      }));
+    });
     client.on?.('stderr', (line) => {
       logWarn('codex app-server stderr', {
         session_id: session.session_id,
@@ -229,35 +283,77 @@ export class CodexRuntime extends AgentRuntime {
         data: line,
       });
     });
+    const startStartedAtMs = Date.now();
+    logInfo('codex app-server client starting', codexTimingFields(session, run, startedAtMs, {
+      source,
+    }));
     await client.start?.();
+    logInfo('codex app-server client started', codexTimingFields(session, run, startedAtMs, {
+      source,
+      request_elapsed_ms: elapsedMsSince(startStartedAtMs),
+    }));
     this.clients.set(session.session_id, client);
     return client;
   }
 
-  async #ensureThread(client, session, sessionStore) {
+  async #ensureThread(client, session, sessionStore, { run = null, startedAtMs = null } = {}) {
     if (session.vendor_session_id) {
+      const resumeStartedAtMs = Date.now();
+      logInfo('codex thread resume starting', codexTimingFields(session, run, startedAtMs, {
+        thread_id: session.vendor_session_id,
+      }));
       await client.request('thread/resume', {
         threadId: session.vendor_session_id,
         ...buildThreadResumeParams(session),
       });
+      logInfo('codex thread resume returned', codexTimingFields(session, run, startedAtMs, {
+        thread_id: session.vendor_session_id,
+        request_elapsed_ms: elapsedMsSince(resumeStartedAtMs),
+      }));
       return session;
     }
+    const startStartedAtMs = Date.now();
+    logInfo('codex thread start starting', codexTimingFields(session, run, startedAtMs));
     const response = await client.request('thread/start', buildThreadStartParams(session));
     const threadID = String(response?.thread?.id ?? '').trim();
     if (!threadID) {
       throw new Error('codex app-server thread/start did not return thread.id');
     }
-    return sessionStore.persistSession((current) => ({
+    const nextSession = sessionStore.persistSession((current) => ({
       ...current,
       vendor_session_id: threadID,
       updated_at: new Date().toISOString(),
     }));
+    logInfo('codex thread start returned', codexTimingFields(nextSession, run, startedAtMs, {
+      thread_id: threadID,
+      request_elapsed_ms: elapsedMsSince(startStartedAtMs),
+    }));
+    return nextSession;
   }
 
-  #watchTurn(client, session, run, callbackClient, sessionStore, modelRequestStartID, turnRef) {
+  #watchTurn(client, session, run, callbackClient, sessionStore, modelRequestStartID, turnRef, { startedAtMs = null } = {}) {
     let usage = null;
     let sawCodexEvent = false;
+    let firstNotificationLogged = false;
+    let firstCodexEventLogged = false;
+    let firstUserVisibleLogged = false;
+    let firstServerRequestLogged = false;
     let cleanup = () => {};
+    const logFirstUserVisible = (latestSession, payload) => {
+      if (firstUserVisibleLogged) {
+        return;
+      }
+      const eventType = codexUserVisibleEventType(payload);
+      if (!eventType) {
+        return;
+      }
+      firstUserVisibleLogged = true;
+      logInfo('codex first user-visible event', codexTimingFields(latestSession, run, startedAtMs, {
+        thread_id: turnRef.threadID,
+        turn_id: turnRef.turnID,
+        event_type: eventType,
+      }));
+    };
     const promise = new Promise((resolve, reject) => {
       cleanup = () => {
         client.off?.('notification', onNotification);
@@ -278,8 +374,20 @@ export class CodexRuntime extends AgentRuntime {
           if (!notificationMatchesTurn(message, turnRef)) {
             return;
           }
+          if (!firstNotificationLogged) {
+            firstNotificationLogged = true;
+            logInfo('codex first notification', codexTimingFields(sessionStore.getSession?.() ?? session, run, startedAtMs, {
+              thread_id: turnRef.threadID,
+              turn_id: turnRef.turnID,
+              method: message.method ?? null,
+            }));
+          }
           if (message.method === 'turn/started') {
             turnRef.turnID = String(message.params?.turn?.id ?? turnRef.turnID ?? '');
+            logInfo('codex turn started notification', codexTimingFields(sessionStore.getSession?.() ?? session, run, startedAtMs, {
+              thread_id: turnRef.threadID,
+              turn_id: turnRef.turnID,
+            }));
             return;
           }
           if (message.method === 'thread/tokenUsage/updated') {
@@ -289,10 +397,21 @@ export class CodexRuntime extends AgentRuntime {
           if (isCodexEventNotification(message)) {
             sawCodexEvent = true;
             const event = codexEventFromNotification(message);
+            if (!firstCodexEventLogged) {
+              firstCodexEventLogged = true;
+              logInfo('codex first codex event', codexTimingFields(sessionStore.getSession?.() ?? session, run, startedAtMs, {
+                thread_id: turnRef.threadID,
+                turn_id: turnRef.turnID,
+                event_type: event?.type ?? null,
+                method: message.method ?? null,
+              }));
+            }
             usage = codexEventUsage(event) ?? usage;
             const payload = this.#mapCodexEvent(sessionStore.getSession?.() ?? session, run, event);
             if (payload) {
-              await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
+              const latestSession = sessionStore.getSession?.() ?? session;
+              logFirstUserVisible(latestSession, payload);
+              await callbackClient.send(latestSession, payload);
             }
             const terminalPayload = buildCodexEventTerminalPayload(
               sessionStore.getSession?.() ?? session,
@@ -302,7 +421,9 @@ export class CodexRuntime extends AgentRuntime {
               usage,
             );
             if (terminalPayload) {
-              await callbackClient.send(sessionStore.getSession?.() ?? session, terminalPayload);
+              const latestSession = sessionStore.getSession?.() ?? session;
+              logFirstUserVisible(latestSession, terminalPayload);
+              await callbackClient.send(latestSession, terminalPayload);
               cleanup();
               resolve();
             }
@@ -310,14 +431,18 @@ export class CodexRuntime extends AgentRuntime {
           }
           const payload = this.#mapNotification(sessionStore.getSession?.() ?? session, run, message);
           if (payload) {
-            await callbackClient.send(sessionStore.getSession?.() ?? session, payload);
+            const latestSession = sessionStore.getSession?.() ?? session;
+            logFirstUserVisible(latestSession, payload);
+            await callbackClient.send(latestSession, payload);
           }
           if (message.method === 'turn/completed') {
             if (sawCodexEvent) {
               return;
             }
             const latestSession = sessionStore.getSession?.() ?? session;
-            await callbackClient.send(latestSession, buildTurnCompletedPayload(latestSession, run, message.params?.turn, modelRequestStartID, usage));
+            const payload = buildTurnCompletedPayload(latestSession, run, message.params?.turn, modelRequestStartID, usage);
+            logFirstUserVisible(latestSession, payload);
+            await callbackClient.send(latestSession, payload);
             cleanup();
             resolve();
           }
@@ -330,8 +455,23 @@ export class CodexRuntime extends AgentRuntime {
         if (!serverRequestMatchesTurn(message, turnRef)) {
           return;
         }
+        if (!firstServerRequestLogged) {
+          firstServerRequestLogged = true;
+          logInfo('codex first server request', codexTimingFields(sessionStore.getSession?.() ?? session, run, startedAtMs, {
+            thread_id: turnRef.threadID,
+            turn_id: turnRef.turnID,
+            method: message.method ?? null,
+          }));
+        }
         try {
-          const result = await this.#handleServerRequest(sessionStore.getSession?.() ?? session, run, callbackClient, sessionStore, message);
+          const result = await this.#handleServerRequest(
+            sessionStore.getSession?.() ?? session,
+            run,
+            callbackClient,
+            sessionStore,
+            message,
+            logFirstUserVisible,
+          );
           client.respond(message.id, result);
         } catch (error) {
           client.respondError(message.id, error);
@@ -375,21 +515,21 @@ export class CodexRuntime extends AgentRuntime {
     };
   }
 
-  async #handleServerRequest(session, run, callbackClient, sessionStore, message) {
+  async #handleServerRequest(session, run, callbackClient, sessionStore, message, observePayload = null) {
     switch (message.method) {
       case 'item/commandExecution/requestApproval':
-        return this.#handleToolConfirmation(session, run, callbackClient, sessionStore, message, 'bash');
+        return this.#handleToolConfirmation(session, run, callbackClient, sessionStore, message, 'bash', observePayload);
       case 'item/fileChange/requestApproval':
-        return this.#handleToolConfirmation(session, run, callbackClient, sessionStore, message, 'edit');
+        return this.#handleToolConfirmation(session, run, callbackClient, sessionStore, message, 'edit', observePayload);
       case 'item/tool/call':
-        return this.#handleCustomToolCall(session, run, callbackClient, sessionStore, message);
+        return this.#handleCustomToolCall(session, run, callbackClient, sessionStore, message, observePayload);
       default:
         logWarn('unsupported codex server request', { method: message.method });
         return {};
     }
   }
 
-  async #handleToolConfirmation(session, run, callbackClient, sessionStore, message, toolName) {
+  async #handleToolConfirmation(session, run, callbackClient, sessionStore, message, toolName, observePayload = null) {
     const params = message.params ?? {};
     const actionID = firstNonEmptyString(params.approvalId, params.itemId, newEventID('toolu'));
     const input = toolInputForApproval(params, toolName, actionID);
@@ -411,14 +551,16 @@ export class CodexRuntime extends AgentRuntime {
     rememberToolUse(this, session.session_id, params.itemId, actionID);
     if (!this.wasToolUseEmitted(session.session_id, actionID)) {
       this.markToolUseEmitted(session.session_id, actionID);
-      await callbackClient.send(session, {
+      const payload = {
         session_id: session.session_id,
         run_id: run.run_id,
         vendor_session_id: session.vendor_session_id,
         events: evaluatedPermission === 'ask'
           ? [toolUseEvent(input, actionID, evaluatedPermission), requiresActionEvent(actionID)]
           : [toolUseEvent(input, actionID, evaluatedPermission)],
-      });
+      };
+      observePayload?.(session, payload);
+      await callbackClient.send(session, payload);
     }
     if (!resolvedTool.enabled) {
       return { decision: 'cancel' };
@@ -444,7 +586,7 @@ export class CodexRuntime extends AgentRuntime {
     }, sessionStore).promise;
   }
 
-  async #handleCustomToolCall(session, run, callbackClient, sessionStore, message) {
+  async #handleCustomToolCall(session, run, callbackClient, sessionStore, message, observePayload = null) {
     const params = message.params ?? {};
     const actionID = firstNonEmptyString(params.callId, newEventID('ctoolu'));
     const toolName = firstNonEmptyString(params.tool, 'custom_tool');
@@ -460,7 +602,7 @@ export class CodexRuntime extends AgentRuntime {
         name: toolName,
       },
     }, sessionStore);
-    await callbackClient.send(session, {
+    const payload = {
       session_id: session.session_id,
       run_id: run.run_id,
       vendor_session_id: session.vendor_session_id,
@@ -468,7 +610,9 @@ export class CodexRuntime extends AgentRuntime {
         { type: 'agent.custom_tool_use', id: actionID, name: toolName, input: asStruct(params.arguments) },
         requiresActionEvent(actionID),
       ],
-    });
+    };
+    observePayload?.(session, payload);
+    await callbackClient.send(session, payload);
     return pending.promise;
   }
 
