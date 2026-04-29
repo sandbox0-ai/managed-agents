@@ -52,6 +52,11 @@ func TestLoadTemplateRequest(t *testing.T) {
 	if envVars["AGENT_WRAPPER_STATE_DIR"] != "/workspace/.sandbox0/agent-wrapper" {
 		t.Fatalf("WarmProcesses[0].EnvVars[AGENT_WRAPPER_STATE_DIR] = %q, want workspace state directory", envVars["AGENT_WRAPPER_STATE_DIR"])
 	}
+	for _, key := range []string{"DEBUG_CLAUDE_AGENT_SDK", "CLAUDE_CODE_PROFILE_QUERY", "CLAUDE_CODE_PROFILE_STARTUP"} {
+		if envVars[key] != "1" {
+			t.Fatalf("WarmProcesses[0].EnvVars[%s] = %q, want 1", key, envVars[key])
+		}
+	}
 	if _, ok := envVars["PATH"]; ok {
 		t.Fatal("WarmProcesses[0].EnvVars should inherit PATH from the image")
 	}
