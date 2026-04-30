@@ -7,12 +7,17 @@ import (
 	"strings"
 )
 
-func bootstrapStateDigestFor(record *SessionRecord, engine map[string]any, runtime *RuntimeRecord) (string, error) {
+type bootstrapVaultCredentialState struct {
+	VaultID     string           `json:"vault_id"`
+	Credentials []map[string]any `json:"credentials"`
+}
+
+func bootstrapStateDigestFor(record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, vaultCredentials []bootstrapVaultCredentialState) (string, error) {
 	if record == nil || runtime == nil {
 		return "", nil
 	}
 	payload := map[string]any{
-		"schema":                  1,
+		"schema":                  2,
 		"session_id":              strings.TrimSpace(record.ID),
 		"vendor":                  strings.TrimSpace(record.Vendor),
 		"sandbox_id":              strings.TrimSpace(runtime.SandboxID),
@@ -24,6 +29,7 @@ func bootstrapStateDigestFor(record *SessionRecord, engine map[string]any, runti
 		"agent":                   record.Agent,
 		"resources":               record.Resources,
 		"vault_ids":               record.VaultIDs,
+		"vault_credentials":       vaultCredentials,
 		"engine":                  engine,
 	}
 	data, err := json.Marshal(payload)
@@ -34,10 +40,10 @@ func bootstrapStateDigestFor(record *SessionRecord, engine map[string]any, runti
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func runtimeBootstrapCurrent(record *SessionRecord, engine map[string]any, runtime *RuntimeRecord) (bool, string, error) {
-	digest, err := bootstrapStateDigestFor(record, engine, runtime)
+func runtimeBootstrapCurrent(record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, vaultCredentials []bootstrapVaultCredentialState, forceSync bool) (bool, string, error) {
+	digest, err := bootstrapStateDigestFor(record, engine, runtime, vaultCredentials)
 	if err != nil || digest == "" {
 		return false, digest, err
 	}
-	return runtime.BootstrapSyncedAt != nil && strings.TrimSpace(runtime.BootstrapStateDigest) == digest, digest, nil
+	return !forceSync && runtime.BootstrapSyncedAt != nil && strings.TrimSpace(runtime.BootstrapStateDigest) == digest, digest, nil
 }

@@ -431,7 +431,7 @@ func TestSendEventsSkipsBootstrapWhenRuntimeStateIsCurrent(t *testing.T) {
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	digest, err := bootstrapStateDigestFor(record, engine, runtime)
+	digest, err := bootstrapStateDigestFor(record, engine, runtime, nil)
 	if err != nil {
 		t.Fatalf("bootstrapStateDigestFor: %v", err)
 	}
@@ -464,6 +464,200 @@ func TestSendEventsSkipsBootstrapWhenRuntimeStateIsCurrent(t *testing.T) {
 	}
 	if updatedRuntime.BootstrapStateDigest != digest {
 		t.Fatalf("bootstrap digest = %q, want %q", updatedRuntime.BootstrapStateDigest, digest)
+	}
+}
+
+func TestSendEventsBootstrapsWhenVaultCredentialUpdated(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{}
+	service := NewService(repo, runtimeManager, nil)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC)
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	vault := buildVaultObject("vlt_bootstrap_credential", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	displayName := "token"
+	credential := buildCredentialObject("vcrd_bootstrap_credential", vault.ID, CreateCredentialRequest{
+		DisplayName: &displayName,
+		Auth: map[string]any{
+			"type":           "static_bearer",
+			"token":          "secret-token",
+			"mcp_server_url": "https://mcp.example.com/sse",
+		},
+	}, now, nil)
+	secret := map[string]any{
+		"type":           "static_bearer",
+		"token":          "secret-token",
+		"mcp_server_url": "https://mcp.example.com/sse",
+	}
+	if err := repo.CreateCredential(ctx, principal.TeamID, vault.ID, credential, secret, nil, now); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	record := &SessionRecord{
+		ID:               "sesn_bootstrap_credential_123",
+		TeamID:           principal.TeamID,
+		CreatedByUserID:  principal.UserID,
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{vault.ID},
+		Status:           "idle",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	engine := map[string]any{}
+	if err := repo.CreateSession(ctx, record, engine); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	runtime := &RuntimeRecord{
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	vaultState, forceSync, err := service.bootstrapVaultCredentialState(ctx, record, now)
+	if err != nil {
+		t.Fatalf("bootstrapVaultCredentialState: %v", err)
+	}
+	if forceSync {
+		t.Fatal("forceSync = true, want false")
+	}
+	digest, err := bootstrapStateDigestFor(record, engine, runtime, vaultState)
+	if err != nil {
+		t.Fatalf("bootstrapStateDigestFor: %v", err)
+	}
+	runtime.BootstrapStateDigest = digest
+	runtime.BootstrapSyncedAt = &now
+	if err := repo.UpsertRuntime(ctx, runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	runtimeManager.ensureRuntime = runtime
+
+	credential.UpdatedAt = nowRFC3339(now.Add(time.Minute))
+	secret["token"] = "rotated-token"
+	if err := repo.UpdateCredential(ctx, principal.TeamID, vault.ID, credential.ID, &credential, secret, nil, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateCredential: %v", err)
+	}
+
+	_, err = service.SendEvents(ctx, principal, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{
+		Type:    "user.message",
+		Content: []UserContentBlock{{Type: "text", Text: "hello"}},
+	}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(runtimeManager.bootstrapReqs) != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", len(runtimeManager.bootstrapReqs))
+	}
+	if len(runtimeManager.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtimeManager.startRunReqs))
+	}
+	updatedRuntime, err := repo.GetRuntime(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("GetRuntime: %v", err)
+	}
+	if updatedRuntime.BootstrapStateDigest == digest {
+		t.Fatal("bootstrap digest did not change after credential update")
+	}
+}
+
+func TestSendEventsBootstrapsWhenMcpOAuthCredentialExpiresSoon(t *testing.T) {
+	repo := newTestRepository(t)
+	runtimeManager := &recordingRuntimeManager{}
+	service := NewService(repo, runtimeManager, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	principal := Principal{TeamID: "team_123", UserID: "user_123"}
+	vault := buildVaultObject("vlt_bootstrap_oauth", CreateVaultRequest{DisplayName: "runtime"}, now, nil)
+	if err := repo.CreateVault(ctx, principal.TeamID, vault, nil, now); err != nil {
+		t.Fatalf("CreateVault: %v", err)
+	}
+	expiresAt := now.Add(5 * time.Second).UTC().Format(time.RFC3339)
+	credential := buildCredentialObject("vcrd_bootstrap_oauth", vault.ID, CreateCredentialRequest{
+		Auth: map[string]any{
+			"type":           "mcp_oauth",
+			"access_token":   "access-token",
+			"mcp_server_url": "https://oauth-mcp.example.com/sse",
+			"expires_at":     expiresAt,
+		},
+	}, now, nil)
+	secret := map[string]any{
+		"type":           "mcp_oauth",
+		"access_token":   "access-token",
+		"mcp_server_url": "https://oauth-mcp.example.com/sse",
+		"expires_at":     expiresAt,
+	}
+	if err := repo.CreateCredential(ctx, principal.TeamID, vault.ID, credential, secret, nil, now); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+	record := &SessionRecord{
+		ID:               "sesn_bootstrap_oauth_123",
+		TeamID:           principal.TeamID,
+		CreatedByUserID:  principal.UserID,
+		Vendor:           "claude",
+		EnvironmentID:    "env_123",
+		WorkingDirectory: "/workspace",
+		Agent:            map[string]any{"id": "agent_123", "type": "agent"},
+		Resources:        []map[string]any{},
+		VaultIDs:         []string{vault.ID},
+		Status:           "idle",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	engine := map[string]any{}
+	if err := repo.CreateSession(ctx, record, engine); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	runtime := &RuntimeRecord{
+		SessionID:         record.ID,
+		Vendor:            "claude",
+		RegionID:          "test-region",
+		SandboxID:         "sbx_123",
+		WorkspaceVolumeID: "vol_workspace",
+		ControlToken:      "ctl_123",
+		RuntimeGeneration: 1,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	vaultState, forceSync, err := service.bootstrapVaultCredentialState(ctx, record, now)
+	if err != nil {
+		t.Fatalf("bootstrapVaultCredentialState: %v", err)
+	}
+	if !forceSync {
+		t.Fatal("forceSync = false, want true")
+	}
+	digest, err := bootstrapStateDigestFor(record, engine, runtime, vaultState)
+	if err != nil {
+		t.Fatalf("bootstrapStateDigestFor: %v", err)
+	}
+	runtime.BootstrapStateDigest = digest
+	runtime.BootstrapSyncedAt = &now
+	if err := repo.UpsertRuntime(ctx, runtime); err != nil {
+		t.Fatalf("UpsertRuntime: %v", err)
+	}
+	runtimeManager.ensureRuntime = runtime
+
+	_, err = service.SendEvents(ctx, principal, RequestCredential{Token: "token_123"}, record.ID, SendEventsParams{Events: []InputEvent{{
+		Type:    "user.message",
+		Content: []UserContentBlock{{Type: "text", Text: "hello"}},
+	}}}, "http://gateway.test")
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if len(runtimeManager.bootstrapReqs) != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", len(runtimeManager.bootstrapReqs))
+	}
+	if len(runtimeManager.startRunReqs) != 1 {
+		t.Fatalf("start run calls = %d, want 1", len(runtimeManager.startRunReqs))
 	}
 }
 

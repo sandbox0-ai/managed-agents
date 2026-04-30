@@ -1153,7 +1153,11 @@ func (s *Service) bootstrapRuntimeSession(ctx context.Context, credential Reques
 }
 
 func (s *Service) bootstrapRuntimeSessionWithRequest(ctx context.Context, credential RequestCredential, record *SessionRecord, engine map[string]any, runtime *RuntimeRecord, req *WrapperSessionBootstrapRequest) (bool, error) {
-	current, digest, err := runtimeBootstrapCurrent(record, engine, runtime)
+	vaultCredentialState, forceSync, err := s.bootstrapVaultCredentialState(ctx, record, time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
+	current, digest, err := runtimeBootstrapCurrent(record, engine, runtime, vaultCredentialState, forceSync)
 	if err != nil {
 		return false, err
 	}
@@ -1173,6 +1177,56 @@ func (s *Service) bootstrapRuntimeSessionWithRequest(ctx context.Context, creden
 		}
 	}
 	return true, nil
+}
+
+const bootstrapMcpOAuthRefreshLeadTime = 30 * time.Second
+
+func (s *Service) bootstrapVaultCredentialState(ctx context.Context, record *SessionRecord, now time.Time) ([]bootstrapVaultCredentialState, bool, error) {
+	if record == nil || len(record.VaultIDs) == 0 {
+		return nil, false, nil
+	}
+	out := make([]bootstrapVaultCredentialState, 0, len(record.VaultIDs))
+	forceSync := false
+	for _, vaultID := range record.VaultIDs {
+		vaultID = strings.TrimSpace(vaultID)
+		if vaultID == "" {
+			continue
+		}
+		credentials, err := s.repo.ListActiveCredentialsForVault(ctx, record.TeamID, vaultID)
+		if err != nil {
+			return nil, false, err
+		}
+		state := bootstrapVaultCredentialState{
+			VaultID:     vaultID,
+			Credentials: make([]map[string]any, 0, len(credentials)),
+		}
+		for _, credential := range credentials {
+			snapshot := credential.Snapshot
+			auth := credentialAuthToMap(snapshot.Auth)
+			state.Credentials = append(state.Credentials, map[string]any{
+				"id":          strings.TrimSpace(snapshot.ID),
+				"updated_at":  strings.TrimSpace(snapshot.UpdatedAt),
+				"archived_at": snapshot.ArchivedAt,
+				"auth":        auth,
+			})
+			if credentialMcpOAuthRefreshDue(auth, now) {
+				forceSync = true
+			}
+		}
+		out = append(out, state)
+	}
+	return out, forceSync, nil
+}
+
+func credentialMcpOAuthRefreshDue(auth map[string]any, now time.Time) bool {
+	if strings.TrimSpace(stringValue(auth["type"])) != "mcp_oauth" {
+		return false
+	}
+	expiresAt := parseTimestampPointer(nullableStringFromAny(auth["expires_at"]))
+	if expiresAt == nil {
+		return false
+	}
+	return !expiresAt.After(now.Add(bootstrapMcpOAuthRefreshLeadTime))
 }
 
 func runtimeSandboxIDForLog(runtime *RuntimeRecord) string {
