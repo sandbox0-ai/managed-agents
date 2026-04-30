@@ -149,7 +149,51 @@ jobs:
 
       - name: Wait for rollout
         shell: bash
-        run: kubectl -n "${KUBE_NAMESPACE}" rollout status deploy/${HELM_RELEASE}-agent-gateway --timeout=5m
+        run: |
+          set -euo pipefail
+
+          deployment="${HELM_RELEASE}-agent-gateway"
+          if kubectl -n "${KUBE_NAMESPACE}" rollout status "deploy/${deployment}" --timeout=10m; then
+            exit 0
+          fi
+
+          echo "::group::Rollout diagnostics"
+          kubectl -n "${KUBE_NAMESPACE}" get deploy "${deployment}" -o wide || true
+          kubectl -n "${KUBE_NAMESPACE}" describe deploy "${deployment}" || true
+          selector="$(
+            kubectl -n "${KUBE_NAMESPACE}" get deploy "${deployment}" -o json \
+              | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")'
+          )"
+          if [[ -n "${selector}" ]]; then
+            kubectl -n "${KUBE_NAMESPACE}" get rs,pods -l "${selector}" -o wide || true
+            kubectl -n "${KUBE_NAMESPACE}" logs "deploy/${deployment}" --all-containers --tail=200 || true
+          fi
+          echo "::endgroup::"
+
+          deploy_json="$(kubectl -n "${KUBE_NAMESPACE}" get deploy "${deployment}" -o json)"
+          desired="$(jq -r '.spec.replicas // 1' <<<"${deploy_json}")"
+          generation="$(jq -r '.metadata.generation' <<<"${deploy_json}")"
+          observed="$(jq -r '.status.observedGeneration // 0' <<<"${deploy_json}")"
+          updated="$(jq -r '.status.updatedReplicas // 0' <<<"${deploy_json}")"
+          available="$(jq -r '.status.availableReplicas // 0' <<<"${deploy_json}")"
+
+          if [[ "${observed}" != "${generation}" || "${updated}" -lt "${desired}" || "${available}" -lt "${desired}" ]]; then
+            echo "Deployment has not reached the desired updated/available replica count."
+            exit 1
+          fi
+
+          terminating_pods="$(
+            kubectl -n "${KUBE_NAMESPACE}" get pods -l "${selector}" -o json \
+              | jq -r '.items[] | select(.metadata.deletionTimestamp != null) | .metadata.name'
+          )"
+          if [[ -z "${terminating_pods}" ]]; then
+            echo "Deployment is updated and available, but no terminating old pods were found to clean up."
+            exit 1
+          fi
+
+          echo "${terminating_pods}" \
+            | xargs -r kubectl -n "${KUBE_NAMESPACE}" delete pod --force --grace-period=0
+          kubectl -n "${KUBE_NAMESPACE}" rollout status "deploy/${deployment}" --timeout=5m
 
       - name: Smoke health endpoint
         if: ${{ vars.MANAGED_AGENTS_INGRESS_HOST != '' }}
