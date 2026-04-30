@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { inputEventsToSDKUserMessages } from '../lib/prompt.js';
@@ -18,6 +19,7 @@ import {
 const MAIN_AGENT_NAME = 'managed-agent';
 const MAIN_AGENT_DESCRIPTION = 'Primary Sandbox0 Managed Agents coding session.';
 const DEFAULT_MAIN_AGENT_PROMPT = 'You are a concise coding copilot running inside a Sandbox0 Managed Agents sandbox.';
+const requireFromHere = createRequire(import.meta.url);
 
 export {
   finalStatusEventForSessionError,
@@ -73,6 +75,24 @@ export function claudeExtraArgsForSession(session) {
     : {};
   delete extraArgs.bare;
   return extraArgs;
+}
+
+export function defaultClaudeCodeExecutablePath({
+  platform = process.platform,
+  arch = process.arch,
+  glibcVersionRuntime = process.report?.getReport?.().header?.glibcVersionRuntime,
+  resolvePackage = requireFromHere.resolve,
+} = {}) {
+  if (platform !== 'linux' || (arch !== 'x64' && arch !== 'arm64')) {
+    return undefined;
+  }
+
+  const libcSuffix = glibcVersionRuntime ? '' : '-musl';
+  try {
+    return resolvePackage(`@anthropic-ai/claude-agent-sdk-linux-${arch}${libcSuffix}/claude`);
+  } catch {
+    return undefined;
+  }
 }
 
 export function claudeToolsForSession(session, sdkTools) {
@@ -752,7 +772,7 @@ export class ClaudeRuntime extends AgentRuntime {
       permissionMode: engine.permission_mode ?? 'default',
       allowDangerouslySkipPermissions: false,
       ...claudeAgentContextOptions(session),
-      pathToClaudeCodeExecutable: engine.path_to_claude_code_executable,
+      pathToClaudeCodeExecutable: engine.path_to_claude_code_executable ?? defaultClaudeCodeExecutablePath(),
       maxTurns: engine.max_turns,
       mcpServers: mergeMcpServers(mcpServersFromAgent(session.agent?.mcp_servers), engine.mcp_servers, customTools.mcpServers),
       tools: claudeToolsForSession(session, toolPlan.builtinSDKTools),
