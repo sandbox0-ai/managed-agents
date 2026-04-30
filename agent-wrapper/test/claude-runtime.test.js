@@ -13,6 +13,7 @@ import {
   claudeExtraArgsForSession,
   claudeSettingSourcesForSession,
   claudeToolsForSession,
+  defaultClaudeCodeExecutablePath,
   finalStatusEventForSessionError,
   mcpServersFromAgent,
   providerErrorEventForText,
@@ -1151,6 +1152,32 @@ test('claudeExtraArgsForSession removes bare mode', () => {
 
   assert.deepEqual(result, { workload: 'managed-agents' });
   assert.deepEqual(extraArgs, { bare: null, workload: 'managed-agents' });
+});
+
+test('defaultClaudeCodeExecutablePath selects the Linux glibc native package when available', () => {
+  assert.equal(defaultClaudeCodeExecutablePath({
+    platform: 'linux',
+    arch: 'x64',
+    glibcVersionRuntime: '2.35',
+    resolvePackage: (specifier) => `/mock/${specifier}`,
+  }), '/mock/@anthropic-ai/claude-agent-sdk-linux-x64/claude');
+});
+
+test('defaultClaudeCodeExecutablePath selects the Linux musl native package without glibc', () => {
+  assert.equal(defaultClaudeCodeExecutablePath({
+    platform: 'linux',
+    arch: 'arm64',
+    glibcVersionRuntime: null,
+    resolvePackage: (specifier) => `/mock/${specifier}`,
+  }), '/mock/@anthropic-ai/claude-agent-sdk-linux-arm64-musl/claude');
+});
+
+test('defaultClaudeCodeExecutablePath falls back to SDK resolution for unsupported platforms', () => {
+  assert.equal(defaultClaudeCodeExecutablePath({
+    platform: 'darwin',
+    arch: 'arm64',
+    resolvePackage: (specifier) => `/mock/${specifier}`,
+  }), undefined);
 });
 
 test('claudeToolsForSession enables the Claude Skill tool when skills are attached', () => {
