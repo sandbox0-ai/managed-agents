@@ -885,6 +885,32 @@ test('mcpServersFromAgent converts url MCP definitions into SDK config', () => {
   });
 });
 
+test('mcpServersFromAgent converts stdio MCP definitions into SDK config', () => {
+  const servers = mcpServersFromAgent([
+    {
+      type: 'stdio',
+      name: 'local_docs',
+      command: 'node',
+      args: ['./server.js', '--stdio'],
+      env: {
+        API_BASE_URL: 'https://api.example.com',
+        EMPTY: '',
+      },
+    },
+  ]);
+
+  assert.deepEqual(servers, {
+    local_docs: {
+      type: 'stdio',
+      command: 'node',
+      args: ['./server.js', '--stdio'],
+      env: {
+        API_BASE_URL: 'https://api.example.com',
+      },
+    },
+  });
+});
+
 test('buildToolPlan exposes built-in SDK tools from agent toolset defaults', () => {
   const plan = buildToolPlan([
     { type: 'agent_toolset_20260401' },

@@ -1748,15 +1748,41 @@ export function mcpServersFromAgent(definitions) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       continue;
     }
-    if (String(entry.type ?? '').trim() !== 'url') {
-      continue;
-    }
+    const type = String(entry.type ?? '').trim();
     const name = String(entry.name ?? '').trim();
-    const serverURL = String(entry.url ?? '').trim();
-    if (!name || !serverURL) {
+    if (!name) {
       continue;
     }
-    servers[name] = mcpServerConfigForURL(serverURL);
+    if (type === 'url') {
+      const serverURL = String(entry.url ?? '').trim();
+      if (!serverURL) {
+        continue;
+      }
+      servers[name] = mcpServerConfigForURL(serverURL);
+    } else if (type === 'stdio') {
+      const command = String(entry.command ?? '').trim();
+      if (!command) {
+        continue;
+      }
+      const config = { type: 'stdio', command };
+      if (Array.isArray(entry.args) && entry.args.length > 0) {
+        config.args = entry.args.map((arg) => String(arg ?? '').trim()).filter((arg) => arg !== '');
+      }
+      if (entry.env && typeof entry.env === 'object' && !Array.isArray(entry.env)) {
+        const env = {};
+        for (const [key, value] of Object.entries(entry.env)) {
+          const normalizedKey = String(key ?? '').trim();
+          const normalizedValue = String(value ?? '').trim();
+          if (normalizedKey && normalizedValue) {
+            env[normalizedKey] = normalizedValue;
+          }
+        }
+        if (Object.keys(env).length > 0) {
+          config.env = env;
+        }
+      }
+      servers[name] = config;
+    }
   }
   return Object.keys(servers).length > 0 ? servers : undefined;
 }

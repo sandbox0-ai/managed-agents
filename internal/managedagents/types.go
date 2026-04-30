@@ -77,9 +77,12 @@ type AgentTool struct {
 }
 
 type MCPServer struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Type    string            `json:"type"`
+	Name    string            `json:"name"`
+	URL     string            `json:"url,omitempty"`
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 type AgentSkill struct {
@@ -823,7 +826,14 @@ func mcpServersFromAny(raw any) []MCPServer {
 	out := make([]MCPServer, 0, len(items))
 	for _, item := range items {
 		server := mapValue(item)
-		out = append(out, MCPServer{Type: stringValue(server["type"]), Name: stringValue(server["name"]), URL: stringValue(server["url"])})
+		out = append(out, MCPServer{
+			Type:    stringValue(server["type"]),
+			Name:    stringValue(server["name"]),
+			URL:     stringValue(server["url"]),
+			Command: stringValue(server["command"]),
+			Args:    stringSliceFromAny(server["args"]),
+			Env:     stringMapFromAny(server["env"]),
+		})
 	}
 	return out
 }

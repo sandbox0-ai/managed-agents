@@ -459,11 +459,20 @@ func normalizeMCPServer(raw any) (map[string]any, error) {
 		return nil, errors.New("mcp_servers entries must be objects")
 	}
 	server = cloneMap(server)
+	serverType := strings.TrimSpace(stringValue(server["type"]))
+	switch serverType {
+	case "url":
+		return normalizeURLMCPServer(server)
+	case "stdio":
+		return normalizeStdioMCPServer(server)
+	default:
+		return nil, errors.New("invalid mcp server type")
+	}
+}
+
+func normalizeURLMCPServer(server map[string]any) (map[string]any, error) {
 	if err := validateAllowedFields(server, []string{"type", "name", "url"}); err != nil {
 		return nil, err
-	}
-	if strings.TrimSpace(stringValue(server["type"])) != "url" {
-		return nil, errors.New("invalid mcp server type")
 	}
 	name, err := normalizeRequiredText(stringValue(server["name"]), "mcp server name", 255)
 	if err != nil {
@@ -477,6 +486,80 @@ func normalizeMCPServer(raw any) (map[string]any, error) {
 		return nil, errors.New("mcp server url must be a valid http or https url")
 	}
 	return map[string]any{"type": "url", "name": name, "url": serverURL}, nil
+}
+
+func normalizeStdioMCPServer(server map[string]any) (map[string]any, error) {
+	if err := validateAllowedFields(server, []string{"type", "name", "command", "args", "env"}); err != nil {
+		return nil, err
+	}
+	name, err := normalizeRequiredText(stringValue(server["name"]), "mcp server name", 255)
+	if err != nil {
+		return nil, err
+	}
+	command, err := normalizeRequiredText(stringValue(server["command"]), "mcp server command", 2048)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"type": "stdio", "name": name, "command": command}
+	if args, err := normalizeMCPServerStringArray(server["args"], "mcp server args", 128, 2048); err != nil {
+		return nil, err
+	} else if len(args) > 0 {
+		out["args"] = args
+	}
+	if env, err := normalizeMCPServerEnv(server["env"]); err != nil {
+		return nil, err
+	} else if len(env) > 0 {
+		out["env"] = env
+	}
+	return out, nil
+}
+
+func normalizeMCPServerStringArray(raw any, field string, maxItems, maxLen int) ([]any, error) {
+	if raw == nil {
+		return []any{}, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array", field)
+	}
+	if maxItems > 0 && len(items) > maxItems {
+		return nil, fmt.Errorf("%s supports at most %d entries", field, maxItems)
+	}
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		value, err := normalizeRequiredText(stringValue(item), field+" entry", maxLen)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, value)
+	}
+	return out, nil
+}
+
+func normalizeMCPServerEnv(raw any) (map[string]any, error) {
+	if raw == nil {
+		return map[string]any{}, nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New("mcp server env must be an object")
+	}
+	if len(values) > 128 {
+		return nil, errors.New("mcp server env supports at most 128 entries")
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		normalizedKey, err := normalizeRequiredText(key, "mcp server env key", 256)
+		if err != nil {
+			return nil, err
+		}
+		normalizedValue, err := normalizeRequiredText(stringValue(value), "mcp server env value", 8192)
+		if err != nil {
+			return nil, err
+		}
+		out[normalizedKey] = normalizedValue
+	}
+	return out, nil
 }
 
 func validateToolReferences(tools []any, mcpServerNames map[string]struct{}) error {

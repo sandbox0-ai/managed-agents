@@ -28,6 +28,24 @@ func TestCreateAgentRequestRejectsInvalidSkillDiscriminator(t *testing.T) {
 	}
 }
 
+func TestCreateAgentRequestAcceptsStdioMCPServer(t *testing.T) {
+	err := validateJSONBodyAgainstContractSchema("BetaManagedAgentsCreateAgentParams", []byte(`{
+		"name":"agent",
+		"model":"claude-sonnet-4-6",
+		"mcp_servers":[{
+			"type":"stdio",
+			"name":"local_docs",
+			"command":"node",
+			"args":["./server.js","--stdio"],
+			"env":{"API_BASE_URL":"https://api.example.com"}
+		}],
+		"tools":[{"type":"mcp_toolset","mcp_server_name":"local_docs"}]
+	}`))
+	if err != nil {
+		t.Fatalf("validate schema: %v", err)
+	}
+}
+
 func TestCreateCredentialRequestRejectsImmutableServerURLOnUpdateShape(t *testing.T) {
 	err := validateJSONBodyAgainstContractSchema("BetaManagedAgentsUpdateCredentialRequestBody", []byte(`{
 		"auth":{"type":"static_bearer","mcp_server_url":"https://example.com/sse"}

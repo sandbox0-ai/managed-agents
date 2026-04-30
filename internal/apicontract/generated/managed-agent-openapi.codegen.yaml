@@ -2838,19 +2838,59 @@ components:
             description: Union type for MCP server connection definitions returned in API responses.
             discriminator:
                 mapping:
+                    stdio: '#/components/schemas/BetaManagedAgentsMCPServerStdioDefinition'
                     url: '#/components/schemas/BetaManagedAgentsMCPServerURLDefinition'
                 propertyName: type
             oneOf:
+                - $ref: '#/components/schemas/BetaManagedAgentsMCPServerStdioDefinition'
                 - $ref: '#/components/schemas/BetaManagedAgentsMCPServerURLDefinition'
             type: object
         BetaManagedAgentsMCPServerParams:
             description: Union type for MCP server connection definitions.
             discriminator:
                 mapping:
+                    stdio: '#/components/schemas/BetaManagedAgentsStdioMCPServerParams'
                     url: '#/components/schemas/BetaManagedAgentsURLMCPServerParams'
                 propertyName: type
             oneOf:
+                - $ref: '#/components/schemas/BetaManagedAgentsStdioMCPServerParams'
                 - $ref: '#/components/schemas/BetaManagedAgentsURLMCPServerParams'
+            type: object
+        BetaManagedAgentsMCPServerStdioDefinition:
+            additionalProperties: false
+            description: Stdio-based local MCP server connection as returned in API responses.
+            example:
+                args:
+                    - ./server.js
+                    - --stdio
+                command: node
+                env:
+                    API_BASE_URL: https://api.example.com
+                name: local-mcp
+                type: stdio
+            properties:
+                args:
+                    items:
+                        type: string
+                    type: array
+                command:
+                    type: string
+                env:
+                    additionalProperties:
+                        type: string
+                    type: object
+                name:
+                    example: local-mcp
+                    type: string
+                type:
+                    enum:
+                        - stdio
+                    example: stdio
+                    type: string
+            required:
+                - type
+                - name
+                - command
             type: object
         BetaManagedAgentsMCPServerURLDefinition:
             additionalProperties: false
@@ -4432,6 +4472,56 @@ components:
             required:
                 - type
                 - url
+            type: object
+        BetaManagedAgentsStdioMCPServerParams:
+            additionalProperties: false
+            description: Stdio-based local MCP server connection.
+            example:
+                args:
+                    - ./server.js
+                    - --stdio
+                command: node
+                env:
+                    API_BASE_URL: https://api.example.com
+                name: local-mcp
+                type: stdio
+            properties:
+                args:
+                    description: Arguments passed to the MCP server command.
+                    items:
+                        maxLength: 2048
+                        minLength: 1
+                        type: string
+                    maxItems: 128
+                    type: array
+                command:
+                    description: Command used to launch the local MCP server process.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                env:
+                    additionalProperties:
+                        maxLength: 8192
+                        minLength: 1
+                        type: string
+                    description: Non-secret environment variables passed to the MCP server process.
+                    maxProperties: 128
+                    type: object
+                name:
+                    description: Unique name for this server, referenced by mcp_toolset configurations. 1-255 characters.
+                    example: local-mcp
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                type:
+                    enum:
+                        - stdio
+                    example: stdio
+                    type: string
+            required:
+                - type
+                - name
+                - command
             type: object
         BetaManagedAgentsURLMCPServerParams:
             additionalProperties: false

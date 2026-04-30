@@ -176,3 +176,36 @@ test('agents support string models, version retrieval, and update clearing seman
   assert.equal(latest.version, cleared.version);
   assert.deepEqual(latest.tools, []);
 });
+
+test('agents support stdio MCP server definitions', { skip: skipReason }, async (t) => {
+  const client = sdkClient();
+  const runID = suffix();
+  const cleanup = createCleanup();
+  t.after(() => cleanup.run());
+
+  const agent = await client.beta.agents.create(agentBody(runID, {
+    mcp_servers: [{
+      type: 'stdio',
+      name: 'local_docs',
+      command: 'node',
+      args: ['./server.js', '--stdio'],
+      env: { API_BASE_URL: 'https://api.example.com' },
+    }],
+    tools: [{
+      type: 'mcp_toolset',
+      mcp_server_name: 'local_docs',
+      default_config: {
+        enabled: true,
+        permission_policy: { type: 'always_ask' },
+      },
+    }],
+  }));
+  cleanup.add(() => client.beta.agents.archive(agent.id));
+
+  assert.equal(agent.mcp_servers.length, 1);
+  assert.equal(agent.mcp_servers[0].type, 'stdio');
+  assert.equal(agent.mcp_servers[0].name, 'local_docs');
+  assert.equal(agent.mcp_servers[0].command, 'node');
+  assert.deepEqual(agent.mcp_servers[0].args, ['./server.js', '--stdio']);
+  assert.equal(agent.mcp_servers[0].env.API_BASE_URL, 'https://api.example.com');
+});

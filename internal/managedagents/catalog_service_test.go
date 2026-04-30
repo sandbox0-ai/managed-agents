@@ -252,6 +252,41 @@ func TestValidateToolReferencesRequiresEveryMCPServerExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestNormalizeMCPServersSupportsStdio(t *testing.T) {
+	servers, names, err := normalizeMCPServers([]any{
+		map[string]any{
+			"type":    "stdio",
+			"name":    "local_docs",
+			"command": "node",
+			"args":    []any{"./server.js", "--stdio"},
+			"env": map[string]any{
+				"API_BASE_URL": "https://api.example.com",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeMCPServers: %v", err)
+	}
+	if _, ok := names["local_docs"]; !ok {
+		t.Fatalf("names = %#v, want local_docs", names)
+	}
+	server := mapValue(servers[0])
+	if got := stringValue(server["type"]); got != "stdio" {
+		t.Fatalf("type = %q, want stdio", got)
+	}
+	if got := stringValue(server["command"]); got != "node" {
+		t.Fatalf("command = %q, want node", got)
+	}
+	args := server["args"].([]any)
+	if len(args) != 2 || args[0] != "./server.js" || args[1] != "--stdio" {
+		t.Fatalf("args = %#v, want normalized args", args)
+	}
+	env := mapValue(server["env"])
+	if got := stringValue(env["API_BASE_URL"]); got != "https://api.example.com" {
+		t.Fatalf("env API_BASE_URL = %q, want normalized value", got)
+	}
+}
+
 func TestCanonicalMCPServerURLNormalizesForCredentialMatching(t *testing.T) {
 	got, err := CanonicalMCPServerURL("HTTPS://MCP.Example.com:443/sse/?b=2&a=1#ignored")
 	if err != nil {

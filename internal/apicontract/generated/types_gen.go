@@ -902,6 +902,21 @@ const (
 	BetaManagedAgentsMCPServerURLDefinitionTypeUrl BetaManagedAgentsMCPServerURLDefinitionType = "url"
 )
 
+// Defines values for BetaManagedAgentsMCPServerStdioDefinitionType.
+const (
+	BetaManagedAgentsMCPServerStdioDefinitionTypeStdio BetaManagedAgentsMCPServerStdioDefinitionType = "stdio"
+)
+
+// Valid indicates whether the value is a known member of the BetaManagedAgentsMCPServerStdioDefinitionType enum.
+func (e BetaManagedAgentsMCPServerStdioDefinitionType) Valid() bool {
+	switch e {
+	case BetaManagedAgentsMCPServerStdioDefinitionTypeStdio:
+		return true
+	default:
+		return false
+	}
+}
+
 // Valid indicates whether the value is a known member of the BetaManagedAgentsMCPServerURLDefinitionType enum.
 func (e BetaManagedAgentsMCPServerURLDefinitionType) Valid() bool {
 	switch e {
@@ -1588,6 +1603,21 @@ func (e BetaManagedAgentsURLImageSourceType) Valid() bool {
 const (
 	BetaManagedAgentsURLMCPServerParamsTypeUrl BetaManagedAgentsURLMCPServerParamsType = "url"
 )
+
+// Defines values for BetaManagedAgentsStdioMCPServerParamsType.
+const (
+	BetaManagedAgentsStdioMCPServerParamsTypeStdio BetaManagedAgentsStdioMCPServerParamsType = "stdio"
+)
+
+// Valid indicates whether the value is a known member of the BetaManagedAgentsStdioMCPServerParamsType enum.
+func (e BetaManagedAgentsStdioMCPServerParamsType) Valid() bool {
+	switch e {
+	case BetaManagedAgentsStdioMCPServerParamsTypeStdio:
+		return true
+	default:
+		return false
+	}
+}
 
 // Valid indicates whether the value is a known member of the BetaManagedAgentsURLMCPServerParamsType enum.
 func (e BetaManagedAgentsURLMCPServerParamsType) Valid() bool {
@@ -3219,6 +3249,18 @@ type BetaManagedAgentsMCPServerParams struct {
 	union json.RawMessage
 }
 
+// BetaManagedAgentsMCPServerStdioDefinition Stdio-based local MCP server connection as returned in API responses.
+type BetaManagedAgentsMCPServerStdioDefinition struct {
+	Args    *[]string                                     `json:"args,omitempty"`
+	Command string                                        `json:"command"`
+	Env     *map[string]string                            `json:"env,omitempty"`
+	Name    string                                        `json:"name"`
+	Type    BetaManagedAgentsMCPServerStdioDefinitionType `json:"type"`
+}
+
+// BetaManagedAgentsMCPServerStdioDefinitionType defines model for BetaManagedAgentsMCPServerStdioDefinition.Type.
+type BetaManagedAgentsMCPServerStdioDefinitionType string
+
 // BetaManagedAgentsMCPServerURLDefinition URL-based MCP server connection as returned in API responses.
 type BetaManagedAgentsMCPServerURLDefinition struct {
 	Name string                                      `json:"name"`
@@ -4032,6 +4074,25 @@ type BetaManagedAgentsURLImageSource struct {
 
 // BetaManagedAgentsURLImageSourceType defines model for BetaManagedAgentsURLImageSource.Type.
 type BetaManagedAgentsURLImageSourceType string
+
+// BetaManagedAgentsStdioMCPServerParams Stdio-based local MCP server connection.
+type BetaManagedAgentsStdioMCPServerParams struct {
+	// Args Arguments passed to the MCP server command.
+	Args *[]string `json:"args,omitempty"`
+
+	// Command Command used to launch the local MCP server process.
+	Command string `json:"command"`
+
+	// Env Non-secret environment variables passed to the MCP server process.
+	Env *map[string]string `json:"env,omitempty"`
+
+	// Name Unique name for this server, referenced by mcp_toolset configurations. 1-255 characters.
+	Name string                                    `json:"name"`
+	Type BetaManagedAgentsStdioMCPServerParamsType `json:"type"`
+}
+
+// BetaManagedAgentsStdioMCPServerParamsType defines model for BetaManagedAgentsStdioMCPServerParams.Type.
+type BetaManagedAgentsStdioMCPServerParamsType string
 
 // BetaManagedAgentsURLMCPServerParams URL-based MCP server connection.
 type BetaManagedAgentsURLMCPServerParams struct {
@@ -7133,6 +7194,34 @@ func (t *BetaManagedAgentsInputEvent) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsBetaManagedAgentsMCPServerStdioDefinition returns the union data inside the BetaManagedAgentsMCPServer as a BetaManagedAgentsMCPServerStdioDefinition
+func (t BetaManagedAgentsMCPServer) AsBetaManagedAgentsMCPServerStdioDefinition() (BetaManagedAgentsMCPServerStdioDefinition, error) {
+	var body BetaManagedAgentsMCPServerStdioDefinition
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBetaManagedAgentsMCPServerStdioDefinition overwrites any union data inside the BetaManagedAgentsMCPServer as the provided BetaManagedAgentsMCPServerStdioDefinition
+func (t *BetaManagedAgentsMCPServer) FromBetaManagedAgentsMCPServerStdioDefinition(v BetaManagedAgentsMCPServerStdioDefinition) error {
+	v.Type = "stdio"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBetaManagedAgentsMCPServerStdioDefinition performs a merge with any union data inside the BetaManagedAgentsMCPServer, using the provided BetaManagedAgentsMCPServerStdioDefinition
+func (t *BetaManagedAgentsMCPServer) MergeBetaManagedAgentsMCPServerStdioDefinition(v BetaManagedAgentsMCPServerStdioDefinition) error {
+	v.Type = "stdio"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBetaManagedAgentsMCPServerURLDefinition returns the union data inside the BetaManagedAgentsMCPServer as a BetaManagedAgentsMCPServerURLDefinition
 func (t BetaManagedAgentsMCPServer) AsBetaManagedAgentsMCPServerURLDefinition() (BetaManagedAgentsMCPServerURLDefinition, error) {
 	var body BetaManagedAgentsMCPServerURLDefinition
@@ -7175,6 +7264,8 @@ func (t BetaManagedAgentsMCPServer) ValueByDiscriminator() (interface{}, error) 
 		return nil, err
 	}
 	switch discriminator {
+	case "stdio":
+		return t.AsBetaManagedAgentsMCPServerStdioDefinition()
 	case "url":
 		return t.AsBetaManagedAgentsMCPServerURLDefinition()
 	default:
@@ -7189,6 +7280,34 @@ func (t BetaManagedAgentsMCPServer) MarshalJSON() ([]byte, error) {
 
 func (t *BetaManagedAgentsMCPServer) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsBetaManagedAgentsStdioMCPServerParams returns the union data inside the BetaManagedAgentsMCPServerParams as a BetaManagedAgentsStdioMCPServerParams
+func (t BetaManagedAgentsMCPServerParams) AsBetaManagedAgentsStdioMCPServerParams() (BetaManagedAgentsStdioMCPServerParams, error) {
+	var body BetaManagedAgentsStdioMCPServerParams
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBetaManagedAgentsStdioMCPServerParams overwrites any union data inside the BetaManagedAgentsMCPServerParams as the provided BetaManagedAgentsStdioMCPServerParams
+func (t *BetaManagedAgentsMCPServerParams) FromBetaManagedAgentsStdioMCPServerParams(v BetaManagedAgentsStdioMCPServerParams) error {
+	v.Type = "stdio"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBetaManagedAgentsStdioMCPServerParams performs a merge with any union data inside the BetaManagedAgentsMCPServerParams, using the provided BetaManagedAgentsStdioMCPServerParams
+func (t *BetaManagedAgentsMCPServerParams) MergeBetaManagedAgentsStdioMCPServerParams(v BetaManagedAgentsStdioMCPServerParams) error {
+	v.Type = "stdio"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -7234,6 +7353,8 @@ func (t BetaManagedAgentsMCPServerParams) ValueByDiscriminator() (interface{}, e
 		return nil, err
 	}
 	switch discriminator {
+	case "stdio":
+		return t.AsBetaManagedAgentsStdioMCPServerParams()
 	case "url":
 		return t.AsBetaManagedAgentsURLMCPServerParams()
 	default:

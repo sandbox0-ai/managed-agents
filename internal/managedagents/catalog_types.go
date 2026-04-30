@@ -618,6 +618,25 @@ func stringSliceValuesToAny(values []string) []any {
 	return out
 }
 
+func stringMapFromAny(raw any) map[string]string {
+	values, ok := raw.(map[string]any)
+	if !ok || len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		trimmedKey := strings.TrimSpace(key)
+		trimmedValue := strings.TrimSpace(stringValue(value))
+		if trimmedKey != "" && trimmedValue != "" {
+			out[trimmedKey] = trimmedValue
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func defaultIfEmpty(value string, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
